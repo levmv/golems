@@ -50,8 +50,7 @@ func (s *Storage) SetSoul(newSoul string) error {
 
 // AppendMessage appends a single JSON object line to the session log.
 func (s *Storage) AppendMessage(key SessionKey, msg Message) error {
-	path := filepath.Join(s.basePath, key.String()+"_messages.jsonl")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(s.messagesFile(key), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
@@ -65,9 +64,8 @@ func (s *Storage) AppendMessage(key SessionKey, msg Message) error {
 // GetActiveContext reads the messages log, skipping lines that have already been compacted.
 func (s *Storage) GetActiveContext(key SessionKey) ([]Message, error) {
 	offset := s.getCheckpoint(key)
-	path := filepath.Join(s.basePath, key.String()+"_messages.jsonl")
 
-	f, err := os.Open(path)
+	f, err := os.Open(s.messagesFile(key))
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -97,13 +95,11 @@ func (s *Storage) GetActiveContext(key SessionKey) ([]Message, error) {
 // IncrementCheckpoint advances the read offset for subsequent cold loads.
 func (s *Storage) IncrementCheckpoint(key SessionKey, added int) error {
 	current := s.getCheckpoint(key)
-	path := filepath.Join(s.basePath, key.String()+"_checkpoint.txt")
-	return os.WriteFile(path, []byte(strconv.Itoa(current+added)), 0644)
+	return os.WriteFile(s.checkpointFile(key), []byte(strconv.Itoa(current+added)), 0644)
 }
 
 func (s *Storage) getCheckpoint(key SessionKey) int {
-	path := filepath.Join(s.basePath, key.String()+"_checkpoint.txt")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(s.checkpointFile(key))
 	if err != nil {
 		return 0
 	}
@@ -112,8 +108,7 @@ func (s *Storage) getCheckpoint(key SessionKey) int {
 }
 
 func (s *Storage) GetSummary(key SessionKey) string {
-	path := filepath.Join(s.basePath, key.String()+"_summary.txt")
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(s.summaryFile(key))
 	if err != nil {
 		return ""
 	}
@@ -121,8 +116,7 @@ func (s *Storage) GetSummary(key SessionKey) string {
 }
 
 func (s *Storage) AppendSummary(key SessionKey, newSummary string) error {
-	path := filepath.Join(s.basePath, key.String()+"_summary.txt")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(s.summaryFile(key), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
@@ -130,4 +124,16 @@ func (s *Storage) AppendSummary(key SessionKey, newSummary string) error {
 
 	_, err = f.WriteString("- " + strings.TrimSpace(newSummary) + "\n")
 	return err
+}
+
+func (s *Storage) messagesFile(key SessionKey) string {
+	return filepath.Join(s.basePath, key.String()+"_messages.jsonl")
+}
+
+func (s *Storage) summaryFile(key SessionKey) string {
+	return filepath.Join(s.basePath, key.String()+"_summary.txt")
+}
+
+func (s *Storage) checkpointFile(key SessionKey) string {
+	return filepath.Join(s.basePath, key.String()+"_checkpoint.txt")
 }
