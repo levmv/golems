@@ -30,7 +30,6 @@ type Engine struct {
 	llm          *llm.Model
 	botName      string
 	systemPrompt string
-	temperature  float32
 	// cancelers maps sessionID -> context.CancelFunc for the currently-running
 	// generation for that session. We store CancelFunc so new requests can
 	// cancel the previous generation quickly.
@@ -41,7 +40,7 @@ type Engine struct {
 	controlChats map[string]string
 }
 
-func NewEngine(registry *SessionRegistry, llmClient *llm.Model, botName string, systemPrompt string, temp float64, controlChats map[string]string) *Engine {
+func NewEngine(registry *SessionRegistry, llmClient *llm.Model, botName string, systemPrompt string, controlChats map[string]string) *Engine {
 	if controlChats == nil {
 		controlChats = make(map[string]string)
 	}
@@ -50,7 +49,6 @@ func NewEngine(registry *SessionRegistry, llmClient *llm.Model, botName string, 
 		llm:          llmClient,
 		botName:      botName,
 		systemPrompt: systemPrompt,
-		temperature:  float32(temp),
 		gateways:     make(map[string]Gateway),
 		controlChats: controlChats,
 	}
@@ -60,7 +58,7 @@ func (e *Engine) RegisterGateway(platform string, gw Gateway) {
 	e.gateways[platform] = gw
 }
 
-// ProcessMessageSync accepts a user's input, persists it into the session, and
+// ProcessMessage accepts a user's input, persists it into the session, and
 // synchronously generates a complete response from the LLM.
 // It implements per-session debounce (cancels previous ongoing generation when
 // a new message for the same session arrives).
@@ -85,8 +83,7 @@ func (e *Engine) ProcessMessage(ctx context.Context, key SessionKey, userMsg Mes
 	reqMessages := session.GetPrompt(e.systemPrompt)
 
 	resp, err := e.llm.Chat(reqCtx, llm.Request{
-		Messages:    reqMessages,
-		Temperature: &e.temperature,
+		Messages: reqMessages,
 	})
 	if err != nil {
 		return "", err

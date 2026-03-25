@@ -17,14 +17,13 @@ import (
 )
 
 type TelegramGateway struct {
-	botCfg BotConfig
 	engine *Engine
 	tgBot  *telegram.Bot
 }
 
 // StartTelegramBot initializes the bot, returning an http.Handler for webhooks
 // or starting a background polling loop if no URL is provided.
-func StartTelegramBot(ctx context.Context, botCfg BotConfig, eng *Engine, webhookURL string) (*TelegramGateway, http.Handler, error) {
+func StartTelegramBot(ctx context.Context, tgCfg *TelegramConfig, eng *Engine, webhookURL string) (*TelegramGateway, http.Handler, error) {
 	secret := generateSecret()
 
 	authMiddleware := func(c *telegram.Context) (bool, string) {
@@ -35,7 +34,7 @@ func StartTelegramBot(ctx context.Context, botCfg BotConfig, eng *Engine, webhoo
 		userIDStr := strconv.FormatInt(c.SenderID, 10)
 		chatIDStr := strconv.FormatInt(c.ChatID, 10)
 
-		if slices.Contains(botCfg.AllowedUsers, userIDStr) || slices.Contains(botCfg.AllowedUsers, chatIDStr) {
+		if slices.Contains(tgCfg.AllowedUsers, userIDStr) || slices.Contains(tgCfg.AllowedUsers, chatIDStr) {
 			return true, "whitelisted"
 		}
 		if strings.HasPrefix(c.Update.Message.Text, "/start") {
@@ -45,7 +44,7 @@ func StartTelegramBot(ctx context.Context, botCfg BotConfig, eng *Engine, webhoo
 	}
 
 	tgBot, err := telegram.New(
-		botCfg.TelegramToken,
+		tgCfg.Token,
 		secret,
 		telegram.WithLogger(Log),
 		telegram.WithAuthFunc(authMiddleware),
@@ -54,11 +53,11 @@ func StartTelegramBot(ctx context.Context, botCfg BotConfig, eng *Engine, webhoo
 		return nil, nil, err
 	}
 
-	gw := &TelegramGateway{botCfg: botCfg, engine: eng, tgBot: tgBot}
+	gw := &TelegramGateway{engine: eng, tgBot: tgBot}
 	gw.tgBot.OnText(gw.handleMessage)
 
 	if webhookURL != "" {
-		Log.Info("[%s] Setting Webhook to: %s", botCfg.Name, webhookURL)
+		Log.Info("Setting Webhook to: %s", webhookURL)
 		_, err = gw.tgBot.SetWebhook(ctx, &telegram.SetWebhookParams{
 			URL:         webhookURL,
 			SecretToken: secret,
@@ -70,7 +69,7 @@ func StartTelegramBot(ctx context.Context, botCfg BotConfig, eng *Engine, webhoo
 		return gw, gw.tgBot.WebhookHandler(), nil
 	}
 
-	Log.Info("[%s] Starting Polling (No Webhook URL provided)", botCfg.Name)
+	Log.Info("Starting Polling (No Webhook URL provided)")
 	go gw.tgBot.StartPolling(ctx)
 
 	return gw, nil, nil

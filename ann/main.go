@@ -18,6 +18,11 @@ import (
 	"github.com/levmv/golems/pkg/logger"
 )
 
+type TelegramConfig struct {
+	Token        string   `json:"token"`
+	AllowedUsers []string `json:"allowed_users"`
+}
+
 type BotConfig struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -26,8 +31,7 @@ type BotConfig struct {
 	SystemPrompt string  `json:"system_prompt"`
 	Temperature  float64 `json:"temperature"`
 
-	TelegramToken string   `json:"telegram_token"`
-	AllowedUsers  []string `json:"allowed_users"`
+	Telegram *TelegramConfig `json:"telegram,omitempty"`
 	// Map: target chat ID -> admin/control channel ID
 	ControlChats map[string]string `json:"control_chats"`
 }
@@ -51,13 +55,15 @@ func startBot(ctx context.Context, cfg BotConfig, r *llm.Registry, dataDir strin
 		Log.Error("Failed to init model %s: %v", cfg.Model, err)
 		return
 	}
-	model = model.WithRetries(2, time.Second)
+	model = model.
+		WithRetries(2, time.Second).
+		WithTemperature(float32(cfg.Temperature))
 
 	storage := NewStorage(filepath.Join(dataDir, cfg.ID))
 	registry := NewSessionRegistry(storage, &model)
-	engine := NewEngine(registry, &model, cfg.Name, cfg.SystemPrompt, cfg.Temperature, cfg.ControlChats)
+	engine := NewEngine(registry, &model, cfg.Name, cfg.SystemPrompt, cfg.ControlChats)
 
-	if cfg.TelegramToken != "" {
+	if cfg.Telegram != nil {
 		var webhookURL, webhookPath string
 		if baseWebhookURL != nil {
 			u := baseWebhookURL.JoinPath(cfg.ID)
@@ -65,7 +71,7 @@ func startBot(ctx context.Context, cfg BotConfig, r *llm.Registry, dataDir strin
 			webhookPath = u.Path
 		}
 
-		tgGateway, handler, err := StartTelegramBot(ctx, cfg, engine, webhookURL)
+		tgGateway, handler, err := StartTelegramBot(ctx, cfg.Telegram, engine, webhookURL)
 		if err != nil {
 			Log.Error("Failed to start Telegram gateway for bot %s: %v", cfg.ID, err)
 			return
