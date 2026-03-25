@@ -45,6 +45,42 @@ func LoadConfig(path string) ([]BotConfig, error) {
 	return bots, nil
 }
 
+func startBot(ctx context.Context, cfg BotConfig, r *llm.Registry, dataDir string, baseWebhookURL *url.URL, mux *http.ServeMux) {
+	model, err := r.Model(cfg.Model)
+	if err != nil {
+		Log.Error("Failed to init model %s: %v", cfg.Model, err)
+		return
+	}
+	model = model.WithRetries(2, time.Second)
+
+	storage := NewStorage(filepath.Join(dataDir, cfg.ID))
+	registry := NewSessionRegistry(storage, &model)
+	engine := NewEngine(registry, &model, cfg.Name, cfg.SystemPrompt, cfg.Temperature, cfg.ControlChats)
+
+	if cfg.TelegramToken != "" {
+		var webhookURL, webhookPath string
+		if baseWebhookURL != nil {
+			u := baseWebhookURL.JoinPath(cfg.ID)
+			webhookURL = u.String()
+			webhookPath = u.Path
+		}
+
+		tgGateway, handler, err := StartTelegramBot(ctx, cfg, engine, webhookURL)
+		if err != nil {
+			Log.Error("Failed to start Telegram gateway for bot %s: %v", cfg.ID, err)
+			return
+		}
+
+		engine.RegisterGateway("tg", tgGateway)
+		if handler != nil {
+			mux.Handle(webhookPath, handler)
+		}
+		Log.Info("Telegram gateway started for %s", cfg.ID)
+	}
+
+	go engine.StartBackgroundObserver(ctx)
+}
+
 var Log = logger.Default()
 
 func main() {
@@ -85,45 +121,7 @@ func main() {
 		WithProvider("openrouter", os.Getenv("OPENROUTER_API_KEY"))
 
 	for _, botCfg := range bots {
-		model, err := r.Model(botCfg.Model)
-		if err != nil {
-			Log.Error("Failed to init model: %s", err)
-			continue
-		}
-		model = model.WithRetries(2, time.Second)
-
-		botStorage := NewStorage(filepath.Join(dataDir, botCfg.ID))
-		botRegistry := NewSessionRegistry(botStorage, &model)
-		botEngine := NewEngine(
-			botRegistry,
-			&model,
-			botCfg.Name,
-			botCfg.SystemPrompt,
-			botCfg.Temperature,
-			botCfg.ControlChats,
-		)
-
-		if botCfg.TelegramToken != "" {
-			var webhookURL, webhookPath string
-			if baseWebhookURL != nil {
-				url := baseWebhookURL.JoinPath(botCfg.ID)
-				webhookURL = url.String()
-				webhookPath = url.Path
-			}
-
-			tgGateway, handler, err := StartTelegramBot(ctx, botCfg, botEngine, webhookURL)
-			if err != nil {
-				Log.Error("Failed to start Telegram gateway for bot %s: %v", botCfg.ID, err)
-			} else {
-				botEngine.RegisterGateway("tg", tgGateway)
-
-				if handler != nil {
-					mux.Handle(webhookPath, handler)
-				}
-				Log.Info("Telegram gateway started for %s", botCfg.ID)
-			}
-		}
-		go botEngine.StartBackgroundObserver(ctx)
+		startBot(ctx, botCfg, r, dataDir, baseWebhookURL, mux)
 	}
 
 	var srv *http.Server
