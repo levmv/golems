@@ -219,41 +219,30 @@ func (e *Engine) addMessage(session *Session, msg Message) error {
 	return nil
 }
 
-// sendReasoningToControl formats and routes reasoning logs if a control channel is configured.
-func (e *Engine) sendReasoningToControl(sKey SessionKey, reasoning string, usage llm.Usage) {
-	targetChatID, ok := e.controlChats[sKey.ChatID]
-	if !ok || reasoning == "" {
+func (e *Engine) notifyControlChat(sKey SessionKey, message string) {
+	if message == "" {
 		return
 	}
-
+	targetChatID, ok := e.controlChats[sKey.ChatID]
+	if !ok {
+		return
+	}
 	gw, exists := e.gateways[sKey.Platform]
 	if !exists {
 		return
 	}
+	targetKey := SessionKey{Platform: sKey.Platform, Type: SessionTypeGroup, ChatID: targetChatID}
+	go gw.Send(context.Background(), targetKey, message)
+}
 
+// sendReasoningToControl formats and routes reasoning logs if a control channel is configured.
+func (e *Engine) sendReasoningToControl(sKey SessionKey, reasoning string, usage llm.Usage) {
 	stats := fmt.Sprintf("Tokens: %d (Prompt: %d, Cached: %d, Completion: %d)",
 		usage.TotalTokens, usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
-
-	msg := fmt.Sprintf("%s\n\n📊 %s", reasoning, stats)
-
-	targetKey := SessionKey{Platform: sKey.Platform, Type: SessionTypeGroup, ChatID: targetChatID}
-	go gw.Send(context.Background(), targetKey, msg)
+	e.notifyControlChat(sKey, fmt.Sprintf("%s\n\n📊 %s", reasoning, stats))
 }
 
 // sendSoulUpdateToControl formats and routes soul evolution logs.
 func (e *Engine) sendSoulUpdateToControl(sKey SessionKey, newSoul string) {
-	targetChatID, ok := e.controlChats[sKey.ChatID]
-	if !ok || newSoul == "" {
-		return
-	}
-
-	gw, exists := e.gateways[sKey.Platform]
-	if !exists {
-		return
-	}
-
-	msg := fmt.Sprintf("👻 [Soul updated]\n\n%s", newSoul)
-
-	targetKey := SessionKey{Platform: sKey.Platform, Type: SessionTypeGroup, ChatID: targetChatID}
-	go gw.Send(context.Background(), targetKey, msg)
+	e.notifyControlChat(sKey, fmt.Sprintf("👻 [Soul updated]\n\n%s", newSoul))
 }
