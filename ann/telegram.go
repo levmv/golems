@@ -109,23 +109,13 @@ func (g *TelegramGateway) handleMessage(ctx *telegram.Context) error {
 }
 
 func (g *TelegramGateway) handlePrivateMessage(ctx *telegram.Context) error {
-	msg := ctx.Update.Message
-
 	sKey := SessionKey{
 		Platform: "tg",
 		Type:     SessionTypePrivate,
 		ChatID:   strconv.FormatInt(ctx.ChatID, 10),
 	}
 
-	userMsg := Message{
-		Role:      llm.RoleUser,
-		Content:   msg.Text,
-		Name:      extractSenderName(msg.From),
-		Timestamp: time.Unix(int64(msg.Date), 0),
-		ReplyTo:   extractReplyInfo(msg.ReplyToMessage),
-	}
-
-	return g.executeBotReply(ctx, sKey, userMsg)
+	return g.executeBotReply(ctx, sKey, extractUserMessage(ctx.Update.Message))
 }
 
 func (g *TelegramGateway) handleGroupMessage(ctx *telegram.Context) error {
@@ -137,14 +127,7 @@ func (g *TelegramGateway) handleGroupMessage(ctx *telegram.Context) error {
 		Type:     SessionTypeGroup,
 		ChatID:   chatIDStr,
 	}
-
-	userMsg := Message{
-		Role:      llm.RoleUser,
-		Content:   msg.Text,
-		Name:      extractSenderName(msg.From),
-		Timestamp: time.Unix(int64(msg.Date), 0),
-		ReplyTo:   extractReplyInfo(msg.ReplyToMessage),
-	}
+	userMsg := extractUserMessage(msg)
 
 	botUsername := g.tgBot.Me.Username
 	botID := g.tgBot.Me.ID
@@ -190,6 +173,16 @@ func (g *TelegramGateway) executeBotReply(ctx *telegram.Context, sKey SessionKey
 		return err
 	}
 	return nil
+}
+
+func extractUserMessage(msg *telegram.Message) Message {
+	return Message{
+		Role:      llm.RoleUser,
+		Content:   msg.Text,
+		Name:      extractSenderName(msg.From),
+		Timestamp: time.Unix(int64(msg.Date), 0),
+		ReplyTo:   extractReplyInfo(msg.ReplyToMessage),
+	}
 }
 
 // extractSenderName returns the best available name from a Telegram User.
