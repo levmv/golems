@@ -1,0 +1,18 @@
+[Unit]
+Description=Abot Service
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+
+ExecStart=/usr/local/bin/abot 
+Restart=always
+EnvironmentFile=/etc/golems/abot.env 
+
+PrivateTmp=true  
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

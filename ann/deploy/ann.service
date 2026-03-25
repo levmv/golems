@@ -1,0 +1,22 @@
+[Unit]
+Description=Ann LLM Bot
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=golems/ann
+
+ExecStart=/usr/local/bin/ann -config /etc/golems/ann.json
+Restart=always
+RestartSec=5
+
+EnvironmentFile=/etc/golems/ann.env 
+Environment="DATA_DIR=/var/lib/golems/ann"
+
+PrivateTmp=true  
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

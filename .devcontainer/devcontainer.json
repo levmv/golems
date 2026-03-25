@@ -1,0 +1,21 @@
+{
+	"name": "Go",
+	"image": "mcr.microsoft.com/devcontainers/go:2.0.3-bookworm",
+
+	"runArgs": ["--network=host", "--tz=local"],
+	//"runArgs": ["--userns=keep-id"],
+	"containerUser": "vscode",
+	"features": {
+		"ghcr.io/devcontainers/features/node:1": {}
+	},
+	"mounts": [
+		{
+		"source": "${localEnv:HOME}/.ssh/config",
+		"target": "/home/vscode/.ssh/config",
+		"type": "bind"
+		}
+	],
+	"postCreateCommand": "sudo chown -R $(whoami) ~/.ssh && chmod 700 ~/.ssh"
+}
+
+
