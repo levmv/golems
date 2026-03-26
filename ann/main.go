@@ -49,7 +49,22 @@ func LoadConfig(path string) ([]BotConfig, error) {
 	return bots, nil
 }
 
-func startBot(ctx context.Context, cfg BotConfig, r *llm.Registry, dataDir string, baseWebhookURL *url.URL, mux *http.ServeMux) {
+func getWebhookConfig(botID string) (fullURL string, path string, err error) {
+	rawBaseURL := os.Getenv("WEBHOOK_BASE_URL")
+	if rawBaseURL == "" {
+		return "", "", nil
+	}
+
+	parsed, err := url.Parse(rawBaseURL)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid WEBHOOK_BASE_URL: %w", err)
+	}
+
+	u := parsed.JoinPath(botID)
+	return u.String(), u.Path, nil
+}
+
+func startBot(ctx context.Context, cfg BotConfig, r *llm.Registry, dataDir string, mux *http.ServeMux) {
 	model, err := r.Model(cfg.Model)
 	if err != nil {
 		Log.Error("Failed to init model %s: %v", cfg.Model, err)
@@ -64,12 +79,7 @@ func startBot(ctx context.Context, cfg BotConfig, r *llm.Registry, dataDir strin
 	engine := NewEngine(registry, &model, cfg.Name, cfg.SystemPrompt, cfg.ControlChats)
 
 	if cfg.Telegram != nil {
-		var webhookURL, webhookPath string
-		if baseWebhookURL != nil {
-			u := baseWebhookURL.JoinPath(cfg.ID)
-			webhookURL = u.String()
-			webhookPath = u.Path
-		}
+		webhookURL, webhookPath, err := getWebhookConfig(cfg.ID)
 
 		tgGateway, handler, err := StartTelegramBot(ctx, cfg.Telegram, engine, webhookURL)
 		if err != nil {
@@ -111,27 +121,16 @@ func main() {
 	dataDir := cmp.Or(os.Getenv("DATA_DIR"), "bots")
 	mux := http.NewServeMux()
 
-	rawBaseURL := os.Getenv("WEBHOOK_BASE_URL")
-	var baseWebhookURL *url.URL
-
-	if rawBaseURL != "" {
-		baseWebhookURL, err = url.Parse(rawBaseURL)
-		if err != nil {
-			Log.Error("Invalid WEBHOOK_BASE_URL configuration: %v", err)
-			os.Exit(1)
-		}
-	}
-
 	r := llm.NewRegistry().
 		WithProvider("deepseek", os.Getenv("DEEPSEEK_API_KEY")).
 		WithProvider("openrouter", os.Getenv("OPENROUTER_API_KEY"))
 
 	for _, botCfg := range bots {
-		startBot(ctx, botCfg, r, dataDir, baseWebhookURL, mux)
+		startBot(ctx, botCfg, r, dataDir, mux)
 	}
 
 	var srv *http.Server
-	if baseWebhookURL != nil {
+	if os.Getenv("WEBHOOK_BASE_URL") != "" {
 		listenAddr := ":" + cmp.Or(os.Getenv("PORT"), "8443")
 		srv = &http.Server{Addr: listenAddr, Handler: mux}
 
