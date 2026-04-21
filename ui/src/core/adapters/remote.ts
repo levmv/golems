@@ -4,7 +4,7 @@ export class RemoteStorageAdapter implements StorageAdapter {
 	constructor(
 		private baseUrl: string,
 		private getToken: () => string | null,
-	) { }
+	) {}
 
 	private get headers() {
 		const token = this.getToken();

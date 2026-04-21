@@ -4,46 +4,46 @@ export type JsonValue = string | number | boolean | null | { [key: string]: Json
 
 export type ContentBlock =
 	| {
-			id: string;
-			type: "text";
-			text: string;
-	  }
+		id: string;
+		type: "text";
+		text: string;
+	}
 	| {
-			id: string;
-			type: "reasoning";
-			text: string;
-			encrypted?: boolean;
-	  }
+		id: string;
+		type: "reasoning";
+		text: string;
+		encrypted?: boolean;
+	}
 	| {
-			id: string;
-			type: "tool_call";
-			toolCallId: string;
-			name: string;
-			argsText: string;
-			status: "streaming" | "pending" | "running" | "complete" | "error";
-	  }
+		id: string;
+		type: "tool_call";
+		toolCallId: string;
+		name: string;
+		argsText: string;
+		status: "streaming" | "pending" | "running" | "complete" | "error";
+	}
 	| {
-			id: string;
-			type: "tool_result";
-			toolCallId: string;
-			outputText: string;
-			isError?: boolean;
-	  }
+		id: string;
+		type: "tool_result";
+		toolCallId: string;
+		outputText: string;
+		isError?: boolean;
+	}
 	| {
-			id: string;
-			type: "artifact";
-			artifactId: string;
-			mime: string;
-			title?: string;
-			content: string;
-	  }
+		id: string;
+		type: "artifact";
+		artifactId: string;
+		mime: string;
+		title?: string;
+		content: string;
+	}
 	| {
-			id: string;
-			type: "file";
-			mimeType: string;
-			name?: string;
-			data: string;
-	  };
+		id: string;
+		type: "file";
+		mimeType: string;
+		name?: string;
+		data: string;
+	};
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
@@ -63,62 +63,62 @@ export type FinishReason = "stop" | "length" | "tool_use" | "content_filter" | "
 
 export type StreamEvent =
 	| {
-			type: "message_start";
-			message: Message;
-	  }
+		type: "message_start";
+		message: Message;
+	}
 	| {
-			type: "text_delta";
-			messageId: string;
-			blockId: string;
-			delta: string;
-	  }
+		type: "text_delta";
+		messageId: string;
+		blockId: string;
+		delta: string;
+	}
 	| {
-			type: "reasoning_delta";
-			messageId: string;
-			blockId: string;
-			delta: string;
-			encrypted?: boolean;
-	  }
+		type: "reasoning_delta";
+		messageId: string;
+		blockId: string;
+		delta: string;
+		encrypted?: boolean;
+	}
 	| {
-			type: "tool_call_start";
-			messageId: string;
-			block: Extract<ContentBlock, { type: "tool_call" }>;
-	  }
+		type: "tool_call_start";
+		messageId: string;
+		block: Extract<ContentBlock, { type: "tool_call" }>;
+	}
 	| {
-			type: "tool_call_delta";
-			messageId: string;
-			blockId: string;
-			name?: string;
-			argsDelta?: string;
-			status?: Extract<ContentBlock, { type: "tool_call" }>["status"];
-	  }
+		type: "tool_call_delta";
+		messageId: string;
+		blockId: string;
+		name?: string;
+		argsDelta?: string;
+		status?: Extract<ContentBlock, { type: "tool_call" }>["status"];
+	}
 	| {
-			type: "tool_result";
-			messageId: string;
-			block: Extract<ContentBlock, { type: "tool_result" }>;
-	  }
+		type: "tool_result";
+		messageId: string;
+		block: Extract<ContentBlock, { type: "tool_result" }>;
+	}
 	| {
-			type: "artifact";
-			messageId: string;
-			block: Extract<ContentBlock, { type: "artifact" }>;
-	  }
+		type: "artifact";
+		messageId: string;
+		block: Extract<ContentBlock, { type: "artifact" }>;
+	}
 	| {
-			type: "usage";
-			input: number;
-			output: number;
-			cacheRead?: number;
-			cacheWrite?: number;
-	  }
+		type: "usage";
+		input: number;
+		output: number;
+		cacheRead?: number;
+		cacheWrite?: number;
+	}
 	| {
-			type: "error";
-			message: string;
-			code?: string;
-			retryable?: boolean;
-	  }
+		type: "error";
+		message: string;
+		code?: string;
+		retryable?: boolean;
+	}
 	| {
-			type: "finish";
-			reason: FinishReason;
-	  };
+		type: "finish";
+		reason: FinishReason;
+	};
 
 export interface ChatSessionMeta {
 	id: string;
@@ -143,9 +143,9 @@ export interface ChatState {
 	hasMoreSessions: boolean;
 	currentSessionId: string;
 	messages: Message[];
-	isGenerating: boolean;
+	generatingMessageId: string | null;
 	isLoadingSession: boolean;
-	error: string | null;
+	error: { message: string; id?: string } | null;
 }
 
 export interface StorageAdapter {
@@ -163,7 +163,7 @@ export interface RequestOptions {
 	temperature?: number;
 	top_p?: number;
 	max_tokens?: number;
-	tools?: any[];
+	tools?: Record<string, unknown>[];
 	stream_options?: Record<string, unknown>;
 	[key: string]: unknown;
 }

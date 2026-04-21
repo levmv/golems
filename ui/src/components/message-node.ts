@@ -40,11 +40,11 @@ export class MessageNode {
 		this.el.appendChild(this.blocksContainer);
 	}
 
-	public update(msg: Message, isLast: boolean, isGenerating: boolean, error: string | null) {
-		this.renderLoading(msg);
-		this.renderBlocks(msg, isGenerating, isLast);
-		this.renderActions(msg, isGenerating, isLast);
-		this.renderError(isLast ? error : null);
+	public update(msg: Message, isGenerating: boolean, error: string | null) {
+		this.renderLoading(msg, isGenerating, error);
+		this.renderBlocks(msg, isGenerating);
+		this.renderActions(msg, isGenerating);
+		this.renderError(error);
 
 		for (const plugin of this.config.plugins) {
 			if (plugin.onMessageRender) {
@@ -61,8 +61,9 @@ export class MessageNode {
 		this.el.remove();
 	}
 
-	private renderLoading(msg: Message) {
-		const isLoading = msg.role === "assistant" && msg.blocks.length === 0;
+	private renderLoading(msg: Message, isGenerating: boolean, error: string | null) {
+		// Only show loading dots if actively generating, has no blocks, and hasn't crashed.
+		const isLoading = isGenerating && !error && msg.role === "assistant" && msg.blocks.length === 0;
 
 		if (isLoading) {
 			if (!this.loadingEl) {
@@ -77,7 +78,7 @@ export class MessageNode {
 		}
 	}
 
-	private renderBlocks(msg: Message, isGenerating: boolean, isLastMessage: boolean) {
+	private renderBlocks(msg: Message, isGenerating: boolean) {
 		const currentBlockIds = new Set<string>();
 
 		// 1. Create or update blocks
@@ -101,7 +102,7 @@ export class MessageNode {
 			}
 
 			if (block.type === "text") {
-				this.renderTextBlock(block, container, isGenerating, isLastMessage && isLastBlock);
+				this.renderTextBlock(block, container, isGenerating, isLastBlock);
 			} else if (block.type === "file") {
 				this.renderFileBlock(block, container);
 			} else if (block.type === "tool_call") {
@@ -201,7 +202,7 @@ export class MessageNode {
 		}
 	}
 
-	private renderActions(msg: Message, isGenerating: boolean, isLast: boolean) {
+	private renderActions(msg: Message, isGenerating: boolean) {
 		if (msg.role !== "assistant") return;
 
 		if (!this.actionsEl) {
@@ -230,8 +231,7 @@ export class MessageNode {
 			this.el.appendChild(this.actionsEl);
 		}
 
-		const isActivelyTyping = isGenerating && isLast;
-		const targetDisplay = isActivelyTyping ? "none" : "flex";
+		const targetDisplay = isGenerating ? "none" : "flex";
 
 		if (this.cacheActionDisplay !== targetDisplay) {
 			this.actionsEl.style.display = targetDisplay;

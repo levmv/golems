@@ -226,15 +226,17 @@ export class ChatUI {
 				this.router.setUrl(targetId, isErrorFallback);
 			}
 
-			const generationStarted = !prevIsGenerating && state.isGenerating;
+			const isGenerating = state.generatingMessageId !== null;
+			const generationStarted = !prevIsGenerating && isGenerating;
+
 			this.feedComponent.update(
 				state.messages,
-				state.isGenerating,
+				state.generatingMessageId,
 				state.isLoadingSession,
 				generationStarted,
 				state.error,
 			);
-			prevIsGenerating = state.isGenerating;
+			prevIsGenerating = isGenerating;
 		});
 
 		this.chat.store.subscribe(
@@ -245,7 +247,7 @@ export class ChatUI {
 		);
 
 		this.chat.store.subscribe(
-			(state) => (state.isGenerating ? 2 : 0) | (state.isLoadingSession ? 1 : 0),
+			(state) => (state.generatingMessageId ? 2 : 0) | (state.isLoadingSession ? 1 : 0),
 			(bits) => {
 				const isGenerating = !!(bits & 2);
 				const isLoadingSession = !!(bits & 1);

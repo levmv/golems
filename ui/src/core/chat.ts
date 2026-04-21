@@ -1,4 +1,3 @@
-// src/core/chat.ts
 import { uuidv7 } from "../utils/uuid";
 import { extractPlainText } from "./msg-utils";
 import { Store } from "./store";
@@ -42,7 +41,7 @@ export class LLMChat {
 			hasMoreSessions: false,
 			currentSessionId: startingId,
 			messages: [],
-			isGenerating: false,
+			generatingMessageId: null,
 			isLoadingSession: true,
 			error: null,
 		});
@@ -59,7 +58,7 @@ export class LLMChat {
 	}
 
 	private get isBusy() {
-		return this.store.get().isGenerating;
+		return this.store.get().generatingMessageId !== null;
 	}
 
 	public setProvider(newProvider: ProviderAdapter) {
@@ -138,7 +137,7 @@ export class LLMChat {
 			this.store.set({
 				messages: [],
 				isLoadingSession: false,
-				error: "Failed to load chat.",
+				error: { message: "Failed to load chat." },
 			});
 		}
 	}
@@ -164,8 +163,7 @@ export class LLMChat {
 	public async sendMessage(content: string) {
 		if (this.isBusy) return;
 
-		// If the previous request failed and left a dead, empty assistant message, remove it.
-		const currentMessages = this.pruneDeadMessages(this.state.messages);
+		const currentMessages = this.state.messages;
 
 		const userMsg: Message = {
 			id: uuidv7(),
@@ -194,10 +192,13 @@ export class LLMChat {
 		// and update the edited message itself
 		const updatedMessages = currentMessages.slice(0, targetIndex + 1);
 
-		// Overwrite the message blocks with just the new text block
+		// Preserve non-text blocks (like images/files) and append the edited text
+		const preservedBlocks = updatedMessages[targetIndex].blocks.filter((b) => b.type !== "text");
+		const newTextBlock = newContent ? [{ id: uuidv7(), type: "text" as const, text: newContent }] : [];
+
 		updatedMessages[targetIndex] = {
 			...updatedMessages[targetIndex],
-			blocks: newContent ? [{ id: uuidv7(), type: "text", text: newContent }] : [],
+			blocks: [...preservedBlocks, ...newTextBlock],
 		};
 
 		this.startStreamingResponse(updatedMessages);
@@ -223,7 +224,7 @@ export class LLMChat {
 			console.error("Storage Error during init:", error);
 			this.store.set({
 				isLoadingSession: false,
-				error: "Failed to load history. Chatting in memory mode.",
+				error: { message: "Failed to load history. Chatting in memory mode." },
 			});
 		}
 	}
@@ -280,12 +281,19 @@ export class LLMChat {
 
 		this.store.set({
 			messages: updatedMessages,
-			isGenerating: true,
+			generatingMessageId: pendingId,
 			error: null,
 		});
 
+		// Strip out dead UI messages and ephemeral local messages
+		const validContext = contextMessages.filter((msg) => {
+			if (msg.meta?.ephemeral) return false;
+			if (msg.role === "assistant" && msg.blocks.length === 0) return false;
+			return true;
+		});
+
 		let payloadParams: ChatRequestParams = {
-			messages: contextMessages.map((m) => ({ ...m })),
+			messages: validContext.map((m) => ({ ...m })),
 			options: {},
 		};
 
@@ -375,22 +383,22 @@ export class LLMChat {
 
 				// Usage, finish, error handled mostly outside mutation or discarded
 				case "error":
-					state.error = event.message;
+					state.error = { message: event.message, id: pendingId };
 					break;
 			}
 		});
 	}
 
 	private async finalizeStream(opts: { error?: Error; wasAborted?: boolean; reason?: FinishReason }) {
-		if (!this.isBusy) return;
-		this.store.set({ isGenerating: false });
+		const pendingId = this.state.generatingMessageId;
+		if (!pendingId) return;
+
+		this.store.set({ generatingMessageId: null });
 
 		try {
 			if (opts.error) {
-				const updatedMessages = this.pruneDeadMessages(this.state.messages);
 				this.store.set({
-					error: opts.error.message,
-					messages: updatedMessages,
+					error: { message: opts.error.message, id: pendingId },
 				});
 			}
 
@@ -425,7 +433,7 @@ export class LLMChat {
 			if (text.trim().length > 0) {
 				title = text.length > 30 ? text.slice(0, 30) + "..." : text;
 			} else if (firstMsg.blocks.some((b) => b.type === "file")) {
-				const fileBlock = firstMsg.blocks.find((b) => b.type === "file") as any;
+				const fileBlock = firstMsg.blocks.find((b) => b.type === "file") as Extract<ContentBlock, { type: "file" }>;
 				title = `File: ${fileBlock.name || "Upload"}`;
 			} else {
 				title = "New Chat";

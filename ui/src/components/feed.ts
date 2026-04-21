@@ -43,10 +43,10 @@ export class Feed {
 
 	public update(
 		messages: Message[],
-		isGenerating: boolean,
+		generatingMessageId: string | null,
 		isLoadingSession: boolean,
 		generationStarted: boolean,
-		error: string | null = null,
+		error: { message: string; id?: string } | null = null,
 	) {
 		this.spinnerEl.style.display = isLoadingSession ? "flex" : "none";
 
@@ -67,7 +67,11 @@ export class Feed {
 
 		for (let i = 0; i < messages.length; i++) {
 			const msg = messages[i];
-			const isLast = i === messages.length - 1;
+
+			const isGenerating = msg.id === generatingMessageId;
+			const isTargetOfError = error && error.id === msg.id;
+			const isImplicitErrorTarget = error && !error.id && i === messages.length - 1;
+			const targetError = isTargetOfError || isImplicitErrorTarget ? error.message : null;
 
 			let node = this.nodes.get(msg.id);
 
@@ -81,7 +85,7 @@ export class Feed {
 				this.historyContainer.insertBefore(node.el, this.historyContainer.children[i]);
 			}
 
-			node.update(msg, isLast, isGenerating, isLast ? error : null);
+			node.update(msg, isGenerating, targetError);
 		}
 
 		// Cleanup removed messages
@@ -97,7 +101,7 @@ export class Feed {
 
 		requestAnimationFrame(() => {
 			if (this.isStickyToBottom && !this.isDestroyed) {
-				this.scrollToBottom(isGenerating ? "auto" : "smooth");
+				this.scrollToBottom(generatingMessageId !== null ? "auto" : "smooth");
 			}
 		});
 	}

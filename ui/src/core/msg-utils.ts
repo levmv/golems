@@ -29,6 +29,6 @@ export function getDisplayReasoning(msg: Message): string {
 export function extractPlainText(msg: Message): string {
 	return msg.blocks
 		.filter((b) => b.type === "text")
-		.map((b) => (b.type === "text" ? b.text : ""))
+		.map((b) => b.text)
 		.join("\n\n");
 }

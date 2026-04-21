@@ -1,6 +1,24 @@
 import { parseSSE } from "../../utils/sse";
 import { uuidv7 } from "../../utils/uuid";
-import type { ContentBlock, Message, ProviderAdapter, RequestOptions, StreamEvent } from "../types";
+import type { ContentBlock, FinishReason, Message, ProviderAdapter, RequestOptions, StreamEvent } from "../types";
+
+type OpenAIStreamDelta = {
+	content?: string | null;
+	tool_calls?: Array<{
+		index: number;
+		id?: string;
+		type?: string;
+		function?: {
+			name?: string;
+			arguments?: string;
+		};
+	}>;
+	reasoning?: string | { encrypted?: string };
+	reasoning_encrypted?: string;
+	reasoning_content?: string;
+	reasoning_text?: string;
+	[key: string]: unknown;
+};
 
 export class OpenAIAdapter implements ProviderAdapter {
 	private abortController: AbortController | null = null;
@@ -9,7 +27,7 @@ export class OpenAIAdapter implements ProviderAdapter {
 		private apiKey: string,
 		private endpoint: string,
 		private model: string,
-	) { }
+	) {}
 
 	async streamChat(messages: Message[], options: RequestOptions, onEvent: (event: StreamEvent) => void): Promise<void> {
 		this.abortController = new AbortController();
@@ -63,7 +81,7 @@ export class OpenAIAdapter implements ProviderAdapter {
 						messageStarted = true;
 					}
 
-					const delta = choice.delta ?? {};
+					const delta: OpenAIStreamDelta = choice.delta ?? {};
 
 					// 2. Handle Reasoning
 					const reasoningData = this.extractReasoning(delta);
@@ -129,7 +147,7 @@ export class OpenAIAdapter implements ProviderAdapter {
 
 					// 5. Handle Finish Reason
 					if (choice.finish_reason) {
-						const reasonMap: Record<string, any> = {
+						const reasonMap: Record<string, FinishReason> = {
 							stop: "stop",
 							length: "length",
 							tool_calls: "tool_use",
@@ -201,8 +219,14 @@ export class OpenAIAdapter implements ProviderAdapter {
 
 	private formatMessages(messages: Message[]) {
 		return messages.map((msg) => {
-			const toolResults = msg.blocks.filter((b) => b.type === "tool_result") as Extract<ContentBlock, { type: "tool_result" }>[];
-			const toolCalls = msg.blocks.filter((b) => b.type === "tool_call") as Extract<ContentBlock, { type: "tool_call" }>[];
+			const toolResults = msg.blocks.filter((b) => b.type === "tool_result") as Extract<
+				ContentBlock,
+				{ type: "tool_result" }
+			>[];
+			const toolCalls = msg.blocks.filter((b) => b.type === "tool_call") as Extract<
+				ContentBlock,
+				{ type: "tool_call" }
+			>[];
 
 			if (msg.role === "tool" && toolResults.length > 0) {
 				return {
@@ -212,7 +236,7 @@ export class OpenAIAdapter implements ProviderAdapter {
 				};
 			}
 
-			const payload: any = { role: msg.role };
+			const payload: Record<string, unknown> = { role: msg.role };
 
 			// Handle Tool Calls (Role: Assistant)
 			if (toolCalls.length > 0) {
@@ -224,7 +248,9 @@ export class OpenAIAdapter implements ProviderAdapter {
 			}
 
 			// Sequentially map content blocks to preserve true multi-modal order
-			const contentArray: any[] = [];
+			type OpenAIContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+
+			const contentArray: OpenAIContentPart[] = [];
 
 			for (const block of msg.blocks) {
 				if (block.type === "text") {
@@ -253,9 +279,9 @@ export class OpenAIAdapter implements ProviderAdapter {
 		});
 	}
 
-	private extractReasoning(delta: any): { text: string; encrypted: boolean } | null {
+	private extractReasoning(delta: OpenAIStreamDelta): { text: string; encrypted: boolean } | null {
 		// Check for encrypted reasoning (e.g., Anthropic via OpenRouter / Some DeepSeek setups)
-		if (typeof delta.reasoning?.encrypted === "string") {
+		if (delta.reasoning && typeof delta.reasoning === "object" && typeof delta.reasoning.encrypted === "string") {
 			return { text: delta.reasoning.encrypted, encrypted: true };
 		}
 		if (typeof delta.reasoning_encrypted === "string") {
