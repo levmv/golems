@@ -2,19 +2,33 @@ import type { Message } from "./types";
 
 /** Checks if the message has standard or encrypted reasoning */
 export function hasReasoning(msg: Message): boolean {
-	return !!msg.reasoning?.trim() || !!msg.reasoningEncrypted?.trim();
+	return msg.blocks.some((b) => b.type === "reasoning");
 }
 
-/** Returns the reasoning text, or a safe fallback for encrypted content */
+/**
+ * Returns the combined reasoning text, or a safe fallback for encrypted content
+ */
 export function getDisplayReasoning(msg: Message): string {
-	if (msg.reasoning) return msg.reasoning;
-	if (msg.reasoningEncrypted) {
+	let text = "";
+	let hasEncrypted = false;
+
+	for (const block of msg.blocks) {
+		if (block.type === "reasoning") {
+			if (block.text) text += block.text;
+			if (block.encrypted) hasEncrypted = true;
+		}
+	}
+
+	if (!text && hasEncrypted) {
 		return "<i>Thought process is hidden by the model provider.</i>";
 	}
-	return "";
+	return text;
 }
 
-/** Checks if the message has standard visible text content */
-export function hasTextContent(msg: Message): boolean {
-	return !!msg.content?.trim();
+/** Extracts all plain text from text blocks */
+export function extractPlainText(msg: Message): string {
+	return msg.blocks
+		.filter((b) => b.type === "text")
+		.map((b) => (b.type === "text" ? b.text : ""))
+		.join("\n\n");
 }

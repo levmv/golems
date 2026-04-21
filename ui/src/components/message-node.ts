@@ -1,6 +1,6 @@
 import { marked } from "marked";
-import { hasTextContent } from "../core/msg-utils";
-import type { Message, RenderConfig } from "../core/types";
+import { extractPlainText } from "../core/msg-utils";
+import type { ContentBlock, Message, RenderConfig } from "../core/types";
 import { el, syncDOM } from "../utils/dom";
 import { renderSafeHTML } from "../utils/html";
 import { ICON_CHECK, ICON_COPY } from "../utils/icons";
@@ -10,19 +10,20 @@ const MARKDOWN_THROTTLE_MS = 70;
 export class MessageNode {
 	public readonly el: HTMLElement;
 
-	private contentEl?: HTMLElement;
+	private blocksContainer: HTMLElement;
 	private loadingEl?: HTMLElement;
 	private errorEl?: HTMLElement;
 	private actionsEl?: HTMLElement;
 
-	private cacheContent = "";
+	// Track state per-block
+	private blockNodes = new Map<string, HTMLElement>();
+	private blockTextCache = new Map<string, string>();
+	private blockRenderSeqs = new Map<string, number>();
+	private blockTimers = new Map<string, number>();
+
 	private cacheError: string | null = null;
 	private cacheActionDisplay: string = "";
-
 	private isDestroyed = false;
-	// Prevents stale async markdown parses from overwriting newer streamed text
-	private renderSeq = 0;
-	private renderTimer: number | null = null;
 
 	constructor(
 		msg: Message,
@@ -34,11 +35,14 @@ export class MessageNode {
 			this.el.setAttribute("role", "article");
 			this.el.setAttribute("aria-label", "AI response");
 		}
+
+		this.blocksContainer = el("div", "message-blocks-wrapper");
+		this.el.appendChild(this.blocksContainer);
 	}
 
 	public update(msg: Message, isLast: boolean, isGenerating: boolean, error: string | null) {
 		this.renderLoading(msg);
-		this.renderText(msg, isGenerating, isLast);
+		this.renderBlocks(msg, isGenerating, isLast);
 		this.renderActions(msg, isGenerating, isLast);
 		this.renderError(isLast ? error : null);
 
@@ -51,12 +55,14 @@ export class MessageNode {
 
 	public destroy() {
 		this.isDestroyed = true;
-		if (this.renderTimer) clearTimeout(this.renderTimer);
+		for (const timer of this.blockTimers.values()) {
+			clearTimeout(timer);
+		}
 		this.el.remove();
 	}
 
 	private renderLoading(msg: Message) {
-		const isLoading = msg.role === "assistant" && !hasTextContent(msg);
+		const isLoading = msg.role === "assistant" && msg.blocks.length === 0;
 
 		if (isLoading) {
 			if (!this.loadingEl) {
@@ -71,34 +77,114 @@ export class MessageNode {
 		}
 	}
 
-	private renderText(msg: Message, isGenerating: boolean, isLast: boolean) {
-		if (!msg.content || this.cacheContent === msg.content) return;
+	private renderBlocks(msg: Message, isGenerating: boolean, isLastMessage: boolean) {
+		const currentBlockIds = new Set<string>();
 
-		const isActivelyTyping = isGenerating && isLast;
+		// 1. Create or update blocks
+		for (let i = 0; i < msg.blocks.length; i++) {
+			const block = msg.blocks[i];
+			const isLastBlock = i === msg.blocks.length - 1;
+			currentBlockIds.add(block.id);
 
-		// instant render: old messages, or chats loaded from history
-		if (!isActivelyTyping) {
-			if (this.renderTimer) {
-				clearTimeout(this.renderTimer);
-				this.renderTimer = null;
+			let container = this.blockNodes.get(block.id);
+
+			if (!container) {
+				container = el("div", `content-block block-${block.type}`);
+				container.dataset.blockId = block.id;
+				this.blocksContainer.appendChild(container);
+				this.blockNodes.set(block.id, container);
 			}
-			this.applyMarkdown(msg.content, ++this.renderSeq);
+
+			// Ensure physical DOM order matches array order (important for edits/prepends)
+			if (this.blocksContainer.children[i] !== container) {
+				this.blocksContainer.insertBefore(container, this.blocksContainer.children[i]);
+			}
+
+			if (block.type === "text") {
+				this.renderTextBlock(block, container, isGenerating, isLastMessage && isLastBlock);
+			} else if (block.type === "file") {
+				this.renderFileBlock(block, container);
+			} else if (block.type === "tool_call") {
+				container.textContent = `🛠 Tool Call: ${block.name} (${block.status})`;
+				container.className = `content-block block-tool tool-${block.status}`;
+			} else if (block.type === "reasoning") {
+				container.textContent = block.text;
+			}
+		}
+
+		// 2. Cleanup orphaned blocks (e.g., when a message is edited)
+		for (const [id, container] of this.blockNodes.entries()) {
+			if (!currentBlockIds.has(id)) {
+				container.remove();
+				this.blockNodes.delete(id);
+				this.blockTextCache.delete(id);
+				this.blockRenderSeqs.delete(id);
+				this.clearBlockTimer(id);
+			}
+		}
+	}
+
+	private renderTextBlock(
+		block: Extract<ContentBlock, { type: "text" }>,
+		container: HTMLElement,
+		isGenerating: boolean,
+		isActivelyTypingBlock: boolean,
+	) {
+		const cached = this.blockTextCache.get(block.id);
+		if (cached === block.text) return;
+
+		const isActivelyTyping = isGenerating && isActivelyTypingBlock;
+		const seq = (this.blockRenderSeqs.get(block.id) || 0) + 1;
+		this.blockRenderSeqs.set(block.id, seq);
+
+		if (!isActivelyTyping) {
+			this.clearBlockTimer(block.id);
+			this.applyMarkdown(block.id, block.text, seq, container);
 			return;
 		}
 
-		if (this.renderTimer) return;
+		if (this.blockTimers.has(block.id)) return;
 
-		this.renderTimer = window.setTimeout(() => {
-			this.renderTimer = null;
-			this.applyMarkdown(msg.content, ++this.renderSeq);
+		const timer = window.setTimeout(() => {
+			this.blockTimers.delete(block.id);
+			this.applyMarkdown(block.id, block.text, seq, container);
 		}, MARKDOWN_THROTTLE_MS);
+
+		this.blockTimers.set(block.id, timer);
+	}
+
+	private renderFileBlock(block: Extract<ContentBlock, { type: "file" }>, container: HTMLElement) {
+		if (container.hasChildNodes()) return; // Already rendered
+
+		if (block.mimeType.startsWith("image/")) {
+			container.appendChild(el("img", "attachment-image", { src: block.data }));
+		} else {
+			container.appendChild(el("div", "attachment-file-pill", { textContent: `📄 ${block.name || "File"}` }));
+		}
+	}
+
+	private async applyMarkdown(blockId: string, content: string, seq: number, container: HTMLElement) {
+		const html = await marked.parse(content);
+		if (this.isDestroyed || seq !== this.blockRenderSeqs.get(blockId)) return;
+
+		let contentEl = container.querySelector(".message-content");
+
+		if (!contentEl) {
+			contentEl = el("div", "message-content");
+			renderSafeHTML(contentEl as HTMLElement, html, this.config.highlighter);
+			container.appendChild(contentEl);
+		} else {
+			const tempDiv = el("div", "message-content");
+			renderSafeHTML(tempDiv, html, this.config.highlighter);
+			syncDOM(contentEl, tempDiv);
+		}
+
+		this.blockTextCache.set(blockId, content);
 	}
 
 	private renderError(error: string | null) {
 		if (!error) {
-			if (this.errorEl) {
-				this.errorEl.style.display = "none";
-			}
+			if (this.errorEl) this.errorEl.style.display = "none";
 			this.cacheError = null;
 			return;
 		}
@@ -128,11 +214,13 @@ export class MessageNode {
 				});
 				copyBtn.addEventListener("click", async () => {
 					try {
-						await navigator.clipboard.writeText(this.cacheContent);
+						// Extract all text blocks combined
+						const textToCopy = extractPlainText(msg);
+						await navigator.clipboard.writeText(textToCopy);
 						copyBtn.innerHTML = ICON_CHECK;
 						setTimeout(() => (copyBtn.innerHTML = ICON_COPY), 2000);
 					} catch {
-						// Ignore partial failures (like denied permissions)
+						// Ignore
 					}
 				});
 				actionButtons.push(copyBtn);
@@ -151,23 +239,11 @@ export class MessageNode {
 		}
 	}
 
-	private async applyMarkdown(content: string, seq: number) {
-		const html = await marked.parse(content);
-		if (this.isDestroyed) return;
-		// renderSeq bumped on each render request so slower async markdown parses
-		// cannot overwrite newer streamed content.
-		if (seq !== this.renderSeq) return;
-
-		if (!this.contentEl) {
-			this.contentEl = el("div", "message-content");
-			renderSafeHTML(this.contentEl, html, this.config.highlighter);
-			this.el.appendChild(this.contentEl);
-		} else {
-			const tempDiv = el("div", "message-content");
-			renderSafeHTML(tempDiv, html, this.config.highlighter);
-			syncDOM(this.contentEl, tempDiv);
+	private clearBlockTimer(blockId: string) {
+		const timer = this.blockTimers.get(blockId);
+		if (timer) {
+			clearTimeout(timer);
+			this.blockTimers.delete(blockId);
 		}
-
-		this.cacheContent = content;
 	}
 }

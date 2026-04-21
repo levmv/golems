@@ -1,7 +1,8 @@
 import "./attachment.css";
-import type { Attachment, ChatPlugin, Message, PluginInputContext } from "../../core/types";
+import type { ChatPlugin, ContentBlock, PluginInputContext } from "../../core/types";
 import { el } from "../../utils/dom";
 import { ICON_PAPERCLIP } from "../../utils/icons";
+import { uuidv7 } from "../../utils/uuid";
 
 export interface AttachmentPluginConfig {
 	/** Maximum file size in bytes. Default: 20MB */
@@ -18,10 +19,8 @@ export function AttachmentPlugin(config?: AttachmentPluginConfig): ChatPlugin {
 			alert(`File "${file.name}" exceeds the maximum allowed size of ${Math.round(max / (1024 * 1024))}MB.`);
 		});
 
-	const stateMap = new WeakMap<HTMLElement, HTMLElement>();
-
-	// The plugin owns its own state now!
-	let pendingAttachments: Attachment[] = [];
+	// Store pending uploads as content blocks
+	let pendingBlocks: Extract<ContentBlock, { type: "file" }>[] = [];
 
 	let fileInput: HTMLInputElement;
 	let previewContainer: HTMLElement;
@@ -31,22 +30,22 @@ export function AttachmentPlugin(config?: AttachmentPluginConfig): ChatPlugin {
 	const renderPreviews = () => {
 		if (!previewContainer) return;
 		previewContainer.innerHTML = "";
-		previewContainer.style.display = pendingAttachments.length ? "flex" : "none";
+		previewContainer.style.display = pendingBlocks.length ? "flex" : "none";
 
-		pendingAttachments.forEach((att) => {
+		pendingBlocks.forEach((block) => {
 			const item = el("div", "attachment-preview-item");
 
-			if (att.type === "image") {
-				item.appendChild(el("img", "", { src: att.data, alt: att.name }));
+			if (block.mimeType.startsWith("image/")) {
+				item.appendChild(el("img", "", { src: block.data, alt: block.name }));
 			} else {
-				item.appendChild(el("div", "file-preview", { textContent: `📄 ${att.name}` }));
+				item.appendChild(el("div", "file-preview", { textContent: `📄 ${block.name}` }));
 			}
 
 			const removeBtn = el("button", "attachment-remove-btn", {
 				innerHTML: "×",
 				type: "button",
 				onclick: () => {
-					pendingAttachments = pendingAttachments.filter((a) => a !== att);
+					pendingBlocks = pendingBlocks.filter((b) => b.id !== block.id);
 					renderPreviews();
 				},
 			});
@@ -83,19 +82,20 @@ export function AttachmentPlugin(config?: AttachmentPluginConfig): ChatPlugin {
 						continue;
 					}
 
-					const isImage = file.type.startsWith("image/");
 					const reader = new FileReader();
 
 					reader.onload = () => {
-						pendingAttachments.push({
-							type: isImage ? "image" : "file",
+						pendingBlocks.push({
+							id: uuidv7(),
+							type: "file",
+							mimeType: file.type || "application/octet-stream",
 							name: file.name,
 							data: reader.result as string,
 						});
 						renderPreviews();
 					};
 
-					if (isImage) reader.readAsDataURL(file);
+					if (file.type.startsWith("image/")) reader.readAsDataURL(file);
 					else reader.readAsText(file);
 				}
 				fileInput.value = "";
@@ -103,32 +103,14 @@ export function AttachmentPlugin(config?: AttachmentPluginConfig): ChatPlugin {
 			fileInput.addEventListener("change", boundOnChange);
 		},
 
-		hasPendingData: () => pendingAttachments.length > 0,
+		hasPendingData: () => pendingBlocks.length > 0,
 
 		onUserSubmit: (msg) => {
-			if (pendingAttachments.length > 0) {
-				msg.attachments = [...pendingAttachments];
-				pendingAttachments = [];
+			if (pendingBlocks.length > 0) {
+				// Prepend files before the text block
+				msg.blocks.unshift(...pendingBlocks);
+				pendingBlocks = [];
 				renderPreviews();
-			}
-		},
-
-		onMessageRender: (msg: Message, parentEl: HTMLElement) => {
-			if (!msg.attachments || msg.attachments.length === 0) return;
-
-			let container = stateMap.get(parentEl);
-			if (!container) {
-				container = el("div", "message-attachments");
-				parentEl.prepend(container);
-
-				for (const att of msg.attachments) {
-					if (att.type === "image") {
-						container.appendChild(el("img", "attachment-image", { src: att.data }));
-					} else {
-						container.appendChild(el("div", "attachment-file-pill", { textContent: `📄 ${att.name}` }));
-					}
-				}
-				stateMap.set(parentEl, container);
 			}
 		},
 
@@ -139,7 +121,7 @@ export function AttachmentPlugin(config?: AttachmentPluginConfig): ChatPlugin {
 			fileInput?.remove();
 			attachBtn?.remove();
 			previewContainer?.remove();
-			pendingAttachments = [];
+			pendingBlocks = [];
 		},
 	};
 }

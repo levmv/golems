@@ -1,14 +1,14 @@
 import type { ChatSession, ChatSessionMeta, PaginatedSessions, StorageAdapter } from "../types";
 
 export class IndexedDBAdapter implements StorageAdapter {
-	private readonly DB_VERSION = 2;
+	private readonly DB_VERSION = 3;
 	private readonly STORE_META = "session_meta";
 	private readonly STORE_MSGS = "session_messages";
 
 	private db: IDBDatabase | null = null;
 	private dbPromise: Promise<IDBDatabase> | null = null;
 
-	constructor(private dbName: string = "LLMChatDB") { }
+	constructor(private dbName: string = "LLMChatDB") {}
 
 	private async getDB(): Promise<IDBDatabase> {
 		if (this.db) return this.db;

@@ -1,4 +1,5 @@
 import "./edit.css";
+import { extractPlainText } from "../../core/msg-utils";
 import type { ChatPlugin, Message } from "../../core/types";
 import { el } from "../../utils/dom";
 
@@ -18,19 +19,21 @@ export function EditPlugin(config: EditConfig): ChatPlugin {
 
 	const enterEditMode = (parentEl: HTMLElement, state: EditState) => {
 		const msg = state.currentMsg;
+		const currentText = extractPlainText(msg);
+
 		state.isEditing = true;
 		state.actionBar.style.display = "none";
 		state.editContainer.style.display = "block";
 
-		const coreTextDiv = parentEl.querySelector(".message-content") as HTMLElement | null;
+		const blocksWrapper = parentEl.querySelector(".message-blocks-wrapper") as HTMLElement | null;
 
 		let targetHeight = "auto";
 		let targetMinWidth = "100%";
 
-		if (coreTextDiv) {
-			targetHeight = Math.max(coreTextDiv.offsetHeight, 24) + "px";
-			targetMinWidth = coreTextDiv.offsetWidth + "px";
-			coreTextDiv.style.display = "none";
+		if (blocksWrapper) {
+			targetHeight = Math.max(blocksWrapper.offsetHeight, 24) + "px";
+			targetMinWidth = blocksWrapper.offsetWidth + "px";
+			blocksWrapper.style.display = "none";
 		}
 
 		const textarea = el("textarea", "edit-textarea", { spellcheck: false }) as HTMLTextAreaElement;
@@ -42,7 +45,7 @@ export function EditPlugin(config: EditConfig): ChatPlugin {
 
 		textarea.style.height = targetHeight;
 		textarea.style.minWidth = targetMinWidth;
-		textarea.value = msg.content;
+		textarea.value = currentText;
 
 		textarea.addEventListener("input", () => {
 			textarea.style.height = "auto";
@@ -57,14 +60,14 @@ export function EditPlugin(config: EditConfig): ChatPlugin {
 			state.editContainer.style.display = "none";
 			state.editContainer.innerHTML = "";
 			state.actionBar.style.display = "flex";
-			if (coreTextDiv) coreTextDiv.style.display = "block";
+			if (blocksWrapper) blocksWrapper.style.display = "block";
 		};
 
 		cancelBtn.addEventListener("click", exitEdit);
 
 		saveBtn.addEventListener("click", () => {
 			const newText = textarea.value.trim();
-			if (newText && newText !== msg.content) {
+			if (newText && newText !== currentText) {
 				config.onSave(msg.id, newText);
 				exitEdit();
 			} else {

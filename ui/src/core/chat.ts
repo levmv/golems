@@ -1,15 +1,18 @@
+// src/core/chat.ts
 import { uuidv7 } from "../utils/uuid";
-import { hasReasoning, hasTextContent } from "./msg-utils";
+import { extractPlainText } from "./msg-utils";
 import { Store } from "./store";
 import type {
 	ChatPlugin,
 	ChatRequestParams,
 	ChatSession,
 	ChatState,
+	ContentBlock,
+	FinishReason,
 	Message,
 	ProviderAdapter,
 	StorageAdapter,
-	StreamChunk,
+	StreamEvent,
 } from "./types";
 
 export interface LLMChatConfig {
@@ -54,6 +57,7 @@ export class LLMChat {
 	private get state() {
 		return this.store.get();
 	}
+
 	private get isBusy() {
 		return this.store.get().isGenerating;
 	}
@@ -166,7 +170,7 @@ export class LLMChat {
 		const userMsg: Message = {
 			id: uuidv7(),
 			role: "user",
-			content,
+			blocks: content ? [{ id: uuidv7(), type: "text", text: content }] : [],
 		};
 
 		for (const plugin of this.plugins) {
@@ -189,9 +193,11 @@ export class LLMChat {
 		// Truncate history to remove everything AFTER the edited message
 		// and update the edited message itself
 		const updatedMessages = currentMessages.slice(0, targetIndex + 1);
+
+		// Overwrite the message blocks with just the new text block
 		updatedMessages[targetIndex] = {
 			...updatedMessages[targetIndex],
-			content: newContent,
+			blocks: newContent ? [{ id: uuidv7(), type: "text", text: newContent }] : [],
 		};
 
 		this.startStreamingResponse(updatedMessages);
@@ -261,10 +267,13 @@ export class LLMChat {
 	}
 
 	private async startStreamingResponse(contextMessages: Message[]) {
+		const pendingId = uuidv7();
+
+		// Instantly create an empty assistant message so the UI shows a loading state
 		const assistantMsg: Message = {
-			id: uuidv7(),
+			id: pendingId,
 			role: "assistant",
-			content: "",
+			blocks: [],
 		};
 
 		const updatedMessages = [...contextMessages, assistantMsg];
@@ -291,40 +300,88 @@ export class LLMChat {
 				payloadParams.messages.unshift({
 					id: uuidv7(),
 					role: "system",
-					content: payloadParams.options.systemPrompt,
+					blocks: [{ id: uuidv7(), type: "text", text: payloadParams.options.systemPrompt }],
 				});
 			}
 
-			await this.provider.streamChat(
-				payloadParams.messages,
-				payloadParams.options,
-				(chunk) => this.appendChunk(assistantMsg.id, chunk),
-				() => void this.finalizeStream({}),
-				(err) => void this.finalizeStream({ error: err }),
-			);
+			let finalReason: FinishReason = "stop";
+
+			await this.provider.streamChat(payloadParams.messages, payloadParams.options, (event) => {
+				if (event.type === "finish") finalReason = event.reason;
+				this.handleStreamEvent(pendingId, event);
+			});
+
+			// Finish up stream
+			await this.finalizeStream({ reason: finalReason });
 		} catch (err: any) {
 			this.finalizeStream({ error: err });
 		}
 	}
 
-	private appendChunk(messageId: string, chunk: StreamChunk) {
+	/**
+	 * High-performance state reducer. Bypasses cloning by mutating the active blocks.
+	 * @param pendingId The ID we generated locally to track the active response.
+	 */
+	private handleStreamEvent(pendingId: string, event: StreamEvent) {
 		this.store.mutate((state) => {
-			const lastMsg = state.messages[state.messages.length - 1];
-			if (lastMsg && lastMsg.id === messageId) {
-				lastMsg.content += chunk.content;
+			const msg = state.messages.find((m) => m.id === pendingId);
+			if (!msg) return; // Only happens if user rapidly deleted the chat during stream
 
-				if (chunk.reasoning) {
-					lastMsg.reasoning = (lastMsg.reasoning || "") + chunk.reasoning;
+			switch (event.type) {
+				case "message_start":
+					// We already pushed a placeholder. We can optionally merge metadata.
+					if (event.message.meta) {
+						msg.meta = { ...msg.meta, ...event.message.meta };
+					}
+					break;
+
+				case "text_delta": {
+					let tb = msg.blocks.find((b) => b.id === event.blockId) as Extract<ContentBlock, { type: "text" }>;
+					if (!tb) {
+						tb = { id: event.blockId, type: "text", text: "" };
+						msg.blocks.push(tb);
+					}
+					tb.text += event.delta;
+					break;
 				}
 
-				if (chunk.reasoningEncrypted) {
-					lastMsg.reasoningEncrypted = (lastMsg.reasoningEncrypted || "") + chunk.reasoningEncrypted;
+				case "reasoning_delta": {
+					let rb = msg.blocks.find((b) => b.id === event.blockId) as Extract<ContentBlock, { type: "reasoning" }>;
+					if (!rb) {
+						rb = { id: event.blockId, type: "reasoning", text: "", encrypted: event.encrypted };
+						msg.blocks.push(rb);
+					}
+					rb.text += event.delta;
+					break;
 				}
+
+				case "tool_call_start":
+					msg.blocks.push(event.block);
+					break;
+
+				case "tool_call_delta": {
+					const tcb = msg.blocks.find((b) => b.id === event.blockId) as Extract<ContentBlock, { type: "tool_call" }>;
+					if (tcb) {
+						if (event.argsDelta) tcb.argsText += event.argsDelta;
+						if (event.status) tcb.status = event.status;
+					}
+					break;
+				}
+
+				case "tool_result":
+				case "artifact":
+					msg.blocks.push(event.block);
+					break;
+
+				// Usage, finish, error handled mostly outside mutation or discarded
+				case "error":
+					state.error = event.message;
+					break;
 			}
 		});
 	}
 
-	private async finalizeStream(opts: { error?: Error; wasAborted?: boolean }) {
+	private async finalizeStream(opts: { error?: Error; wasAborted?: boolean; reason?: FinishReason }) {
 		if (!this.isBusy) return;
 		this.store.set({ isGenerating: false });
 
@@ -342,9 +399,9 @@ export class LLMChat {
 			const currentMsgs = this.state.messages;
 			const sessionId = this.state.currentSessionId;
 
-			// Only auto-title if successful and the provider supports it
+			// Auto-title trigger
 			if (!opts.error && !opts.wasAborted && this.provider.generateTitle) {
-				const assistantRepliesCount = currentMsgs.filter((m) => m.role === "assistant" && m.content).length;
+				const assistantRepliesCount = currentMsgs.filter((m) => m.role === "assistant" && m.blocks.length > 0).length;
 
 				if (assistantRepliesCount === 1) {
 					void this.triggerAutoTitle(sessionId, currentMsgs);
@@ -361,18 +418,20 @@ export class LLMChat {
 
 		const existingMeta = sessions.find((s) => s.id === currentSessionId);
 		let title = existingMeta?.title;
+
 		if (!title) {
 			const firstMsg = messages[0];
-			if (firstMsg.content) {
-				title = firstMsg.content.length > 30
-					? firstMsg.content.slice(0, 30) + "..."
-					: firstMsg.content;
-			} else if (firstMsg.attachments?.length) {
-				title = `Attachment: ${firstMsg.attachments[0].name}`;
+			const text = extractPlainText(firstMsg);
+			if (text.trim().length > 0) {
+				title = text.length > 30 ? text.slice(0, 30) + "..." : text;
+			} else if (firstMsg.blocks.some((b) => b.type === "file")) {
+				const fileBlock = firstMsg.blocks.find((b) => b.type === "file") as any;
+				title = `File: ${fileBlock.name || "Upload"}`;
 			} else {
 				title = "New Chat";
 			}
 		}
+
 		const updatedAt = Date.now();
 
 		const sessionToSave: ChatSession = {
@@ -432,7 +491,8 @@ export class LLMChat {
 
 	private pruneDeadMessages(messages: Message[]): Message[] {
 		const last = messages.at(-1);
-		if (last && last.role === "assistant" && !hasTextContent(last) && !hasReasoning(last)) {
+		// If the last assistant message has absolutely no blocks, it failed before TTFB. Remove it.
+		if (last && last.role === "assistant" && last.blocks.length === 0) {
 			return messages.slice(0, -1);
 		}
 		return messages;

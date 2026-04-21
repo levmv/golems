@@ -1,5 +1,5 @@
 import "./thinking.css";
-import { getDisplayReasoning, hasReasoning, hasTextContent } from "../../core/msg-utils";
+import { getDisplayReasoning, hasReasoning } from "../../core/msg-utils";
 import type { ChatPlugin } from "../../core/types";
 import { el } from "../../utils/dom";
 import { renderSafeHTML } from "../../utils/html";
@@ -20,9 +20,13 @@ export function ThinkingPlugin(): ChatPlugin {
 	return {
 		name: "thinking",
 		onMessageRender: (msg, parentEl, isGenerating) => {
-			if (!hasReasoning(msg) && !stateMap.has(parentEl)) return;
+			if (!hasReasoning(msg)) return;
 
-			let state = stateMap.get(parentEl);
+			// Find the block container created by MessageNode
+			const reasoningBlockEl = parentEl.querySelector(".block-reasoning") as HTMLElement;
+			if (!reasoningBlockEl) return;
+
+			let state = stateMap.get(reasoningBlockEl);
 
 			if (!state) {
 				const btn = el("button", "think-toggle", {
@@ -36,8 +40,10 @@ export function ThinkingPlugin(): ChatPlugin {
 				contentEl.style.display = "none";
 
 				const wrapper = el("div", "think-wrapper", {}, [btn, contentEl]);
-				wrapper.style.order = "1";
-				parentEl.appendChild(wrapper);
+
+				// Clear the raw text placeholder inserted by MessageNode and append our UI
+				reasoningBlockEl.innerHTML = "";
+				reasoningBlockEl.appendChild(wrapper);
 
 				state = {
 					isExpanded: false,
@@ -55,17 +61,18 @@ export function ThinkingPlugin(): ChatPlugin {
 
 					const displayContent = getDisplayReasoning(msg);
 
-					// Render the text if expanded for the first time
 					if (state!.isExpanded && state!.cacheReasoning !== displayContent) {
 						renderSafeHTML(contentEl, displayContent);
 						state!.cacheReasoning = displayContent;
 					}
 				};
 
-				stateMap.set(parentEl, state);
+				stateMap.set(reasoningBlockEl, state);
 			}
 
-			const isActivelyThinking = isGenerating && msg.role === "assistant" && !hasTextContent(msg);
+			// We determine "Actively thinking" if generating and there's NO text blocks yet
+			const hasText = msg.blocks.some((b) => b.type === "text" && b.text.trim().length > 0);
+			const isActivelyThinking = isGenerating && !hasText;
 
 			if (state.cacheIsGenerating !== isActivelyThinking) {
 				state.btnSpan.textContent = isActivelyThinking ? "Thinking..." : "Thought Process";

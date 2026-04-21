@@ -1,21 +1,124 @@
 import type { LLMChat } from "./chat";
 
-export type Role = "system" | "user" | "assistant";
+export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
+
+export type ContentBlock =
+	| {
+			id: string;
+			type: "text";
+			text: string;
+	  }
+	| {
+			id: string;
+			type: "reasoning";
+			text: string;
+			encrypted?: boolean;
+	  }
+	| {
+			id: string;
+			type: "tool_call";
+			toolCallId: string;
+			name: string;
+			argsText: string;
+			status: "streaming" | "pending" | "running" | "complete" | "error";
+	  }
+	| {
+			id: string;
+			type: "tool_result";
+			toolCallId: string;
+			outputText: string;
+			isError?: boolean;
+	  }
+	| {
+			id: string;
+			type: "artifact";
+			artifactId: string;
+			mime: string;
+			title?: string;
+			content: string;
+	  }
+	| {
+			id: string;
+			type: "file";
+			mimeType: string;
+			name?: string;
+			data: string;
+	  };
+
+export type Role = "system" | "user" | "assistant" | "tool";
 
 export interface Message {
 	id: string;
 	role: Role;
-	content: string;
-	reasoning?: string;
-	reasoningEncrypted?: string;
-	attachments?: Attachment[];
+	blocks: ContentBlock[];
+	meta?: {
+		source?: "remote" | "local";
+		name?: string;
+		createdAt?: number;
+		ephemeral?: boolean;
+	};
 }
 
-export type StreamChunk = {
-	content: string;
-	reasoning: string;
-	reasoningEncrypted?: string;
-};
+export type FinishReason = "stop" | "length" | "tool_use" | "content_filter" | "error" | "aborted";
+
+export type StreamEvent =
+	| {
+			type: "message_start";
+			message: Message;
+	  }
+	| {
+			type: "text_delta";
+			messageId: string;
+			blockId: string;
+			delta: string;
+	  }
+	| {
+			type: "reasoning_delta";
+			messageId: string;
+			blockId: string;
+			delta: string;
+			encrypted?: boolean;
+	  }
+	| {
+			type: "tool_call_start";
+			messageId: string;
+			block: Extract<ContentBlock, { type: "tool_call" }>;
+	  }
+	| {
+			type: "tool_call_delta";
+			messageId: string;
+			blockId: string;
+			name?: string;
+			argsDelta?: string;
+			status?: Extract<ContentBlock, { type: "tool_call" }>["status"];
+	  }
+	| {
+			type: "tool_result";
+			messageId: string;
+			block: Extract<ContentBlock, { type: "tool_result" }>;
+	  }
+	| {
+			type: "artifact";
+			messageId: string;
+			block: Extract<ContentBlock, { type: "artifact" }>;
+	  }
+	| {
+			type: "usage";
+			input: number;
+			output: number;
+			cacheRead?: number;
+			cacheWrite?: number;
+	  }
+	| {
+			type: "error";
+			message: string;
+			code?: string;
+			retryable?: boolean;
+	  }
+	| {
+			type: "finish";
+			reason: FinishReason;
+	  };
 
 export interface ChatSessionMeta {
 	id: string;
@@ -71,13 +174,7 @@ export interface ChatRequestParams {
 }
 
 export interface ProviderAdapter {
-	streamChat(
-		messages: Message[],
-		options: RequestOptions,
-		onChunk: (chunk: StreamChunk) => void,
-		onDone: () => void,
-		onError: (err: Error) => void,
-	): Promise<void>;
+	streamChat(messages: Message[], options: RequestOptions, onEvent: (event: StreamEvent) => void): Promise<void>;
 
 	abort(): void;
 
@@ -87,12 +184,6 @@ export interface ProviderAdapter {
 export interface RenderConfig {
 	highlighter?: (code: string, lang: string) => string;
 	plugins: ChatPlugin[];
-}
-
-export interface Attachment {
-	type: "image" | "file";
-	name: string;
-	data: string;
 }
 
 export interface PluginContext {
