@@ -20,6 +20,10 @@ type OpenAIStreamDelta = {
 	[key: string]: unknown;
 };
 
+type OpenAIContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
+
+const REASONING_FIELDS = ["reasoning_content", "reasoning", "reasoning_text"] as const;
+
 export class OpenAIAdapter implements ProviderAdapter {
 	private abortController: AbortController | null = null;
 
@@ -46,13 +50,17 @@ export class OpenAIAdapter implements ProviderAdapter {
 					messages: this.formatMessages(messages),
 					stream: true,
 					...restOptions,
+					stream_options: {
+						include_usage: true,
+						...((restOptions.stream_options as object) || {}),
+					},
 				}),
 				signal: this.abortController.signal,
 			});
 
 			if (!response.ok) {
-				const text = await response.text();
-				throw new Error(`API Error ${response.status}: ${text}`);
+				const errorMsg = await this.extractErrorMessage(response);
+				throw new Error(`API Error ${response.status}: ${errorMsg}`);
 			}
 
 			let messageStarted = false;
@@ -66,113 +74,142 @@ export class OpenAIAdapter implements ProviderAdapter {
 			await parseSSE(response, (data) => {
 				if (data === "[DONE]") return true;
 
+				// Flat try/catch: Just parse and exit early if it's a broken chunk
+				let parsed: any;
 				try {
-					const parsed = JSON.parse(data);
-					const choice = parsed.choices?.[0];
-					if (!choice) return;
+					parsed = JSON.parse(data);
+				} catch {
+					return; // Ignore partial/broken JSON payload
+				}
+				if (parsed.usage) {
+					onEvent({
+						type: "usage",
+						input: parsed.usage.prompt_tokens || 0,
+						output: parsed.usage.completion_tokens || 0,
+						cacheRead: parsed.usage.prompt_tokens_details?.cached_tokens || 0,
+					});
+				}
 
-					// 1. Emit start event on first chunk
-					if (!messageStarted) {
-						currentMessageId = parsed.id || currentMessageId;
-						onEvent({
-							type: "message_start",
-							message: { id: currentMessageId, role: "assistant", blocks: [] },
-						});
-						messageStarted = true;
-					}
+				const choice = parsed.choices?.[0];
+				if (!choice) return;
 
-					const delta: OpenAIStreamDelta = choice.delta ?? {};
+				// 1. Emit start event on first chunk
+				if (!messageStarted) {
+					currentMessageId = parsed.id || currentMessageId;
+					onEvent({
+						type: "message_start",
+						message: { id: currentMessageId, role: "assistant", blocks: [] },
+					});
+					messageStarted = true;
+				}
 
-					// 2. Handle Reasoning
-					const reasoningData = this.extractReasoning(delta);
-					if (reasoningData) {
-						if (!currentReasoningBlockId) currentReasoningBlockId = uuidv7();
-						currentTextBlockId = null;
+				const delta: OpenAIStreamDelta = choice.delta ?? {};
 
-						onEvent({
-							type: "reasoning_delta",
-							messageId: currentMessageId,
-							blockId: currentReasoningBlockId,
-							delta: reasoningData.text,
-							encrypted: reasoningData.encrypted,
-						});
-					}
+				// 2. Handle Reasoning
+				const reasoningData = this.extractReasoning(delta);
+				if (reasoningData) {
+					if (!currentReasoningBlockId) currentReasoningBlockId = uuidv7();
+					currentTextBlockId = null;
 
-					// 3. Handle Text Content
-					if (delta.content) {
-						if (!currentTextBlockId) currentTextBlockId = uuidv7();
-						onEvent({
-							type: "text_delta",
-							messageId: currentMessageId,
-							blockId: currentTextBlockId,
-							delta: delta.content,
-						});
-					}
+					onEvent({
+						type: "reasoning_delta",
+						messageId: currentMessageId,
+						blockId: currentReasoningBlockId,
+						delta: reasoningData.text,
+						encrypted: reasoningData.encrypted,
+					});
+				}
 
-					// 4. Handle Tool Calls
-					if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
-						for (const tc of delta.tool_calls) {
-							const index = tc.index;
+				// 3. Handle Text Content
+				if (delta.content) {
+					if (!currentTextBlockId) currentTextBlockId = uuidv7();
+					onEvent({
+						type: "text_delta",
+						messageId: currentMessageId,
+						blockId: currentTextBlockId,
+						delta: delta.content,
+					});
+				}
 
-							// If it has an ID, it's a new tool call
-							if (tc.id) {
-								currentTextBlockId = null;
+				// 4. Handle Tool Calls
+				if (delta.tool_calls && Array.isArray(delta.tool_calls)) {
+					for (const tc of delta.tool_calls) {
+						const index = tc.index;
+						// If it has an ID, it's a new tool call
+						if (tc.id) {
+							currentTextBlockId = null;
 
-								const blockId = uuidv7();
-								activeToolCalls.set(index, blockId);
-								onEvent({
-									type: "tool_call_start",
-									messageId: currentMessageId,
-									block: {
-										id: blockId,
-										type: "tool_call",
-										toolCallId: tc.id,
-										name: tc.function?.name || "",
-										argsText: tc.function?.arguments || "",
-										status: "streaming",
-									},
-								});
-							}
-							// Otherwise, it's appending arguments to an existing tool call
-							else if (activeToolCalls.has(index)) {
-								onEvent({
-									type: "tool_call_delta",
-									messageId: currentMessageId,
-									blockId: activeToolCalls.get(index)!,
-									argsDelta: tc.function?.arguments || "",
-								});
-							}
+							const blockId = uuidv7();
+							activeToolCalls.set(index, blockId);
+							onEvent({
+								type: "tool_call_start",
+								messageId: currentMessageId,
+								block: {
+									id: blockId,
+									type: "tool_call",
+									toolCallId: tc.id,
+									name: tc.function?.name || "",
+									argsText: tc.function?.arguments || "",
+									status: "streaming",
+								},
+							});
+						}
+						// Otherwise, it's appending arguments to an existing tool call
+						else if (activeToolCalls.has(index)) {
+							onEvent({
+								type: "tool_call_delta",
+								messageId: currentMessageId,
+								blockId: activeToolCalls.get(index)!,
+								argsDelta: tc.function?.arguments || "",
+							});
 						}
 					}
+				}
 
-					// 5. Handle Finish Reason
-					if (choice.finish_reason) {
-						const reasonMap: Record<string, FinishReason> = {
-							stop: "stop",
-							length: "length",
-							tool_calls: "tool_use",
-							content_filter: "content_filter",
-						};
-						onEvent({
-							type: "finish",
-							reason: reasonMap[choice.finish_reason] || "stop",
-						});
+				// 5. Handle Finish Reason
+				if (choice.finish_reason) {
+					if (choice.finish_reason === "content_filter") {
+						throw new Error("Generation stopped by provider content filter.");
 					}
-				} catch {
-					// Ignore partial/broken JSON payload
+					if (choice.finish_reason === "network_error") {
+						throw new Error("Generation stopped due to a provider network error.");
+					}
+
+					const reasonMap: Record<string, FinishReason> = {
+						stop: "stop",
+						length: "length",
+						tool_calls: "tool_use",
+					};
+					onEvent({
+						type: "finish",
+						reason: reasonMap[choice.finish_reason] || "stop",
+					});
 				}
 			});
 
 			// If it finishes normally but didn't emit a finish reason (some providers do this)
 			onEvent({ type: "finish", reason: "stop" });
-		} catch (err: any) {
-			if (err?.name === "AbortError") {
+		} catch (err: unknown) {
+			const isAbort = err instanceof Error && err.name === "AbortError";
+			if (isAbort || this.abortController?.signal.aborted) {
 				onEvent({ type: "finish", reason: "aborted" });
 			} else {
-				onEvent({ type: "error", message: err.message || "Unknown error" });
+				// Safer fallback stringification for unknown thrown objects
+				const errorMessage = err instanceof Error ? err.message : JSON.stringify(err);
+				onEvent({ type: "error", message: errorMessage });
 			}
 		} finally {
 			this.abortController = null;
+		}
+	}
+
+	private async extractErrorMessage(response: Response): Promise<string> {
+		const text = await response.text();
+		try {
+			const parsed = JSON.parse(text);
+			return parsed.error?.message || parsed.message || parsed.error?.metadata?.raw || text;
+		} catch {
+			return text;
 		}
 	}
 
@@ -217,66 +254,81 @@ export class OpenAIAdapter implements ProviderAdapter {
 		}
 	}
 
-	private formatMessages(messages: Message[]) {
-		return messages.map((msg) => {
-			const toolResults = msg.blocks.filter((b) => b.type === "tool_result") as Extract<
-				ContentBlock,
-				{ type: "tool_result" }
-			>[];
-			const toolCalls = msg.blocks.filter((b) => b.type === "tool_call") as Extract<
-				ContentBlock,
-				{ type: "tool_call" }
-			>[];
+	private formatMessages(messages: Message[]): Record<string, unknown>[] {
+		const result: Record<string, unknown>[] = [];
 
-			if (msg.role === "tool" && toolResults.length > 0) {
-				return {
-					role: "tool",
-					tool_call_id: toolResults[0].toolCallId,
-					content: toolResults[0].outputText,
-				};
+		for (const msg of messages) {
+			// Tool messages map 1:1 to API tool responses.
+			// They contain only the execution output, so we bypass standard processing.
+			if (msg.role === "tool") {
+				for (const block of msg.blocks) {
+					if (block.type === "tool_result") {
+						result.push({
+							role: "tool",
+							tool_call_id: block.toolCallId,
+							content: block.outputText,
+						});
+					}
+				}
+				continue;
 			}
 
 			const payload: Record<string, unknown> = { role: msg.role };
-
-			// Handle Tool Calls (Role: Assistant)
-			if (toolCalls.length > 0) {
-				payload.tool_calls = toolCalls.map((tc) => ({
-					id: tc.toolCallId,
-					type: "function",
-					function: { name: tc.name, arguments: tc.argsText },
-				}));
-			}
-
-			// Sequentially map content blocks to preserve true multi-modal order
-			type OpenAIContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
-
+			const toolCalls: Record<string, unknown>[] = [];
 			const contentArray: OpenAIContentPart[] = [];
 
 			for (const block of msg.blocks) {
-				if (block.type === "text") {
-					contentArray.push({ type: "text", text: block.text });
-				} else if (block.type === "file") {
-					if (block.mimeType.startsWith("image/")) {
-						contentArray.push({ type: "image_url", image_url: { url: block.data } });
-					} else {
-						// Inject text files as text blocks in the exact sequence they appeared
-						contentArray.push({ type: "text", text: `\n\n--- File: ${block.name} ---\n${block.data}` });
-					}
+				switch (block.type) {
+					case "tool_call":
+						toolCalls.push({
+							id: block.toolCallId,
+							type: "function",
+							function: { name: block.name, arguments: block.argsText },
+						});
+						break;
+
+					case "text":
+						contentArray.push({ type: "text", text: block.text });
+						break;
+
+					case "file":
+						if (block.mimeType.startsWith("image/")) {
+							contentArray.push({ type: "image_url", image_url: { url: block.data } });
+						} else {
+							contentArray.push({
+								type: "text",
+								text: `\n\n--- File: ${block.name || "Unknown"} ---\n${block.data}`,
+							});
+						}
+						break;
+
+					case "reasoning":
+					case "artifact":
+						// Intentionally omitted.
+						// Reasoning tokens and internal UI artifacts are not sent back in context.
+						break;
 				}
 			}
 
-			// OpenAI accepts a string for pure text, but requires an array for multi-modal.
-			// We collapse to a string if there's only one text block to keep payloads clean.
+			if (toolCalls.length > 0) {
+				payload.tool_calls = toolCalls;
+			}
+
+			// Conform to OpenAI's expected content structures
 			if (contentArray.length === 0) {
-				payload.content = "";
+				// Required field: use null if tool calls exist, otherwise empty string
+				payload.content = toolCalls.length > 0 ? null : "";
 			} else if (contentArray.length === 1 && contentArray[0].type === "text") {
+				// Fast path for simple text messages (avoids multimodal array overhead)
 				payload.content = contentArray[0].text;
 			} else {
+				// Multimodal or multi-part message
 				payload.content = contentArray;
 			}
 
-			return payload;
-		});
+			result.push(payload);
+		}
+		return result;
 	}
 
 	private extractReasoning(delta: OpenAIStreamDelta): { text: string; encrypted: boolean } | null {
@@ -288,9 +340,8 @@ export class OpenAIAdapter implements ProviderAdapter {
 			return { text: delta.reasoning_encrypted, encrypted: true };
 		}
 
-		// Check for standard reasoning (DeepSeek R1, O1, etc.)
-		const reasoningFields = ["reasoning_content", "reasoning", "reasoning_text"];
-		for (const field of reasoningFields) {
+		// Check for standard reasoning
+		for (const field of REASONING_FIELDS) {
 			if (typeof delta[field] === "string" && delta[field].length > 0) {
 				return { text: delta[field], encrypted: false };
 			}
