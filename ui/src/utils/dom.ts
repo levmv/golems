@@ -43,7 +43,7 @@ export function el<K extends keyof HTMLElementTagNameMap>(
  * Mutates `target` to match `source` without destroying untouched nodes.
  */
 export function syncDOM(target: Node, source: Node) {
-	// 1. Text nodes: update text if different
+	// Reconcile text nodes
 	if (target.nodeType === Node.TEXT_NODE && source.nodeType === Node.TEXT_NODE) {
 		if (target.nodeValue !== source.nodeValue) {
 			target.nodeValue = source.nodeValue;
@@ -51,48 +51,63 @@ export function syncDOM(target: Node, source: Node) {
 		return;
 	}
 
-	// 2. If node types or tags are different, replace entirely
-	if (target.nodeType !== source.nodeType || (target as HTMLElement).tagName !== (source as HTMLElement).tagName) {
+	// Replace entirely if node types or tags diverge
+	if (target.nodeType !== source.nodeType || target.nodeName !== source.nodeName) {
 		target.parentNode?.replaceChild(source.cloneNode(true), target);
 		return;
 	}
 
-	const elTarget = target as HTMLElement;
-	const elSource = source as HTMLElement;
+	// Reconcile attributes (Elements only)
+	if (target.nodeType === Node.ELEMENT_NODE) {
+		const elTarget = target as HTMLElement;
+		const elSource = source as HTMLElement;
 
-	// 3. Sync Attributes (Safe HTML only has a few like href, class)
-	const sourceAttrs = elSource.attributes;
-	const targetAttrs = elTarget.attributes;
+		const sourceAttrs = elSource.attributes;
+		const targetAttrs = elTarget.attributes;
 
-	// Remove obsolete attributes
-	for (let i = targetAttrs.length - 1; i >= 0; i--) {
-		const attrName = targetAttrs[i].name;
-		if (!elSource.hasAttribute(attrName)) {
-			elTarget.removeAttribute(attrName);
+		// Remove obsolete attributes.
+		// Note: targetAttrs is a live NamedNodeMap, so backward iteration is required.
+		for (let i = targetAttrs.length - 1; i >= 0; i--) {
+			const attrName = targetAttrs[i].name;
+			if (!elSource.hasAttribute(attrName)) {
+				elTarget.removeAttribute(attrName);
+			}
+		}
+
+		// Add or update existing attributes
+		for (let i = 0; i < sourceAttrs.length; i++) {
+			const attr = sourceAttrs[i];
+			if (elTarget.getAttribute(attr.name) !== attr.value) {
+				elTarget.setAttribute(attr.name, attr.value);
+			}
 		}
 	}
-	// Add/Update new attributes
-	for (let i = 0; i < sourceAttrs.length; i++) {
-		const attr = sourceAttrs[i];
-		if (elTarget.getAttribute(attr.name) !== attr.value) {
-			elTarget.setAttribute(attr.name, attr.value);
-		}
-	}
 
-	const targetChildren = Array.from(target.childNodes);
-	const sourceChildren = Array.from(source.childNodes);
-	const max = Math.max(targetChildren.length, sourceChildren.length);
+	// Reconcile children
+	let targetChild = target.firstChild;
+	let sourceChild = source.firstChild;
 
-	for (let i = 0; i < max; i++) {
-		if (!targetChildren[i]) {
-			// New child added
-			target.appendChild(sourceChildren[i].cloneNode(true));
-		} else if (!sourceChildren[i]) {
-			// Old child removed
-			target.removeChild(targetChildren[i]);
+	while (sourceChild !== null) {
+		if (targetChild === null) {
+			// Target is missing children; append the remainder
+			target.appendChild(sourceChild.cloneNode(true));
+			sourceChild = sourceChild.nextSibling;
 		} else {
-			// Compare existing children
-			syncDOM(targetChildren[i], sourceChildren[i]);
+			// Cache next siblings before recursion in case targetChild replaces itself
+			const nextTargetChild = targetChild.nextSibling;
+			const nextSourceChild = sourceChild.nextSibling;
+
+			syncDOM(targetChild, sourceChild);
+
+			targetChild = nextTargetChild;
+			sourceChild = nextSourceChild;
 		}
+	}
+
+	// Cleanup remaining obsolete target children
+	while (targetChild !== null) {
+		const nextTargetChild = targetChild.nextSibling;
+		target.removeChild(targetChild);
+		targetChild = nextTargetChild;
 	}
 }
