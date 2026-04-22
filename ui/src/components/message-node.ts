@@ -101,15 +101,25 @@ export class MessageNode {
 				this.blocksContainer.insertBefore(container, this.blocksContainer.children[i]);
 			}
 
-			if (block.type === "text") {
-				this.renderTextBlock(block, container, isGenerating, isLastBlock);
-			} else if (block.type === "file") {
-				this.renderFileBlock(block, container);
-			} else if (block.type === "tool_call") {
-				container.textContent = `🛠 Tool Call: ${block.name} (${block.status})`;
-				container.className = `content-block block-tool tool-${block.status}`;
-			} else if (block.type === "reasoning") {
-				container.textContent = block.text;
+			let handledByPlugin = false;
+			for (const plugin of this.config.plugins) {
+				if (plugin.onBlockRender && plugin.onBlockRender(block, container, isGenerating)) {
+					handledByPlugin = true;
+					break;
+				}
+			}
+
+			if (!handledByPlugin) {
+				if (block.type === "text") {
+					this.renderTextBlock(block, container, isGenerating, isLastBlock);
+				} else if (block.type === "file") {
+					this.renderFileBlock(block, container);
+				} else if (block.type === "tool_call") {
+					container.textContent = `🛠 Tool Call: ${block.name} (${block.status})`;
+					container.className = `content-block block-tool tool-${block.status}`;
+				} else if (block.type === "reasoning") {
+					container.textContent = block.text;
+				}
 			}
 		}
 
@@ -203,7 +213,10 @@ export class MessageNode {
 	}
 
 	private renderActions(msg: Message, isGenerating: boolean) {
-		if (msg.role !== "assistant") return;
+		if (msg.role !== "assistant" || msg.blocks.length === 0) {
+			if (this.actionsEl) this.actionsEl.style.display = "none";
+			return;
+		}
 
 		if (!this.actionsEl) {
 			const actionButtons: HTMLElement[] = [];

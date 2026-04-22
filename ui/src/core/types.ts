@@ -202,25 +202,52 @@ export interface PluginInputContext {
 export interface ChatPlugin {
 	name: string;
 
-	// --- Global Lifecycle ---
-	/** Fires once when the UI boots. Gives access to major DOM sections. */
+	/**
+	 * Fires once when the chat UI initializes.
+	 */
 	onMount?: (ctx: PluginContext) => void;
-	/** Cleanup function when the chat instance is destroyed. */
+
+	/**
+	 * Fires when the chat instance is destroyed.
+	 */
 	destroy?: () => void;
 
-	// --- Request / Network ---
-	/** Intercept and mutate the request (messages, model, etc.) before sending. */
+	/**
+	 * Intercept and mutate the payload (messages, options) right before it is sent to the LLM.
+	 */
 	beforeSubmit?: (params: ChatRequestParams) => ChatRequestParams | Promise<ChatRequestParams>;
 
-	// --- Input Area ---
-	/** Fires when the input form mounts. Use to add buttons or custom UI. */
+	/**
+	 * Fires when the input area mounts. Use to append/prepend custom UI to the form.
+	 */
 	onInputMount?: (ctx: PluginInputContext) => void;
-	/** Tell the input area to allow submission even if the text area is empty. */
+
+	/**
+	 * Allows the input form to be submitted even if the text area is empty.
+	 */
 	hasPendingData?: () => boolean;
-	/** Mutate the newly created user message before it gets saved and sent. */
+
+	/**
+	 * Intercept and mutate a newly created user message before it is saved and sent.
+	 */
 	onUserSubmit?: (msg: Message) => void;
 
-	// --- Feed Area ---
-	/** Hook to mutate or attach UI to a message node as it renders. */
+	/**
+	 * Intercept the rendering of an entire message container.
+	 * Ideal for adding message-level UI (e.g., action buttons) to the outer wrapper.
+	 * * @param msg The full message data.
+	 * @param parentEl The outer DOM element wrapping the entire message.
+	 * @param isGenerating True if the LLM is actively streaming this message.
+	 */
 	onMessageRender?: (msg: Message, parentEl: HTMLElement, isGenerating: boolean) => void;
+
+	/**
+	 * Intercept the rendering of an individual content block (e.g., text, reasoning, tool_call).
+	 * Use this to inject custom UI directly inside a specific block's container.
+	 * * @param block The content block data.
+	 * @param containerEl The DOM element wrapping this specific block.
+	 * @param isGenerating True if the LLM is actively streaming this block.
+	 * @returns `true` if the plugin handled the render, preventing the core UI from overwriting it.
+	 */
+	onBlockRender?: (block: ContentBlock, containerEl: HTMLElement, isGenerating: boolean) => boolean;
 }

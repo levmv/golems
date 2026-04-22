@@ -19,14 +19,11 @@ export function ThinkingPlugin(): ChatPlugin {
 
 	return {
 		name: "thinking",
-		onMessageRender: (msg, parentEl, isGenerating) => {
-			if (!hasReasoning(msg)) return;
+		onBlockRender: (block, containerEl, isGenerating) => {
+			// Only claim reasoning blocks
+			if (block.type !== "reasoning") return false;
 
-			// Find the block container created by MessageNode
-			const reasoningBlockEl = parentEl.querySelector(".block-reasoning") as HTMLElement;
-			if (!reasoningBlockEl) return;
-
-			let state = stateMap.get(reasoningBlockEl);
+			let state = stateMap.get(containerEl);
 
 			if (!state) {
 				const btn = el("button", "think-toggle", {
@@ -38,12 +35,10 @@ export function ThinkingPlugin(): ChatPlugin {
 
 				const contentEl = el("div", "think-content");
 				contentEl.style.display = "none";
-
 				const wrapper = el("div", "think-wrapper", {}, [btn, contentEl]);
 
-				// Clear the raw text placeholder inserted by MessageNode and append our UI
-				reasoningBlockEl.innerHTML = "";
-				reasoningBlockEl.appendChild(wrapper);
+				containerEl.innerHTML = "";
+				containerEl.appendChild(wrapper);
 
 				state = {
 					isExpanded: false,
@@ -59,7 +54,9 @@ export function ThinkingPlugin(): ChatPlugin {
 					contentEl.style.display = state!.isExpanded ? "block" : "none";
 					svgIcon.style.transform = `rotate(${state!.isExpanded ? "90deg" : "0deg"})`;
 
-					const displayContent = getDisplayReasoning(msg);
+					// Handle encrypted fallback directly
+					const displayContent =
+						block.text || (block.encrypted ? "<i>Thought process is hidden by the model provider.</i>" : "");
 
 					if (state!.isExpanded && state!.cacheReasoning !== displayContent) {
 						renderSafeHTML(contentEl, displayContent);
@@ -67,30 +64,30 @@ export function ThinkingPlugin(): ChatPlugin {
 					}
 				};
 
-				stateMap.set(reasoningBlockEl, state);
+				stateMap.set(containerEl, state);
 			}
 
-			// We determine "Actively thinking" if generating and there's NO text blocks yet
-			const hasText = msg.blocks.some((b) => b.type === "text" && b.text.trim().length > 0);
-			const isActivelyThinking = isGenerating && !hasText;
-
-			if (state.cacheIsGenerating !== isActivelyThinking) {
-				state.btnSpan.textContent = isActivelyThinking ? "Thinking..." : "Thought Process";
-				state.cacheIsGenerating = isActivelyThinking;
+			// Update UI state based on streaming
+			if (state.cacheIsGenerating !== isGenerating) {
+				state.btnSpan.textContent = isGenerating ? "Thinking..." : "Thought Process";
+				state.cacheIsGenerating = isGenerating;
 			}
 
-			if (isActivelyThinking) {
-				parentEl.classList.add("active-thinking");
+			if (isGenerating) {
+				containerEl.classList.add("active-thinking");
 			} else {
-				parentEl.classList.remove("active-thinking");
+				containerEl.classList.remove("active-thinking");
 			}
 
-			const displayContent = getDisplayReasoning(msg);
+			const displayContent =
+				block.text || (block.encrypted ? "<i>Thought process is hidden by the model provider.</i>" : "");
 
 			if (state.isExpanded && state.cacheReasoning !== displayContent) {
 				renderSafeHTML(state.contentEl, displayContent);
 				state.cacheReasoning = displayContent;
 			}
+
+			return true;
 		},
 	};
 }
