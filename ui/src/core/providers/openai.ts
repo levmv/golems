@@ -1,6 +1,6 @@
 import { parseSSE } from "../../utils/sse";
 import { uuidv7 } from "../../utils/uuid";
-import type { ContentBlock, FinishReason, Message, ProviderAdapter, RequestOptions, StreamEvent } from "../types";
+import type { ChatProvider, FinishReason, Message, RequestOptions, StreamEvent } from "../types";
 
 type OpenAIStreamDelta = {
 	content?: string | null;
@@ -20,11 +20,26 @@ type OpenAIStreamDelta = {
 	[key: string]: unknown;
 };
 
+interface OpenAIStreamChunk {
+	id?: string;
+	choices?: Array<{
+		delta?: OpenAIStreamDelta;
+		finish_reason?: string;
+	}>;
+	usage?: {
+		prompt_tokens?: number;
+		completion_tokens?: number;
+		prompt_tokens_details?: {
+			cached_tokens?: number;
+		};
+	};
+}
+
 type OpenAIContentPart = { type: "text"; text: string } | { type: "image_url"; image_url: { url: string } };
 
 const REASONING_FIELDS = ["reasoning_content", "reasoning", "reasoning_text"] as const;
 
-export class OpenAIAdapter implements ProviderAdapter {
+export class OpenAIProvider implements ChatProvider {
 	private abortController: AbortController | null = null;
 
 	constructor(
@@ -71,11 +86,13 @@ export class OpenAIAdapter implements ProviderAdapter {
 			// Map OpenAI's tool call index to our block IDs
 			const activeToolCalls = new Map<number, string>();
 
+			let finishEmitted = false;
+
 			await parseSSE(response, (data) => {
 				if (data === "[DONE]") return true;
 
 				// Flat try/catch: Just parse and exit early if it's a broken chunk
-				let parsed: any;
+				let parsed: OpenAIStreamChunk;
 				try {
 					parsed = JSON.parse(data);
 				} catch {
@@ -184,11 +201,14 @@ export class OpenAIAdapter implements ProviderAdapter {
 						type: "finish",
 						reason: reasonMap[choice.finish_reason] || "stop",
 					});
+					finishEmitted = true;
 				}
 			});
 
 			// If it finishes normally but didn't emit a finish reason (some providers do this)
-			onEvent({ type: "finish", reason: "stop" });
+			if (!finishEmitted) {
+				onEvent({ type: "finish", reason: "stop" });
+			}
 		} catch (err: unknown) {
 			const isAbort = err instanceof Error && err.name === "AbortError";
 			if (isAbort || this.abortController?.signal.aborted) {
@@ -313,17 +333,29 @@ export class OpenAIAdapter implements ProviderAdapter {
 			if (toolCalls.length > 0) {
 				payload.tool_calls = toolCalls;
 			}
-
 			// Conform to OpenAI's expected content structures
-			if (contentArray.length === 0) {
-				// Required field: use null if tool calls exist, otherwise empty string
-				payload.content = toolCalls.length > 0 ? null : "";
-			} else if (contentArray.length === 1 && contentArray[0].type === "text") {
-				// Fast path for simple text messages (avoids multimodal array overhead)
-				payload.content = contentArray[0].text;
+			if (msg.role === "assistant") {
+				// Assistant messages strictly require a string or null (never an array)
+				if (contentArray.length === 0) {
+					payload.content = toolCalls.length > 0 ? null : "";
+				} else {
+					// Safely flatten any multiple text blocks into a single string
+					payload.content = contentArray
+						.filter((c) => c.type === "text")
+						.map((c) => (c as { text: string }).text)
+						.join("\n\n");
+				}
 			} else {
-				// Multimodal or multi-part message
-				payload.content = contentArray;
+				// User messages can safely use the multimodal array format
+				if (contentArray.length === 0) {
+					payload.content = toolCalls.length > 0 ? null : "";
+				} else if (contentArray.length === 1 && contentArray[0].type === "text") {
+					// Fast path for simple text messages
+					payload.content = contentArray[0].text;
+				} else {
+					// Multimodal or multi-part message
+					payload.content = contentArray;
+				}
 			}
 
 			result.push(payload);

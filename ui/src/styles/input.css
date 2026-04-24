@@ -16,7 +16,7 @@
 		border-color 0.2s ease;
 }
 
-/* TODO: need to fix that since .llm-chat-history now have .feed-spinner so not empty. Maybe by just moving spinner elsewhere */
+/* :has do not fit our es2017 constraint, but we consider degradation of form position - minor */
 .llm-chat-layout-wrapper:has(.llm-chat-history:empty) .llm-chat-form-container {
 	bottom: 50%;
 	transform: translateY(50%);

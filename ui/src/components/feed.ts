@@ -38,7 +38,7 @@ export class Feed {
 			innerHTML: `<div class="message-loading"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>`,
 		});
 		this.spinnerEl.style.display = "none";
-		this.historyContainer.appendChild(this.spinnerEl);
+		this.scrollArea.appendChild(this.spinnerEl);
 	}
 
 	public update(
@@ -122,7 +122,6 @@ export class Feed {
 		}
 		this.nodes.clear();
 		this.historyContainer.innerHTML = "";
-		this.historyContainer.appendChild(this.spinnerEl);
 	}
 
 	private scrollToBottom(behavior: ScrollBehavior = "auto") {

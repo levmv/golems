@@ -1,5 +1,5 @@
-import { LLMChat } from "./core/chat";
-import type { ChatPlugin, ProviderAdapter, StorageAdapter } from "./core/types";
+import { ChatEngine } from "./core/chat-engine";
+import type { ChatPlugin, ChatProvider, ChatStorage } from "./core/types";
 import { AppRouter, type RouterConfig } from "./router";
 import { queryOrThrow } from "./utils/dom";
 
@@ -14,25 +14,26 @@ import { Sidebar } from "./components/sidebar";
 
 export interface ChatUIConfig {
 	container: HTMLElement | string;
-	provider: ProviderAdapter;
-	storage: StorageAdapter;
+	provider: ChatProvider;
+	storage: ChatStorage;
 	routing?: RouterConfig | boolean;
 
-	showSidebar?: boolean;
+	enableSidebar?: boolean;
+	initialSessionId?: string;
 
 	highlighter?: (code: string, language: string) => string;
-	plugins?: (chatApi: LLMChat) => ChatPlugin[];
+	plugins?: (chatApi: ChatEngine) => ChatPlugin[];
 }
 
 export class ChatUI {
-	private chat: LLMChat;
-	private container: HTMLElement;
-	private config: ChatUIConfig;
-	private router: AppRouter;
+	public declare readonly engine: ChatEngine;
+	private declare container: HTMLElement;
+	private declare config: ChatUIConfig;
+	private declare router: AppRouter;
 
-	private inputComponent!: Input;
-	private feedComponent!: Feed;
-	private sidebarComponent!: Sidebar;
+	private declare inputComponent: Input;
+	private declare feedComponent: Feed;
+	private sidebarComponent?: Sidebar;
 	private plugins: ChatPlugin[] = [];
 
 	private elements!: {
@@ -49,7 +50,7 @@ export class ChatUI {
 	};
 
 	constructor(config: ChatUIConfig) {
-		this.config = { showSidebar: true, ...config };
+		this.config = { enableSidebar: true, ...config };
 
 		let routerConfig: RouterConfig = { type: "hash" };
 		if (this.config.routing === false) {
@@ -66,9 +67,9 @@ export class ChatUI {
 		if (!el) throw new Error(`Chat container not found: ${this.config.container}`);
 		this.container = el as HTMLElement;
 
-		const initialSessionId = this.router.getId() || null;
+		const initialSessionId = this.config.initialSessionId || this.router.getId() || null;
 
-		this.chat = new LLMChat({
+		this.engine = new ChatEngine({
 			provider: this.config.provider,
 			storage: this.config.storage,
 			initialSessionId,
@@ -81,9 +82,9 @@ export class ChatUI {
 
 	public async destroy() {
 		this.router.destroy();
-		await this.chat.destroy();
+		await this.engine.destroy();
 
-		if (this.config.showSidebar) {
+		if (this.config.enableSidebar) {
 			this.elements.openSidebarBtn.removeEventListener("click", this.onOpenSidebarBound);
 			this.elements.mainArea.removeEventListener("click", this.onMainAreaClickBound);
 		}
@@ -92,31 +93,24 @@ export class ChatUI {
 			if (plugin.destroy) plugin.destroy();
 		}
 
-		this.sidebarComponent.destroy();
+		this.sidebarComponent?.destroy();
 		this.feedComponent.destroy();
 		this.inputComponent.destroy();
 	}
 
 	private initComponents() {
-		this.plugins = this.config.plugins ? this.config.plugins(this.chat) : [];
-		this.chat.registerPlugins(this.plugins);
+		this.plugins = this.config.plugins ? this.config.plugins(this.engine) : [];
+		this.engine.registerPlugins(this.plugins);
 
 		const mainHeader = queryOrThrow<HTMLElement>(this.container, ".llm-main-header");
 
-		this.elements = {
-			mainArea: queryOrThrow<HTMLElement>(this.container, ".llm-main-area"),
-			sidebarEl: queryOrThrow<HTMLElement>(this.container, ".llm-sidebar"),
-			openSidebarBtn: queryOrThrow<HTMLButtonElement>(mainHeader, ".llm-open-sidebar-btn"),
-			headerTitle: queryOrThrow<HTMLElement>(mainHeader, ".llm-header-title"),
-		};
+		this.elements = {} as typeof this.elements;
+		this.elements.mainArea = queryOrThrow<HTMLElement>(this.container, ".llm-main-area");
+		this.elements.headerTitle = queryOrThrow<HTMLElement>(mainHeader, ".llm-header-title");
 
 		const pluginCtx = {
-			chat: this.chat,
-			elements: {
-				container: this.container,
-				sidebar: this.elements.sidebarEl,
-				header: mainHeader,
-			},
+			engine: this.engine,
+			container: this.container,
 		};
 
 		for (const plugin of this.plugins) {
@@ -126,8 +120,8 @@ export class ChatUI {
 		this.inputComponent = new Input(
 			{
 				container: this.container,
-				onSubmit: async (text) => await this.chat.sendMessage(text),
-				onStop: () => this.chat.stopGeneration(),
+				onSubmit: async (text) => await this.engine.sendMessage(text),
+				onStop: () => this.engine.stopGeneration(),
 			},
 			this.plugins,
 		);
@@ -137,74 +131,75 @@ export class ChatUI {
 			plugins: this.plugins,
 		});
 
-		this.sidebarComponent = new Sidebar({
-			container: this.container,
-			onNewChat: () => {
-				this.chat.createNewSession();
-				this.closeSidebar(true);
-				this.inputComponent.focus();
-			},
-			onSelectSession: (id) => {
-				this.chat.switchSession(id);
-				this.closeSidebar(true);
-			},
-			onDeleteSession: (id) => {
-				this.chat.deleteSession(id);
-			},
-			onLoadMore: () => {
-				this.chat.loadMoreSessions();
-			},
-			onClose: () => {
-				this.closeSidebar(false);
-			},
-			getSessionHref: (id) => this.router.hrefFor(id),
-		});
+		if (this.config.enableSidebar) {
+			this.elements.sidebarEl = queryOrThrow<HTMLElement>(this.container, ".llm-sidebar");
+			this.elements.openSidebarBtn = queryOrThrow<HTMLButtonElement>(mainHeader, ".llm-open-sidebar-btn");
+
+			this.sidebarComponent = new Sidebar({
+				container: this.container,
+				onNewChat: () => {
+					this.engine.createNewSession();
+					this.closeSidebar(true);
+				},
+				onSelectSession: (id) => {
+					this.engine.switchSession(id);
+					this.closeSidebar(true);
+				},
+				onDeleteSession: (id) => {
+					this.engine.deleteSession(id);
+				},
+				onLoadMore: () => {
+					this.engine.loadMoreSessions();
+				},
+				onClose: () => {
+					this.closeSidebar(false);
+				},
+				getSessionHref: (id) => this.router.hrefFor(id),
+			});
+		}
 	}
 
 	private applyConfig() {
-		if (this.config.showSidebar === false) {
-			this.sidebarComponent.setVisible(false);
-			this.elements.openSidebarBtn.style.display = "none";
-			this.container.classList.add("sidebar-closed");
-			return;
-		}
-		const isDesktopClosed = lsGetItem("llm_sidebar_closed") === "true";
+		if (this.config.enableSidebar) {
+			const isDesktopClosed = lsGetItem("llm_sidebar_closed") === "true";
 
-		if (isDesktopClosed && window.innerWidth > 768) {
-			this.elements.sidebarEl.classList.add("hidden-desktop");
-			this.container.classList.add("sidebar-closed");
+			if (isDesktopClosed && window.innerWidth > 768) {
+				this.elements.sidebarEl.classList.add("hidden-desktop");
+				this.container.classList.add("sidebar-closed");
+			}
 		}
 	}
 
 	private bindEvents() {
-		if (this.config.showSidebar) {
+		const store = this.engine.store;
+		if (this.config.enableSidebar) {
 			this.elements.openSidebarBtn.addEventListener("click", this.onOpenSidebarBound);
 			this.elements.mainArea.addEventListener("click", this.onMainAreaClickBound);
 		}
 
 		this.router.listen((id) => {
 			if (id) {
-				this.chat.switchSession(id);
+				this.engine.switchSession(id);
 			} else {
-				this.chat.createNewSession();
+				this.engine.createNewSession();
 			}
 		});
 
-		this.chat.store.subscribe(
+		store.subscribe(
 			(state) => state.sessions,
 			(sessions) => {
-				const state = this.chat.store.get();
-				if (this.config.showSidebar) {
+				const state = store.get();
+				if (this.config.enableSidebar && this.sidebarComponent) {
 					this.sidebarComponent.renderSessions(sessions, state.currentSessionId, state.hasMoreSessions);
 				}
 				this.updateHeaderTitle();
 			},
 		);
 
-		this.chat.store.subscribe(
+		store.subscribe(
 			(state) => state.currentSessionId,
 			(currentSessionId) => {
-				if (this.config.showSidebar) {
+				if (this.config.enableSidebar && this.sidebarComponent) {
 					this.sidebarComponent.setActiveSession(currentSessionId);
 				}
 				this.updateHeaderTitle();
@@ -215,7 +210,7 @@ export class ChatUI {
 
 		// We subscribe globally without a selector because stream chunks are applied
 		// via in-place mutation (for performance), which bypasses selector equality checks.
-		this.chat.store.subscribeGlobal((state) => {
+		store.subscribeGlobal((state) => {
 			const shouldHaveUrlId = state.messages.length > 0 || state.isLoadingSession;
 			const targetId = shouldHaveUrlId ? state.currentSessionId : null;
 
@@ -239,14 +234,15 @@ export class ChatUI {
 			prevIsGenerating = isGenerating;
 		});
 
-		this.chat.store.subscribe(
+		store.subscribe(
 			(state) => state.currentSessionId,
 			() => {
 				this.inputComponent.setText("");
+				this.inputComponent.focus();
 			},
 		);
 
-		this.chat.store.subscribe(
+		store.subscribe(
 			(state) => (state.generatingMessageId ? 2 : 0) | (state.isLoadingSession ? 1 : 0),
 			(bits) => {
 				const isGenerating = !!(bits & 2);
@@ -258,7 +254,7 @@ export class ChatUI {
 	}
 
 	private updateHeaderTitle() {
-		const state = this.chat.store.get();
+		const state = this.engine.store.get();
 		const activeSession = state.sessions.find((s) => s.id === state.currentSessionId);
 		this.elements.headerTitle.textContent = activeSession ? activeSession.title : "New Chat";
 	}

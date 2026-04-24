@@ -1,49 +1,49 @@
-import type { LLMChat } from "./chat";
+import type { ChatEngine } from "./chat-engine";
 
 export type JsonValue = string | number | boolean | null | { [key: string]: JsonValue } | JsonValue[];
 
 export type ContentBlock =
 	| {
-		id: string;
-		type: "text";
-		text: string;
-	}
+			id: string;
+			type: "text";
+			text: string;
+	  }
 	| {
-		id: string;
-		type: "reasoning";
-		text: string;
-		encrypted?: boolean;
-	}
+			id: string;
+			type: "reasoning";
+			text: string;
+			encrypted?: boolean;
+	  }
 	| {
-		id: string;
-		type: "tool_call";
-		toolCallId: string;
-		name: string;
-		argsText: string;
-		status: "streaming" | "pending" | "running" | "complete" | "error";
-	}
+			id: string;
+			type: "tool_call";
+			toolCallId: string;
+			name: string;
+			argsText: string;
+			status: "streaming" | "pending" | "running" | "complete" | "error";
+	  }
 	| {
-		id: string;
-		type: "tool_result";
-		toolCallId: string;
-		outputText: string;
-		isError?: boolean;
-	}
+			id: string;
+			type: "tool_result";
+			toolCallId: string;
+			outputText: string;
+			isError?: boolean;
+	  }
 	| {
-		id: string;
-		type: "artifact";
-		artifactId: string;
-		mime: string;
-		title?: string;
-		content: string;
-	}
+			id: string;
+			type: "artifact";
+			artifactId: string;
+			mime: string;
+			title?: string;
+			content: string;
+	  }
 	| {
-		id: string;
-		type: "file";
-		mimeType: string;
-		name?: string;
-		data: string;
-	};
+			id: string;
+			type: "file";
+			mimeType: string;
+			name?: string;
+			data: string;
+	  };
 
 export type Role = "system" | "user" | "assistant" | "tool";
 
@@ -52,10 +52,10 @@ export interface Message {
 	role: Role;
 	blocks: ContentBlock[];
 	meta?: {
-		source?: "remote" | "local";
-		name?: string;
-		createdAt?: number;
+		// Used to prevent this message from being sent to the LLM
 		ephemeral?: boolean;
+		// Escape hatch for plugin developers to store custom state
+		[key: string]: unknown;
 	};
 }
 
@@ -63,62 +63,62 @@ export type FinishReason = "stop" | "length" | "tool_use" | "content_filter" | "
 
 export type StreamEvent =
 	| {
-		type: "message_start";
-		message: Message;
-	}
+			type: "message_start";
+			message: Message;
+	  }
 	| {
-		type: "text_delta";
-		messageId: string;
-		blockId: string;
-		delta: string;
-	}
+			type: "text_delta";
+			messageId: string;
+			blockId: string;
+			delta: string;
+	  }
 	| {
-		type: "reasoning_delta";
-		messageId: string;
-		blockId: string;
-		delta: string;
-		encrypted?: boolean;
-	}
+			type: "reasoning_delta";
+			messageId: string;
+			blockId: string;
+			delta: string;
+			encrypted?: boolean;
+	  }
 	| {
-		type: "tool_call_start";
-		messageId: string;
-		block: Extract<ContentBlock, { type: "tool_call" }>;
-	}
+			type: "tool_call_start";
+			messageId: string;
+			block: Extract<ContentBlock, { type: "tool_call" }>;
+	  }
 	| {
-		type: "tool_call_delta";
-		messageId: string;
-		blockId: string;
-		name?: string;
-		argsDelta?: string;
-		status?: Extract<ContentBlock, { type: "tool_call" }>["status"];
-	}
+			type: "tool_call_delta";
+			messageId: string;
+			blockId: string;
+			name?: string;
+			argsDelta?: string;
+			status?: Extract<ContentBlock, { type: "tool_call" }>["status"];
+	  }
 	| {
-		type: "tool_result";
-		messageId: string;
-		block: Extract<ContentBlock, { type: "tool_result" }>;
-	}
+			type: "tool_result";
+			messageId: string;
+			block: Extract<ContentBlock, { type: "tool_result" }>;
+	  }
 	| {
-		type: "artifact";
-		messageId: string;
-		block: Extract<ContentBlock, { type: "artifact" }>;
-	}
+			type: "artifact";
+			messageId: string;
+			block: Extract<ContentBlock, { type: "artifact" }>;
+	  }
 	| {
-		type: "usage";
-		input: number;
-		output: number;
-		cacheRead?: number;
-		cacheWrite?: number;
-	}
+			type: "usage";
+			input: number;
+			output: number;
+			cacheRead?: number;
+			cacheWrite?: number;
+	  }
 	| {
-		type: "error";
-		message: string;
-		code?: string;
-		retryable?: boolean;
-	}
+			type: "error";
+			message: string;
+			code?: string;
+			retryable?: boolean;
+	  }
 	| {
-		type: "finish";
-		reason: FinishReason;
-	};
+			type: "finish";
+			reason: FinishReason;
+	  };
 
 export interface ChatSessionMeta {
 	id: string;
@@ -148,8 +148,8 @@ export interface ChatState {
 	error: { message: string; id?: string } | null;
 }
 
-export interface StorageAdapter {
-	loadSessions(limit: number, cursor?: number): Promise<PaginatedSessions>;
+export interface ChatStorage {
+	loadSessions(limit: number, cursor?: { updatedAt: number; id: string }): Promise<PaginatedSessions>;
 	loadOne(id: string): Promise<ChatSession | null>;
 	save(session: ChatSession): Promise<void>;
 	updateMetadata?(id: string, meta: Partial<ChatSessionMeta>): Promise<void>;
@@ -173,7 +173,7 @@ export interface ChatRequestParams {
 	options: RequestOptions;
 }
 
-export interface ProviderAdapter {
+export interface ChatProvider {
 	streamChat(messages: Message[], options: RequestOptions, onEvent: (event: StreamEvent) => void): Promise<void>;
 
 	abort(): void;
@@ -186,13 +186,27 @@ export interface RenderConfig {
 	plugins: ChatPlugin[];
 }
 
+type AnyFn = (...args: never[]) => unknown;
+
+export type DeepReadonly<T> = T extends AnyFn
+	? T
+	: T extends object
+		? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+		: T;
+
+export interface ReadonlyChatRequestParams {
+	readonly messages: readonly DeepReadonly<Message>[];
+	readonly options: DeepReadonly<RequestOptions>;
+}
+
+export interface ChatRequestPatch {
+	messages?: Message[];
+	options?: Partial<RequestOptions>;
+}
+
 export interface PluginContext {
-	chat: LLMChat;
-	elements: {
-		container: HTMLElement;
-		sidebar: HTMLElement;
-		header: HTMLElement;
-	};
+	engine: ChatEngine;
+	container: HTMLElement;
 }
 
 export interface PluginInputContext {
@@ -214,8 +228,12 @@ export interface ChatPlugin {
 
 	/**
 	 * Intercept and mutate the payload (messages, options) right before it is sent to the LLM.
+	 * To optimize performance, the payload is passed as Readonly.
+	 * Return a ChatRequestPatch to override specific parts, or void if no changes are needed.
 	 */
-	beforeSubmit?: (params: ChatRequestParams) => ChatRequestParams | Promise<ChatRequestParams>;
+	beforeSubmit?: (
+		params: ReadonlyChatRequestParams,
+	) => ChatRequestPatch | undefined | Promise<ChatRequestPatch | undefined>;
 
 	/**
 	 * Fires when the input area mounts. Use to append/prepend custom UI to the form.

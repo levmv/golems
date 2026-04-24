@@ -59,6 +59,10 @@ export class Store<T extends object> {
 		return () => this.listeners.delete(listener);
 	}
 
+	public clearAllListeners(): void {
+		this.listeners.clear();
+	}
+
 	private notify() {
 		for (const listener of this.listeners) {
 			listener(this.state);

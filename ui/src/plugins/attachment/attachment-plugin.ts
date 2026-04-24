@@ -9,6 +9,12 @@ export interface AttachmentPluginConfig {
 	maxFileSize?: number;
 	/** Callback when a file exceeds the limit. Defaults to window.alert */
 	onSizeExceeded?: (file: File, maxSize: number) => void;
+
+	/** 
+	 * A CSS selector defining where the image preview tray should be mounted.
+	 * If omitted, it will be inserted just before the chat form.
+	 */
+	previewMountSelector?: string;
 }
 
 export function AttachmentPlugin(config?: AttachmentPluginConfig): ChatPlugin {
@@ -71,7 +77,18 @@ export function AttachmentPlugin(config?: AttachmentPluginConfig): ChatPlugin {
 			});
 
 			ctx.form.prepend(attachBtn);
-			ctx.form.parentElement!.prepend(previewContainer);
+			if (config?.previewMountSelector) {
+				const customTarget = document.querySelector(config.previewMountSelector);
+				if (customTarget) {
+					customTarget.appendChild(previewContainer);
+				} else {
+					console.error(
+						`AttachmentPlugin: Could not find element matching previewMountSelector "${config.previewMountSelector}". Image previews will not be visible.`,
+					);
+				}
+			} else {
+				ctx.form.before(previewContainer);
+			}
 			ctx.form.appendChild(fileInput);
 
 			boundOnChange = async () => {

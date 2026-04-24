@@ -1,6 +1,11 @@
 export type Highlighter = (code: string, lang: string) => string;
 
-const parser = new DOMParser();
+let parser: DOMParser | null = null;
+
+function getParser(): DOMParser {
+	parser ??= new DOMParser();
+	return parser;
+}
 
 // biome-ignore format:.
 const ALLOWED_TAGS = new Set([
@@ -24,7 +29,7 @@ const IMG_PREFIXES = ["http://", "https://", "data:image/"];
  * @param highlighter - Optional function to apply syntax highlighting to <code> blocks.
  */
 export function renderSafeHTML(targetNode: HTMLElement, rawHtml: string, highlighter?: Highlighter): void {
-	const doc = parser.parseFromString(rawHtml, "text/html");
+	const doc = getParser().parseFromString(rawHtml, "text/html");
 	const walker = document.createTreeWalker(doc.body, NodeFilter.SHOW_ELEMENT);
 
 	const nodesToEscape: Element[] = [];

@@ -1,6 +1,7 @@
 :root {
 	--bg: #ffffff;
 	--surface: #f9fafb;
+	--surface-user: #f3f4f6;
 	--hover-bg: rgba(0, 0, 0, 0.05);
 
 	--text: #111827;
@@ -69,13 +70,13 @@ body {
 	pointer-events: none;
 }
 
-.llm-main-header>button {
+.llm-main-header > button {
 	pointer-events: auto;
 	background-color: rgba(255, 255, 255, 0.8);
 	backdrop-filter: blur(4px);
 }
 
-.llm-main-header>button:hover {
+.llm-main-header > button:hover {
 	background-color: var(--hover-bg);
 }
 
@@ -155,7 +156,7 @@ body {
 		pointer-events: auto;
 	}
 
-	.llm-main-header>button {
+	.llm-main-header > button {
 		background-color: transparent;
 		backdrop-filter: none;
 	}

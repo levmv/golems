@@ -1,6 +1,6 @@
-import type { ChatSession, ChatSessionMeta, PaginatedSessions, StorageAdapter } from "../types";
+import type { ChatSession, ChatSessionMeta, ChatStorage, PaginatedSessions } from "../types";
 
-export class RemoteStorageAdapter implements StorageAdapter {
+export class RemoteStorage implements ChatStorage {
 	constructor(
 		private baseUrl: string,
 		private getToken: () => string | null,
@@ -14,11 +14,12 @@ export class RemoteStorageAdapter implements StorageAdapter {
 		};
 	}
 
-	async loadSessions(limit: number, cursor?: number): Promise<PaginatedSessions> {
+	async loadSessions(limit: number, cursor?: { updatedAt: number; id: string }): Promise<PaginatedSessions> {
 		const url = new URL(`${this.baseUrl}/api/chats`);
 		url.searchParams.append("limit", limit.toString());
 		if (cursor) {
-			url.searchParams.append("cursor", cursor.toString());
+			url.searchParams.append("cursor", cursor.updatedAt.toString());
+			url.searchParams.append("cursorId", cursor.id);
 		}
 
 		const res = await fetch(url.toString(), { headers: this.headers });

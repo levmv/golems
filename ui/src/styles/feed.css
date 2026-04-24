@@ -31,7 +31,7 @@
 
 .message.user .message-content {
 	align-self: flex-end;
-	background-color: var(--surface);
+	background-color: var(--surface-user);
 	padding: 0.75rem 1.25rem;
 	border-radius: 1.5rem 1.5rem 0 1.5rem;
 }
@@ -78,12 +78,24 @@
 	color: var(--text-secondary);
 }
 
+/* Adjacent headers spacing */
+.message :is(h1, h2, h3, h4, h5, h6) + :is(h1, h2, h3, h4, h5, h6) {
+	margin-top: 0.25rem;
+}
+
 .message code {
 	background-color: var(--surface);
 	padding: 0.2em 0.4em;
 	border-radius: 0.25rem;
 	font-family: monospace;
 	font-size: 0.9em;
+}
+
+/* Code inside headers */
+.message :is(h1, h2, h3, h4, h5, h6) code {
+	background-color: #fdf1e7;
+	padding: 0.2em;
+	color: inherit;
 }
 
 .message pre {
@@ -105,6 +117,13 @@
 	margin-left: 0;
 	margin-bottom: 1rem;
 	color: var(--text-muted);
+}
+
+/* Clean hr */
+.message hr {
+	border: none;
+	border-top: 1px solid var(--border);
+	margin: 1.5rem 0;
 }
 
 .message-loading {
@@ -153,7 +172,6 @@
 	gap: 0.5rem;
 	padding: 0.75rem 1rem;
 	background-color: rgba(239, 68, 68, 0.1);
-	/* Transparent red using var */
 	color: var(--danger);
 	border: 1px solid rgba(239, 68, 68, 0.3);
 	border-radius: 0.5rem;
@@ -187,6 +205,11 @@
 	justify-content: flex-start;
 }
 
+/* Hide actions while generating */
+.message.generating .message-actions {
+	display: none !important;
+}
+
 .action-icon-btn {
 	background: transparent;
 	border: none;
@@ -211,4 +234,57 @@
 	justify-content: center;
 	padding-top: 2rem;
 	width: 100%;
+}
+
+.message.assistant.generating .message-blocks-wrapper > .block-text:last-child .message-content > *:last-child::after {
+	content: "";
+	display: inline-block;
+	width: 6px;
+	height: 1.1em;
+	background-color: var(--text-muted);
+	vertical-align: -0.1em;
+	margin-left: 4px;
+	animation: cursor-blink 1s step-end infinite;
+	border-radius: 1px;
+}
+
+@keyframes cursor-blink {
+	0%,
+	100% {
+		opacity: 1;
+	}
+
+	50% {
+		opacity: 0;
+	}
+}
+
+.block-tool {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	padding: 0.5rem 0.75rem;
+	background-color: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 0.5rem;
+	font-family: monospace;
+	font-size: 0.85rem;
+	color: var(--text-muted);
+	margin-bottom: 0.5rem;
+	transition: all 0.2s ease;
+}
+
+.tool-streaming {
+	border-color: var(--text-muted);
+	opacity: 0.8;
+}
+
+.tool-complete {
+	border-left: 4px solid #10b981;
+	color: var(--text);
+}
+
+.tool-error {
+	border-left: 4px solid var(--danger);
+	color: var(--danger);
 }

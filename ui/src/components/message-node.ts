@@ -22,7 +22,7 @@ export class MessageNode {
 	private blockTimers = new Map<string, number>();
 
 	private cacheError: string | null = null;
-	private cacheActionDisplay: string = "";
+	private cacheIsGenerating: boolean = false;
 	private isDestroyed = false;
 
 	constructor(
@@ -41,9 +41,14 @@ export class MessageNode {
 	}
 
 	public update(msg: Message, isGenerating: boolean, error: string | null) {
-		this.renderLoading(msg, isGenerating, error);
+		if (this.cacheIsGenerating !== isGenerating) {
+			this.el.classList.toggle("generating", isGenerating);
+			this.cacheIsGenerating = isGenerating;
+		}
+
 		this.renderBlocks(msg, isGenerating);
-		this.renderActions(msg, isGenerating);
+		this.renderLoading(msg, isGenerating, error);
+		this.renderActions(msg);
 		this.renderError(error);
 
 		for (const plugin of this.config.plugins) {
@@ -62,8 +67,8 @@ export class MessageNode {
 	}
 
 	private renderLoading(msg: Message, isGenerating: boolean, error: string | null) {
-		// Only show loading dots if actively generating, has no blocks, and hasn't crashed.
-		const isLoading = isGenerating && !error && msg.role === "assistant" && msg.blocks.length === 0;
+		const hasVisibleBlocks = this.blockNodes.size > 0;
+		const isLoading = isGenerating && !error && msg.role === "assistant" && !hasVisibleBlocks;
 
 		if (isLoading) {
 			if (!this.loadingEl) {
@@ -80,50 +85,60 @@ export class MessageNode {
 
 	private renderBlocks(msg: Message, isGenerating: boolean) {
 		const currentBlockIds = new Set<string>();
+		let displayIndex = 0;
 
-		// 1. Create or update blocks
 		for (let i = 0; i < msg.blocks.length; i++) {
 			const block = msg.blocks[i];
 			const isLastBlock = i === msg.blocks.length - 1;
-			currentBlockIds.add(block.id);
 
 			let container = this.blockNodes.get(block.id);
+			let isNew = false;
 
 			if (!container) {
 				container = el("div", `content-block block-${block.type}`);
 				container.dataset.blockId = block.id;
-				this.blocksContainer.appendChild(container);
-				this.blockNodes.set(block.id, container);
-			}
-
-			// Ensure physical DOM order matches array order (important for edits/prepends)
-			if (this.blocksContainer.children[i] !== container) {
-				this.blocksContainer.insertBefore(container, this.blocksContainer.children[i]);
+				isNew = true;
 			}
 
 			let handledByPlugin = false;
 			for (const plugin of this.config.plugins) {
-				if (plugin.onBlockRender && plugin.onBlockRender(block, container, isGenerating)) {
+				if (plugin.onBlockRender?.(block, container, isGenerating)) {
 					handledByPlugin = true;
 					break;
 				}
 			}
 
 			if (!handledByPlugin) {
-				if (block.type === "text") {
+				if (block.type === "reasoning") {
+					// Fallback behavior: If no plugin (like ThinkingPlugin) handles reasoning blocks,
+					// we skip them entirely. No DOM node will be added or retained.
+					continue;
+				} else if (block.type === "text") {
 					this.renderTextBlock(block, container, isGenerating, isLastBlock);
 				} else if (block.type === "file") {
 					this.renderFileBlock(block, container);
 				} else if (block.type === "tool_call") {
 					container.textContent = `🛠 Tool Call: ${block.name} (${block.status})`;
 					container.className = `content-block block-tool tool-${block.status}`;
-				} else if (block.type === "reasoning") {
-					container.textContent = block.text;
 				}
 			}
+
+			// If we didn't 'continue', it means the block is visible
+			currentBlockIds.add(block.id);
+
+			if (isNew) {
+				this.blocksContainer.appendChild(container);
+				this.blockNodes.set(block.id, container);
+			}
+
+			// Ensure physical DOM order matches visual index order
+			if (this.blocksContainer.children[displayIndex] !== container) {
+				this.blocksContainer.insertBefore(container, this.blocksContainer.children[displayIndex]);
+			}
+			displayIndex++;
 		}
 
-		// 2. Cleanup orphaned blocks (e.g., when a message is edited)
+		// Cleanup orphaned or newly-ignored blocks
 		for (const [id, container] of this.blockNodes.entries()) {
 			if (!currentBlockIds.has(id)) {
 				container.remove();
@@ -212,7 +227,7 @@ export class MessageNode {
 		}
 	}
 
-	private renderActions(msg: Message, isGenerating: boolean) {
+	private renderActions(msg: Message) {
 		if (msg.role !== "assistant" || msg.blocks.length === 0) {
 			if (this.actionsEl) this.actionsEl.style.display = "none";
 			return;
@@ -242,13 +257,6 @@ export class MessageNode {
 
 			this.actionsEl = el("div", "message-actions", null, actionButtons);
 			this.el.appendChild(this.actionsEl);
-		}
-
-		const targetDisplay = isGenerating ? "none" : "flex";
-
-		if (this.cacheActionDisplay !== targetDisplay) {
-			this.actionsEl.style.display = targetDisplay;
-			this.cacheActionDisplay = targetDisplay;
 		}
 	}
 

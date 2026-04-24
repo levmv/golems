@@ -1,6 +1,6 @@
 import "./settings.css";
-import { OpenAIAdapter } from "../../core/adapters/openai";
-import type { ChatPlugin, PluginContext, ProviderAdapter } from "../../core/types";
+import { OpenAIProvider } from "../../core/providers/openai";
+import type { ChatPlugin, ChatProvider, PluginContext } from "../../core/types";
 import { el } from "../../utils/dom";
 import { ICON_SETTINGS } from "../../utils/icons";
 
@@ -26,7 +26,7 @@ export interface SettingsPluginConfig {
 	 * A factory function that returns the correct ProviderAdapter based on the settings.
 	 * Defaults to returning an OpenAIAdapter.
 	 */
-	createAdapter?: (settings: SettingsState) => ProviderAdapter;
+	createAdapter?: (settings: SettingsState) => ChatProvider;
 }
 
 export function SettingsPlugin(config?: SettingsPluginConfig): ChatPlugin {
@@ -56,7 +56,7 @@ export function SettingsPlugin(config?: SettingsPluginConfig): ChatPlugin {
 	let mountedTriggerEl: Element | null = null;
 	let mountedTriggerHandler: (() => void) | null = null;
 
-	const buildAdapter = config?.createAdapter ?? ((s) => new OpenAIAdapter(s.apiKey, s.endpoint, s.model));
+	const buildAdapter = config?.createAdapter ?? ((s) => new OpenAIProvider(s.apiKey, s.endpoint, s.model));
 
 	function applySettings(ctx: PluginContext, settings: typeof currentSettings) {
 		currentSettings = settings;
@@ -64,7 +64,11 @@ export function SettingsPlugin(config?: SettingsPluginConfig): ChatPlugin {
 			localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
 		} catch (e) {}
 
-		ctx.chat.setProvider(buildAdapter(settings));
+		ctx.engine.setProvider(buildAdapter(settings));
+
+		ctx.engine.setRequestDefaults({
+			systemPrompt: settings.systemPrompt || undefined,
+		});
 	}
 
 	function createModal(ctx: PluginContext) {
@@ -141,7 +145,7 @@ export function SettingsPlugin(config?: SettingsPluginConfig): ChatPlugin {
 			const openModal = () => {
 				if (!modalOverlay) {
 					modalOverlay = createModal(ctx);
-					ctx.elements.container.appendChild(modalOverlay);
+					ctx.container.appendChild(modalOverlay);
 				}
 			};
 
@@ -157,7 +161,7 @@ export function SettingsPlugin(config?: SettingsPluginConfig): ChatPlugin {
 				return;
 			}
 
-			const footer = ctx.elements.sidebar.querySelector(".sidebar-footer");
+			const footer = ctx.container.querySelector(".sidebar-footer");
 			if (footer) {
 				const btn = el("button", "settings-btn", {
 					title: "Settings",
@@ -171,13 +175,6 @@ export function SettingsPlugin(config?: SettingsPluginConfig): ChatPlugin {
 			}
 		},
 
-		// Intercept every chat request and inject the system prompt if one is set
-		beforeSubmit: (params) => {
-			if (currentSettings.systemPrompt) {
-				params.options.systemPrompt = currentSettings.systemPrompt;
-			}
-			return params;
-		},
 		destroy: () => {
 			if (mountedTriggerEl && mountedTriggerHandler) {
 				mountedTriggerEl.removeEventListener("click", mountedTriggerHandler);

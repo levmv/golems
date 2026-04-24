@@ -1,12 +1,12 @@
-export { IndexedDBAdapter } from "./core/adapters/indexed-db";
-export { OpenAIAdapter } from "./core/adapters/openai";
-export { RemoteStorageAdapter } from "./core/adapters/remote";
+export { OpenAIProvider as OpenAIAdapter } from "./core/providers/openai";
+export { IndexedDBStorage as IndexedDBAdapter } from "./core/storage/indexed-db";
+export { RemoteStorage as RemoteStorageAdapter } from "./core/storage/remote";
 export type {
 	ChatPlugin,
+	ChatProvider as ProviderAdapter,
 	ChatSession,
+	ChatStorage as StorageAdapter,
 	Message,
-	ProviderAdapter,
-	StorageAdapter,
 } from "./core/types";
 export { ChatUI, type ChatUIConfig } from "./main";
 

@@ -1,4 +1,7 @@
 {
+	"files": {
+		"includes": ["**", "!!**/dist"]
+	},
 	"linter": {
 		"rules": {
 			"recommended": true,

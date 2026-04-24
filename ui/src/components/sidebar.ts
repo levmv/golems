@@ -20,6 +20,12 @@ export class Sidebar {
 	private loadMoreTrigger: HTMLElement;
 	private observer: IntersectionObserver;
 
+	private onNewChatBound = () => this.props.onNewChat();
+	private onCloseBound = (e: MouseEvent) => {
+		e.stopPropagation();
+		this.props.onClose();
+	};
+
 	constructor(private props: SidebarProps) {
 		this.sidebar = queryOrThrow<HTMLElement>(props.container, ".llm-sidebar");
 		this.content = queryOrThrow<HTMLElement>(this.sidebar, ".sidebar-content");
@@ -46,13 +52,10 @@ export class Sidebar {
 
 	private bindEvents() {
 		if (this.newChatBtn) {
-			this.newChatBtn.addEventListener("click", () => this.props.onNewChat());
+			this.newChatBtn.addEventListener("click", this.onNewChatBound);
 		}
 		if (this.closeBtn) {
-			this.closeBtn.addEventListener("click", (e) => {
-				e.stopPropagation();
-				this.props.onClose();
-			});
+			this.closeBtn.addEventListener("click", this.onCloseBound);
 		}
 	}
 
@@ -140,5 +143,11 @@ export class Sidebar {
 
 	public destroy() {
 		this.observer.disconnect();
+		if (this.newChatBtn) {
+			this.newChatBtn.removeEventListener("click", this.onNewChatBound);
+		}
+		if (this.closeBtn) {
+			this.closeBtn.removeEventListener("click", this.onCloseBound);
+		}
 	}
 }

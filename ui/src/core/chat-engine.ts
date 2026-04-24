@@ -1,36 +1,40 @@
+import { devFreeze } from "../utils/freeze";
 import { uuidv7 } from "../utils/uuid";
 import { extractPlainText } from "./msg-utils";
 import { Store } from "./store";
 import type {
 	ChatPlugin,
+	ChatProvider,
 	ChatRequestParams,
 	ChatSession,
 	ChatState,
+	ChatStorage,
 	ContentBlock,
-	FinishReason,
 	Message,
-	ProviderAdapter,
-	StorageAdapter,
+	ReadonlyChatRequestParams,
+	RequestOptions,
 	StreamEvent,
 } from "./types";
 
-export interface LLMChatConfig {
-	provider: ProviderAdapter;
-	storage: StorageAdapter;
+export interface ChatEngineConfig {
+	provider: ChatProvider;
+	storage: ChatStorage;
 	initialSessionId?: string | null;
 }
 
-export class LLMChat {
+export class ChatEngine {
 	public store: Store<ChatState>;
 
-	private provider: ProviderAdapter;
-	private storage: StorageAdapter;
+	private provider: ChatProvider;
+	private storage: ChatStorage;
 	private plugins: ChatPlugin[] = [];
+	private requestDefaults: Partial<RequestOptions> = {};
 
 	private isFetchingSessions = false;
+
 	private switchSeq = 0;
 
-	constructor(config: LLMChatConfig) {
+	constructor(config: ChatEngineConfig) {
 		this.provider = config.provider;
 		this.storage = config.storage;
 
@@ -61,8 +65,8 @@ export class LLMChat {
 		return this.store.get().generatingMessageId !== null;
 	}
 
-	public setProvider(newProvider: ProviderAdapter) {
-		if (this.isBusy) this.stopGeneration();
+	public async setProvider(newProvider: ChatProvider) {
+		if (this.isBusy) await this.stopGeneration();
 		this.provider = newProvider;
 	}
 
@@ -74,7 +78,10 @@ export class LLMChat {
 
 		try {
 			const sessions = this.state.sessions;
-			const cursor = sessions.length > 0 ? sessions[sessions.length - 1].updatedAt : undefined;
+			const cursor =
+				sessions.length > 0
+					? { updatedAt: sessions[sessions.length - 1].updatedAt, id: sessions[sessions.length - 1].id }
+					: undefined;
 
 			const result = await this.storage.loadSessions(20, cursor);
 
@@ -153,7 +160,7 @@ export class LLMChat {
 			});
 
 			if (isCurrent) {
-				this.createNewSession();
+				await this.createNewSession();
 			}
 		} catch (error) {
 			console.error(`Failed to delete session "${id}"`, error);
@@ -163,7 +170,7 @@ export class LLMChat {
 	public async sendMessage(content: string) {
 		if (this.isBusy) return;
 
-		const currentMessages = this.state.messages;
+		const currentMessages = this.cleanDeadMessages(this.state.messages);
 
 		const userMsg: Message = {
 			id: uuidv7(),
@@ -183,7 +190,7 @@ export class LLMChat {
 	public async editAndResubmit(messageId: string, newContent: string) {
 		if (this.isBusy) return;
 
-		const currentMessages = this.state.messages;
+		const currentMessages = this.cleanDeadMessages(this.state.messages);
 		const targetIndex = currentMessages.findIndex((m) => m.id === messageId);
 
 		if (targetIndex === -1) return;
@@ -204,10 +211,31 @@ export class LLMChat {
 		this.startStreamingResponse(updatedMessages);
 	}
 
+	/**
+	 * Completely replaces the current session's message history and saves it to storage.
+	 * Useful for clearing history, compacting context, or modifying past messages.
+	 */
+	public async setMessages(messages: Message[]) {
+		if (this.isBusy) {
+			console.warn("Cannot modify history while the AI is generating a response.");
+			return;
+		}
+
+		this.store.set({ messages });
+		await this.persistCurrentSession();
+	}
+
+	/**
+	 * Sets global default options (e.g., systemPrompt, temperature) for all outgoing requests.
+	 */
+	public setRequestDefaults(defaults: Partial<RequestOptions>) {
+		this.requestDefaults = { ...this.requestDefaults, ...defaults };
+	}
+
 	public async stopGeneration() {
 		if (!this.isBusy) return;
 		this.provider.abort();
-		await this.finalizeStream({ wasAborted: true });
+		await this.finalizeStream(true);
 	}
 
 	public async destroy() {
@@ -215,6 +243,7 @@ export class LLMChat {
 		if (this.storage.close) {
 			this.storage.close();
 		}
+		this.store.clearAllListeners();
 	}
 
 	private async init(targetId: string, isFromUrl: boolean) {
@@ -251,6 +280,7 @@ export class LLMChat {
 		}
 
 		if (activeSession) {
+			if (this.state.currentSessionId !== targetId) return;
 			this.store.set({
 				sessions,
 				hasMoreSessions: result.hasMore,
@@ -292,37 +322,38 @@ export class LLMChat {
 			return true;
 		});
 
-		let payloadParams: ChatRequestParams = {
-			messages: validContext.map((m) => ({ ...m })),
-			options: {},
-		};
-
+		let wasAborted = false;
 		try {
-			for (const plugin of this.plugins) {
-				if (plugin.beforeSubmit) {
-					payloadParams = await plugin.beforeSubmit(payloadParams);
-				}
-			}
+			const payloadParams = await this.prepareRequestParams(validContext);
 
 			if (payloadParams.options.systemPrompt) {
-				payloadParams.messages.unshift({
-					id: uuidv7(),
-					role: "system",
-					blocks: [{ id: uuidv7(), type: "text", text: payloadParams.options.systemPrompt }],
-				});
+				payloadParams.messages = [
+					{
+						id: uuidv7(),
+						role: "system",
+						blocks: [{ id: uuidv7(), type: "text", text: payloadParams.options.systemPrompt }],
+					},
+					...payloadParams.messages,
+				];
 			}
 
-			let finalReason: FinishReason = "stop";
-
 			await this.provider.streamChat(payloadParams.messages, payloadParams.options, (event) => {
-				if (event.type === "finish") finalReason = event.reason;
+				if (event.type === "finish" && event.reason === "aborted") {
+					wasAborted = true;
+				}
 				this.handleStreamEvent(pendingId, event);
 			});
+		} catch (err: unknown) {
+			const errorMessage =
+				err instanceof Error
+					? err.message
+					: typeof err === "object" && err !== null
+						? JSON.stringify(err)
+						: String(err);
 
-			// Finish up stream
-			await this.finalizeStream({ reason: finalReason });
-		} catch (err: any) {
-			this.finalizeStream({ error: err });
+			this.store.set({ error: { message: errorMessage, id: pendingId } });
+		} finally {
+			await this.finalizeStream(wasAborted);
 		}
 	}
 
@@ -380,7 +411,15 @@ export class LLMChat {
 				case "artifact":
 					msg.blocks.push(event.block);
 					break;
-
+				case "finish": {
+					const finalStatus = event.reason === "error" || event.reason === "aborted" ? "error" : "complete";
+					for (const b of msg.blocks) {
+						if (b.type === "tool_call" && b.status === "streaming") {
+							b.status = finalStatus;
+						}
+					}
+					break;
+				}
 				// Usage, finish, error handled mostly outside mutation or discarded
 				case "error":
 					state.error = { message: event.message, id: pendingId };
@@ -389,26 +428,43 @@ export class LLMChat {
 		});
 	}
 
-	private async finalizeStream(opts: { error?: Error; wasAborted?: boolean; reason?: FinishReason }) {
+	private async prepareRequestParams(messages: Message[]): Promise<ChatRequestParams> {
+		const payloadParams: ChatRequestParams = {
+			messages: [...messages],
+			options: { ...this.requestDefaults },
+		};
+
+		for (const plugin of this.plugins) {
+			if (plugin.beforeSubmit) {
+				const frozenParams = devFreeze({ ...payloadParams }) as ReadonlyChatRequestParams;
+				const patch = await plugin.beforeSubmit(frozenParams);
+
+				if (patch) {
+					if (patch.messages) payloadParams.messages = patch.messages;
+					if (patch.options) payloadParams.options = { ...payloadParams.options, ...patch.options };
+				}
+			}
+		}
+
+		return payloadParams;
+	}
+
+	private async finalizeStream(wasAborted: boolean = false) {
 		const pendingId = this.state.generatingMessageId;
 		if (!pendingId) return;
 
 		this.store.set({ generatingMessageId: null });
 
 		try {
-			if (opts.error) {
-				this.store.set({
-					error: { message: opts.error.message, id: pendingId },
-				});
-			}
-
 			await this.persistCurrentSession();
 
 			const currentMsgs = this.state.messages;
 			const sessionId = this.state.currentSessionId;
 
+			const hasError = this.state.error !== null;
+
 			// Auto-title trigger
-			if (!opts.error && !opts.wasAborted && this.provider.generateTitle) {
+			if (!hasError && !wasAborted && this.provider.generateTitle) {
 				const assistantRepliesCount = currentMsgs.filter((m) => m.role === "assistant" && m.blocks.length > 0).length;
 
 				if (assistantRepliesCount === 1) {
@@ -419,7 +475,6 @@ export class LLMChat {
 			console.error("Failed to finalize stream", error);
 		}
 	}
-
 	private async persistCurrentSession(): Promise<boolean> {
 		const { currentSessionId, messages, sessions } = this.store.get();
 		if (messages.length === 0) return true;
@@ -468,16 +523,7 @@ export class LLMChat {
 
 	private async triggerAutoTitle(sessionId: string, messages: Message[]) {
 		try {
-			let payloadParams: ChatRequestParams = {
-				messages: messages.map((m) => ({ ...m })),
-				options: {},
-			};
-
-			for (const plugin of this.plugins) {
-				if (plugin.beforeSubmit) {
-					payloadParams = await plugin.beforeSubmit(payloadParams);
-				}
-			}
+			const payloadParams = await this.prepareRequestParams(messages);
 
 			const smartTitle = await this.provider.generateTitle!(payloadParams.messages, payloadParams.options);
 			if (!smartTitle) return;
@@ -497,12 +543,8 @@ export class LLMChat {
 		}
 	}
 
-	private pruneDeadMessages(messages: Message[]): Message[] {
-		const last = messages.at(-1);
-		// If the last assistant message has absolutely no blocks, it failed before TTFB. Remove it.
-		if (last && last.role === "assistant" && last.blocks.length === 0) {
-			return messages.slice(0, -1);
-		}
-		return messages;
+	private cleanDeadMessages(messages: Message[]): Message[] {
+		// Remove any assistant message that has 0 blocks (it failed before generating anything)
+		return messages.filter((m) => !(m.role === "assistant" && m.blocks.length === 0));
 	}
 }

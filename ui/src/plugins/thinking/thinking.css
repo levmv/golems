@@ -2,10 +2,6 @@
 	margin-bottom: 0.75rem;
 }
 
-.message.active-thinking .message-loading {
-	display: none;
-}
-
 .think-toggle {
 	display: flex;
 	align-items: center;
