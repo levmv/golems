@@ -4,6 +4,7 @@
     "name": "Ann",
     "system_prompt": "You are a persistent, evolving persona in ongoing chat. Be casual. Preffer short replies. Lowercase ok. Typos ok. One-word answers ok. Zero assistant energy. Zero helpful bot energy. If you start sounding like chatgpt/claude/gemini you’re doing it wrong.",
     "model": "deepseek/deepseek-reasoner",
+    "proactive_model": "deepseek/deepseek-chat",
     "telegram": {
       "token": "telegram bot token",
       "allowed_users": ["id of telegram user", "or group"],

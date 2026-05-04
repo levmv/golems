@@ -72,11 +72,12 @@ func (r *SessionRegistry) GetSession(key SessionKey) (*Session, error) {
 	}
 
 	session := &Session{
-		key:      key,
-		storage:  r.storage,
-		llm:      r.llm,
-		summary:  r.storage.GetSummary(key),
-		messages: msgs,
+		key:        key,
+		storage:    r.storage,
+		llm:        r.llm,
+		summary:    r.storage.GetSummary(key),
+		messages:   msgs,
+		messageSeq: int64(len(msgs)),
 	}
 
 	actual, _ := r.sessions.LoadOrStore(key, session)
@@ -104,6 +105,8 @@ type Session struct {
 	llm          *llm.Model
 	summary      string
 	messages     []Message
+	messageSeq   int64
+	judgeSeq     int64
 	isCompacting bool
 }
 
@@ -112,6 +115,7 @@ func (s *Session) AddMessage(msg Message) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	s.messageSeq++
 	s.messages = append(s.messages, msg)
 
 	if err := s.storage.AppendMessage(s.key, msg); err != nil {
@@ -255,11 +259,35 @@ func (m *Message) AsLogLine() string {
 	return fmt.Sprintf("[%s] %s: %s", timeStr, name, m.Content)
 }
 
-func (s *Session) ShouldProactivelyReply(baseChance float32) bool {
+func (s *Session) RecentLogLines(limit int) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if limit <= 0 || len(s.messages) == 0 {
+		return nil
+	}
+
+	start := max(0, len(s.messages)-limit)
+	lines := make([]string, 0, len(s.messages)-start)
+	for _, msg := range s.messages[start:] {
+		lines = append(lines, msg.AsLogLine())
+	}
+	return lines
+}
+
+func (s *Session) ClaimProactiveReplyCandidate(baseChance float32) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.key.Type != SessionTypeGroup {
+		return false
+	}
+
 	if len(s.messages) == 0 {
+		return false
+	}
+
+	if s.judgeSeq == s.messageSeq {
 		return false
 	}
 
@@ -318,5 +346,10 @@ func (s *Session) ShouldProactivelyReply(baseChance float32) bool {
 	}
 	Log.Debug("[Session] Evaluating proactive reply for %s. msgsSinceAI=%d, chance=%.2f", s.key, msgsSinceAI, finalChance)
 
-	return rand.Float32() < finalChance
+	if rand.Float32() >= finalChance {
+		return false
+	}
+
+	s.judgeSeq = s.messageSeq
+	return true
 }

@@ -27,9 +27,10 @@ type BotConfig struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 
-	Model        string  `json:"model"`
-	SystemPrompt string  `json:"system_prompt"`
-	Temperature  float64 `json:"temperature"`
+	Model          string  `json:"model"`
+	ProactiveModel string  `json:"proactive_model,omitempty"`
+	SystemPrompt   string  `json:"system_prompt"`
+	Temperature    float64 `json:"temperature"`
 
 	Telegram *TelegramConfig `json:"telegram,omitempty"`
 	// Map: target chat ID -> admin/control channel ID
@@ -74,9 +75,24 @@ func startBot(ctx context.Context, cfg BotConfig, r *llm.Registry, dataDir strin
 		WithRetries(2, time.Second).
 		WithTemperature(float32(cfg.Temperature))
 
+	proactiveModel := model.
+		WithTemperature(0).
+		WithMaxTokens(4)
+	if cfg.ProactiveModel != "" {
+		proactiveModel, err = r.Model(cfg.ProactiveModel)
+		if err != nil {
+			Log.Error("Failed to init proactive model %s for bot %s: %v", cfg.ProactiveModel, cfg.ID, err)
+			return
+		}
+		proactiveModel = proactiveModel.
+			WithRetries(2, time.Second).
+			WithTemperature(0).
+			WithMaxTokens(4)
+	}
+
 	storage := NewStorage(filepath.Join(dataDir, cfg.ID))
 	registry := NewSessionRegistry(storage, &model)
-	engine := NewEngine(registry, &model, cfg.Name, cfg.SystemPrompt, cfg.ControlChats)
+	engine := NewEngine(registry, &model, &proactiveModel, cfg.Name, cfg.SystemPrompt, cfg.ControlChats)
 
 	if cfg.Telegram != nil {
 		webhookURL, webhookPath, err := getWebhookConfig(cfg.ID)

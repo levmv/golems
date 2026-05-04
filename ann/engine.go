@@ -28,6 +28,7 @@ type StreamEvent struct {
 type Engine struct {
 	registry     *SessionRegistry
 	llm          *llm.Model
+	proactiveLLM *llm.Model
 	botName      string
 	systemPrompt string
 	// cancelers maps sessionID -> context.CancelFunc for the currently-running
@@ -40,13 +41,17 @@ type Engine struct {
 	controlChats map[string]string
 }
 
-func NewEngine(registry *SessionRegistry, llmClient *llm.Model, botName string, systemPrompt string, controlChats map[string]string) *Engine {
+func NewEngine(registry *SessionRegistry, llmClient *llm.Model, proactiveLLM *llm.Model, botName string, systemPrompt string, controlChats map[string]string) *Engine {
 	if controlChats == nil {
 		controlChats = make(map[string]string)
+	}
+	if proactiveLLM == nil {
+		proactiveLLM = llmClient
 	}
 	return &Engine{
 		registry:     registry,
 		llm:          llmClient,
+		proactiveLLM: proactiveLLM,
 		botName:      botName,
 		systemPrompt: systemPrompt,
 		gateways:     make(map[string]Gateway),
@@ -131,7 +136,7 @@ func (e *Engine) StartBackgroundObserver(ctx context.Context) {
 
 			for _, s := range groups {
 				// TODO: move this 0.1 into config ("chatiness" or something)
-				if s.ShouldProactivelyReply(0.1) {
+				if s.ClaimProactiveReplyCandidate(0.1) && e.ShouldProactivelySpeak(ctx, s) {
 					go e.processProactiveReply(ctx, s)
 				}
 			}
@@ -202,6 +207,59 @@ func (e *Engine) GenerateDeferredReply(ctx context.Context, session *Session) (s
 	}
 
 	return finalText, nil
+}
+
+func (e *Engine) ShouldProactivelySpeak(ctx context.Context, session *Session) bool {
+	reqMessages := e.buildProactiveJudgePrompt(session)
+
+	resp, err := e.proactiveLLM.Chat(ctx, llm.Request{
+		Messages: reqMessages,
+	})
+	if err != nil {
+		Log.Debug("Proactive judge failed for %s: %v", session.key, err)
+		return false
+	}
+	if ctx.Err() != nil {
+		return false
+	}
+
+	answer := strings.ToLower(strings.TrimSpace(resp.Content))
+	fields := strings.Fields(answer)
+	if len(fields) == 0 {
+		Log.Debug("Proactive judge returned empty answer for %s", session.key)
+		return false
+	}
+
+	decision := strings.Trim(fields[0], ".!,;:`'\"")
+	shouldSpeak := decision == "yes"
+	Log.Debug("Proactive judge for %s returned %q, shouldSpeak=%v", session.key, resp.Content, shouldSpeak)
+	return shouldSpeak
+}
+
+func (e *Engine) buildProactiveJudgePrompt(session *Session) []llm.Message {
+	recentLines := session.RecentLogLines(12)
+	conversation := strings.Join(recentLines, "\n")
+	soul := session.storage.GetSoul()
+
+	content := fmt.Sprintf(`You decide whether %s should naturally join a Telegram group chat right now.
+
+Persona/system prompt:
+%s
+
+Current persona notes:
+%s
+
+Recent chat:
+%s
+
+Answer only "yes" or "no".
+
+Say yes only if %s has something timely, relevant, or socially natural to add.
+Prefer no when users are clearly talking to each other, the bot just spoke, the moment has passed, or a reply would feel forced.`, e.botName, e.systemPrompt, soul, conversation, e.botName)
+
+	return []llm.Message{
+		{Role: llm.RoleSystem, Content: content},
+	}
 }
 
 func (e *Engine) addMessage(session *Session, msg Message) error {
