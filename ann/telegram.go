@@ -16,14 +16,19 @@ import (
 	"github.com/levmv/golems/pkg/telegram"
 )
 
+var localTelegramBus = NewLocalMessageBus()
+
 type TelegramGateway struct {
-	engine *Engine
-	tgBot  *telegram.Bot
+	engine           *Engine
+	tgBot            *telegram.Bot
+	botID            string
+	botName          string
+	unsubscribeLocal func()
 }
 
 // StartTelegramBot initializes the bot, returning an http.Handler for webhooks
 // or starting a background polling loop if no URL is provided.
-func StartTelegramBot(ctx context.Context, tgCfg *TelegramConfig, eng *Engine, webhookURL string) (*TelegramGateway, http.Handler, error) {
+func StartTelegramBot(ctx context.Context, tgCfg *TelegramConfig, eng *Engine, webhookURL, botID, botName string) (*TelegramGateway, http.Handler, error) {
 	secret := generateSecret()
 
 	authMiddleware := func(c *telegram.Context) (bool, string) {
@@ -53,7 +58,13 @@ func StartTelegramBot(ctx context.Context, tgCfg *TelegramConfig, eng *Engine, w
 		return nil, nil, err
 	}
 
-	gw := &TelegramGateway{engine: eng, tgBot: tgBot}
+	gw := &TelegramGateway{
+		engine:  eng,
+		tgBot:   tgBot,
+		botID:   botID,
+		botName: botName,
+	}
+	gw.unsubscribeLocal = localTelegramBus.Subscribe("tg", botID, gw.handleLocalBotMessage)
 	gw.tgBot.OnText(gw.handleMessage)
 
 	if webhookURL != "" {
@@ -76,12 +87,25 @@ func StartTelegramBot(ctx context.Context, tgCfg *TelegramConfig, eng *Engine, w
 }
 
 func (g *TelegramGateway) Send(ctx context.Context, sKey SessionKey, text string) error {
+	return g.send(ctx, sKey, text, true)
+}
+
+func (g *TelegramGateway) SendWithoutBroadcast(ctx context.Context, sKey SessionKey, text string) error {
+	return g.send(ctx, sKey, text, false)
+}
+
+func (g *TelegramGateway) send(ctx context.Context, sKey SessionKey, text string, broadcast bool) error {
 	chatID, err := strconv.ParseInt(sKey.ChatID, 10, 64)
 	if err != nil {
 		return fmt.Errorf("invalid sessionID format: %w", err)
 	}
-	_, err = g.tgBot.SendChunked(ctx, chatID, text)
-	return err
+	if _, err = g.tgBot.SendChunked(ctx, chatID, text); err != nil {
+		return err
+	}
+	if broadcast {
+		g.publishLocalMessage(ctx, sKey, text)
+	}
+	return nil
 }
 
 func (g *TelegramGateway) StartTyping(ctx context.Context, sKey SessionKey) func() {
@@ -152,9 +176,9 @@ func (g *TelegramGateway) handleGroupMessage(ctx *telegram.Context) error {
 	return nil
 }
 
-func (g *TelegramGateway) executeBotReply(ctx *telegram.Context, sKey SessionKey, userMsg Message) error {
-	typing := g.tgBot.StartTypingIndicator(ctx, ctx.ChatID)
-	defer typing.Stop()
+func (g *TelegramGateway) executeBotReply(ctx context.Context, sKey SessionKey, userMsg Message) error {
+	stopTyping := g.StartTyping(ctx, sKey)
+	defer stopTyping()
 
 	// Engine handles debounce. Use WithoutCancel so HTTP timeouts don't kill the LLM generation.
 	text, err := g.engine.ProcessMessage(context.WithoutCancel(ctx), sKey, userMsg)
@@ -168,10 +192,53 @@ func (g *TelegramGateway) executeBotReply(ctx *telegram.Context, sKey SessionKey
 	}
 
 	if text != "" {
-		_, err = ctx.ReplyChunked(text)
-		return err
+		return g.Send(context.WithoutCancel(ctx), sKey, text)
 	}
 	return nil
+}
+
+func (g *TelegramGateway) publishLocalMessage(ctx context.Context, sKey SessionKey, text string) {
+	localTelegramBus.Publish(ctx, LocalBotMessage{
+		SourceBotID:   g.botID,
+		SourceBotName: g.botName,
+		Session:       sKey,
+		Text:          text,
+		SentAt:        time.Now(),
+	})
+}
+
+func (g *TelegramGateway) handleLocalBotMessage(ctx context.Context, event LocalBotMessage) error {
+	msg := Message{
+		Role:      llm.RoleUser,
+		Content:   event.Text,
+		Name:      event.SourceBotName,
+		Timestamp: event.SentAt,
+	}
+	if msg.Name == "" {
+		msg.Name = event.SourceBotID
+	}
+	if msg.Timestamp.IsZero() {
+		msg.Timestamp = time.Now()
+	}
+
+	if g.shouldReplyToLocalMessage(event) {
+		go func() {
+			if err := g.executeBotReply(context.WithoutCancel(ctx), event.Session, msg); err != nil {
+				Log.Error("Local bot reply failed for %s after message from %s: %v", event.Session, event.SourceBotID, err)
+			}
+		}()
+		return nil
+	}
+
+	return g.engine.ObserveMessage(ctx, event.Session, msg)
+}
+
+func (g *TelegramGateway) shouldReplyToLocalMessage(event LocalBotMessage) bool {
+	if event.Session.Type != SessionTypeGroup {
+		return false
+	}
+	botUsername := g.tgBot.Me.Username
+	return botUsername != "" && strings.Contains(event.Text, "@"+botUsername)
 }
 
 func extractUserMessage(msg *telegram.Message) Message {

@@ -229,6 +229,12 @@ func (e *Engine) notifyControlChat(sKey SessionKey, message string) {
 		return
 	}
 	targetKey := SessionKey{Platform: sKey.Platform, Type: SessionTypeGroup, ChatID: targetChatID}
+	if privateSender, ok := gw.(interface {
+		SendWithoutBroadcast(context.Context, SessionKey, string) error
+	}); ok {
+		go privateSender.SendWithoutBroadcast(context.Background(), targetKey, message)
+		return
+	}
 	go gw.Send(context.Background(), targetKey, message)
 }
 

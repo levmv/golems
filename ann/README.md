@@ -4,4 +4,5 @@
   context is compacted every N messages and new checkpoint (line number in history) saved in additional file.
 - soul.md is global (per bot) by design. Idea is to have evolving persona for each bot, but not the shared memory.
 - it's intentionaly simple, not suitable for thousands of chats, etc
-
+-
+- bots in the same process share a tiny local bus: when one Telegram bot sends a message, other configured bots observe it in their own session for the same chat id.
