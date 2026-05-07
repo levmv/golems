@@ -1,0 +1,27 @@
+app:
+  data_dir: /tmp/hugin-test
+  timezone: Europe/Amsterdam
+
+llm:
+  provider: deepseek
+  model: deepseek-v4-flash
+  temperature: 0
+  max_input_runs: 50
+
+targets:
+  local:
+    host: localhost
+
+checks:
+  - id: mock_disk_check
+    target: local
+    # This inline bash command simulates a collector returning valid JSON
+    command: >
+      echo '{"check": "mock_disk_check", "status": "ok", "metrics": {"root_used_pct": 72.5, "var_used_pct": 45.1}}'
+    schedule: "*/5 * * * *"
+    timeout: 5s
+    analysis:
+      mode: ai
+      include_history: 7d
+    alert:
+      cooldown: 1h

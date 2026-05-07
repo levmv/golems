@@ -1,6 +1,6 @@
 # Golems
 
-Monorepo for some personal chatbots/ai-agents related work. Nothing interesting.
+Monorepo for some personal chatbots/ai-agents related work.
 
 **Abot**  
 Simplest stateless telegram-llm-chatbot.
@@ -9,7 +9,19 @@ Simplest stateless telegram-llm-chatbot.
 Chat-bot with evolving personality. Multiple bots. History. Context-compaction. Decoupled messaging channels.
 
 **Brevity**  
-...
+Summarization for web pages?
+
+**Cy**  
+Cli agent?
+
+**Chore**  
+Agent orchestrator?
+
+**Caliban**  
+?
+
+**Hugin**
+Monitoring
 
 
 ## Packages
@@ -17,3 +29,4 @@ Chat-bot with evolving personality. Multiple bots. History. Context-compaction. 
 * logger   - Just simple text logger
 * openai   - OpenAI API package
 * telegram - Telegram Bot API
+* schedule - Job sheduler
