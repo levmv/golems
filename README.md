@@ -20,7 +20,7 @@ Agent orchestrator?
 **Caliban**  
 ?
 
-**Hugin**
+**Hugin** 
 Monitoring
 
 
@@ -29,4 +29,4 @@ Monitoring
 * logger   - Just simple text logger
 * openai   - OpenAI API package
 * telegram - Telegram Bot API
-* schedule - Job sheduler
+* tasks    - Durable task queue with scheduling

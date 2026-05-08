@@ -1,35 +1,33 @@
-package schedule
+package tasks
 
 import (
 	"context"
 	"sync"
 )
 
-type Middleware func(Runner) Runner
+type Middleware func(Handler) Handler
 
-func Chain(runner Runner, middleware ...Middleware) Runner {
+func Chain(handler Handler, middleware ...Middleware) Handler {
 	for i := len(middleware) - 1; i >= 0; i-- {
-		runner = middleware[i](runner)
+		handler = middleware[i](handler)
 	}
-	return runner
+	return handler
 }
 
-// GroupConcurrency limits concurrent runner calls per JobSpec.Group.
+// GroupConcurrency limits concurrent handler calls per Task.Group.
 func GroupConcurrency(limit int) Middleware {
 	if limit <= 0 {
 		limit = 1
 	}
-
 	groups := newGroupLimiter(limit)
-	return func(next Runner) Runner {
-		return RunnerFunc(func(ctx context.Context, job Job) error {
-			release, err := groups.Acquire(ctx, job.Spec.Group)
+	return func(next Handler) Handler {
+		return HandlerFunc(func(ctx context.Context, task Task) error {
+			release, err := groups.Acquire(ctx, task.Group)
 			if err != nil {
 				return err
 			}
 			defer release()
-
-			return next.Run(ctx, job)
+			return next.HandleTask(ctx, task)
 		})
 	}
 }
@@ -46,10 +44,7 @@ type groupState struct {
 }
 
 func newGroupLimiter(limit int) *groupLimiter {
-	return &groupLimiter{
-		limit:  limit,
-		groups: make(map[string]*groupState),
-	}
+	return &groupLimiter{limit: limit, groups: make(map[string]*groupState)}
 }
 
 func (l *groupLimiter) Acquire(ctx context.Context, group string) (func(), error) {
@@ -66,7 +61,6 @@ func (l *groupLimiter) Acquire(ctx context.Context, group string) (func(), error
 	state.waiters++
 	l.mu.Unlock()
 
-	var acquired bool
 	defer func() {
 		l.mu.Lock()
 		state.waiters--
@@ -76,7 +70,6 @@ func (l *groupLimiter) Acquire(ctx context.Context, group string) (func(), error
 
 	select {
 	case state.ch <- struct{}{}:
-		acquired = true
 		return func() {
 			<-state.ch
 			l.mu.Lock()
@@ -84,9 +77,6 @@ func (l *groupLimiter) Acquire(ctx context.Context, group string) (func(), error
 			l.mu.Unlock()
 		}, nil
 	case <-ctx.Done():
-		if acquired {
-			<-state.ch
-		}
 		return nil, ctx.Err()
 	}
 }
