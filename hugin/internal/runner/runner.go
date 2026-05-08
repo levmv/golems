@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 
@@ -16,18 +17,46 @@ import (
 	"github.com/levmv/golems/hugin/internal/models"
 )
 
+type Runner struct {
+	mu         sync.Mutex
+	sshClients map[string]*ssh.Client
+}
+
+func New() *Runner {
+	return &Runner{sshClients: make(map[string]*ssh.Client)}
+}
+
+func (r *Runner) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var err error
+	for key, client := range r.sshClients {
+		if closeErr := client.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+		delete(r.sshClients, key)
+	}
+	return err
+}
+
 // Execute runs the given check against its target and returns the structured output.
 func Execute(ctx context.Context, check config.Check, target config.Target) (*models.CollectorOutput, error) {
+	r := New()
+	defer r.Close()
+	return r.Execute(ctx, check, target)
+}
+
+// Execute runs the given check against its target and returns the structured output.
+func (r *Runner) Execute(ctx context.Context, check config.Check, target config.Target) (*models.CollectorOutput, error) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 
-	isLocal := target.Host == "localhost" || target.Host == "127.0.0.1"
-
 	var err error
-	if isLocal {
+	if isLocalTarget(target) {
 		err = executeLocal(ctx, check.Command, &stdout, &stderr)
 	} else {
-		err = executeSSH(ctx, check.Command, target, &stdout, &stderr)
+		err = r.executeSSH(ctx, check.Command, target, &stdout, &stderr)
 	}
 
 	// Even if the command failed (e.g., non-zero exit code), we still want to try
@@ -61,6 +90,10 @@ func Execute(ctx context.Context, check config.Check, target config.Target) (*mo
 	return &output, err
 }
 
+func isLocalTarget(target config.Target) bool {
+	return target.Type == "local" || target.Host == "" || target.Host == "localhost" || target.Host == "127.0.0.1"
+}
+
 func collectorErrorOutput(checkID, code, message string) *models.CollectorOutput {
 	return &models.CollectorOutput{
 		Check:  checkID,
@@ -91,15 +124,41 @@ func executeLocal(ctx context.Context, command string, stdout, stderr *bytes.Buf
 	return cmd.Run()
 }
 
-func executeSSH(ctx context.Context, command string, target config.Target, stdout, stderr *bytes.Buffer) error {
+func (r *Runner) executeSSH(ctx context.Context, command string, target config.Target, stdout, stderr *bytes.Buffer) error {
+	client, err := r.sshClient(ctx, target)
+	if err != nil {
+		return err
+	}
+	return runSSHSession(ctx, client, command, stdout, stderr)
+}
+
+func (r *Runner) sshClient(ctx context.Context, target config.Target) (*ssh.Client, error) {
+	key := sshClientKey(target)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if client := r.sshClients[key]; client != nil {
+		return client, nil
+	}
+
+	client, err := dialSSH(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	r.sshClients[key] = client
+	return client, nil
+}
+
+func dialSSH(ctx context.Context, target config.Target) (*ssh.Client, error) {
 	key, err := os.ReadFile(expandTilde(target.Key))
 	if err != nil {
-		return fmt.Errorf("unable to read private key: %w", err)
+		return nil, fmt.Errorf("unable to read private key: %w", err)
 	}
 
 	signer, err := ssh.ParsePrivateKey(key)
 	if err != nil {
-		return fmt.Errorf("unable to parse private key: %w", err)
+		return nil, fmt.Errorf("unable to parse private key: %w", err)
 	}
 
 	sshConfig := &ssh.ClientConfig{
@@ -119,21 +178,20 @@ func executeSSH(ctx context.Context, command string, target config.Target, stdou
 	dialer := net.Dialer{}
 	netConn, err := dialer.DialContext(ctx, "tcp", address)
 	if err != nil {
-		return fmt.Errorf("failed to dial tcp: %w", err)
+		return nil, fmt.Errorf("failed to dial tcp: %w", err)
 	}
 
 	// 2. Upgrade the TCP connection to an SSH connection
 	sshConn, chans, reqs, err := ssh.NewClientConn(netConn, address, sshConfig)
 	if err != nil {
 		netConn.Close() // Make sure to clean up the raw connection on error
-		return fmt.Errorf("failed to establish SSH connection: %w", err)
+		return nil, fmt.Errorf("failed to establish SSH connection: %w", err)
 	}
 
-	// 3. Create the SSH client wrapper
-	client := ssh.NewClient(sshConn, chans, reqs)
-	defer client.Close()
+	return ssh.NewClient(sshConn, chans, reqs), nil
+}
 
-	// 4. Create the session
+func runSSHSession(ctx context.Context, client *ssh.Client, command string, stdout, stderr *bytes.Buffer) error {
 	session, err := client.NewSession()
 	if err != nil {
 		return fmt.Errorf("failed to create session: %w", err)
@@ -143,8 +201,22 @@ func executeSSH(ctx context.Context, command string, target config.Target, stdou
 	session.Stdout = stdout
 	session.Stderr = stderr
 
-	// Execute the command on the remote machine
-	return session.Run(command)
+	done := make(chan error, 1)
+	go func() {
+		done <- session.Run(command)
+	}()
+
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		session.Close()
+		return ctx.Err()
+	}
+}
+
+func sshClientKey(target config.Target) string {
+	return target.User + "@" + target.Host + "|" + target.Key
 }
 
 // expandTilde handles the common `~/.ssh/id_rsa` pattern in configs.

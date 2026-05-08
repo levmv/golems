@@ -36,6 +36,7 @@ const (
 // Process evaluates an analysis result against the current incident state.
 // It handles creation, cooldown, and resolution.
 func (m *Manager) Process(checkID string, result *analysis.Result, runID int64, cooldown, repeatAfter time.Duration) (Event, error) {
+	now := time.Now().UTC()
 	active, err := m.db.ActiveIncident(checkID)
 	if err != nil {
 		return Event{}, fmt.Errorf("failed to check active incident: %w", err)
@@ -63,7 +64,7 @@ func (m *Manager) Process(checkID string, result *analysis.Result, runID int64, 
 
 	// If no active incident, create one
 	if active == nil {
-		id := fmt.Sprintf("inc-%s-%d", checkID, time.Now().Unix())
+		id := fmt.Sprintf("inc-%s-%d", checkID, now.Unix())
 		evidence := truncate(result.Summary+"\n"+result.Evidence, 2000)
 		if err := m.db.CreateIncident(id, checkID, string(result.Severity), result.Summary, evidence, runID, runID); err != nil {
 			return Event{}, fmt.Errorf("failed to create incident: %w", err)
@@ -80,13 +81,16 @@ func (m *Manager) Process(checkID string, result *analysis.Result, runID int64, 
 		return Event{}, fmt.Errorf("failed to update incident: %w", err)
 	}
 
-	// Check cooldown — don't re-notify if within cooldown
-	if time.Since(active.CreatedAt) < cooldown {
+	if active.LastNotifiedAt == nil {
+		return Event{Type: EventUpdated, CheckID: checkID, Incident: active}, nil
+	}
+
+	sinceNotification := now.Sub(*active.LastNotifiedAt)
+	if cooldown > 0 && sinceNotification < cooldown {
 		return Event{Type: EventNone, CheckID: checkID, Incident: active}, nil
 	}
 
-	// Check repeat interval
-	if repeatAfter > 0 && time.Since(active.CreatedAt) >= repeatAfter {
+	if repeatAfter > 0 && sinceNotification >= repeatAfter {
 		return Event{Type: EventUpdated, CheckID: checkID, Incident: active}, nil
 	}
 

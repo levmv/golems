@@ -5,12 +5,15 @@ app:
 llm:
   provider: deepseek
   model: deepseek-v4-flash
+  api_key_env: DEEPSEEK_API_KEY
   temperature: 0
   max_input_runs: 50
 
 targets:
   local:
-    host: localhost
+    type: local
+    context: |
+      Development machine used for local Hugin smoke tests.
 
 checks:
   - id: mock_disk_check
@@ -20,8 +23,9 @@ checks:
       echo '{"check": "mock_disk_check", "status": "ok", "metrics": {"root_used_pct": 72.5, "var_used_pct": 45.1}}'
     schedule: "*/5 * * * *"
     timeout: 5s
+    context: |
+      This is a mock check; stable ok output is expected.
     analysis:
-      mode: ai
-      include_history: 7d
+      history: 7d
     alert:
       cooldown: 1h

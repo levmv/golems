@@ -11,6 +11,10 @@ func TestValidateAppliesDefaultsAndFindsChecks(t *testing.T) {
 		App: AppConfig{
 			DataDir: "/tmp/hugin-test",
 		},
+		LLM: LLMConfig{
+			Provider: "openai",
+			Model:    "gpt-test",
+		},
 		Targets: map[string]Target{
 			"local": {Host: "localhost"},
 		},
@@ -33,6 +37,12 @@ func TestValidateAppliesDefaultsAndFindsChecks(t *testing.T) {
 	}
 	if cfg.App.MaxConcurrentChecks != 1 {
 		t.Fatalf("expected default max concurrency 1, got %d", cfg.App.MaxConcurrentChecks)
+	}
+	if cfg.LLM.MaxInputRuns != 50 {
+		t.Fatalf("expected default max input runs 50, got %d", cfg.LLM.MaxInputRuns)
+	}
+	if cfg.Targets["local"].Type != "local" {
+		t.Fatalf("expected local target type default, got %q", cfg.Targets["local"].Type)
 	}
 	if got := cfg.FindCheck("disk"); got == nil || got.ID != "disk" {
 		t.Fatalf("FindCheck did not return the configured check: %#v", got)
@@ -61,6 +71,20 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 				cfg.Checks[0].Target = "missing"
 			},
 			wantErr: "references unknown target",
+		},
+		{
+			name: "missing llm provider",
+			mutate: func(cfg *Config) {
+				cfg.LLM.Provider = ""
+			},
+			wantErr: "llm.provider is required",
+		},
+		{
+			name: "ssh target missing key",
+			mutate: func(cfg *Config) {
+				cfg.Targets["local"] = Target{Type: "ssh", Host: "example.test", User: "hugin"}
+			},
+			wantErr: "key is empty",
 		},
 		{
 			name: "invalid schedule",
@@ -101,6 +125,10 @@ func validConfig() Config {
 		App: AppConfig{
 			DataDir:  "/tmp/hugin-test",
 			Timezone: "UTC",
+		},
+		LLM: LLMConfig{
+			Provider: "openai",
+			Model:    "gpt-test",
 		},
 		Targets: map[string]Target{
 			"local": {Host: "localhost"},

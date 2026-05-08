@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/levmv/golems/hugin/internal/models"
 	"github.com/levmv/golems/pkg/tasks"
 )
 
@@ -94,6 +95,74 @@ func TestCheckTaskRefs(t *testing.T) {
 	}
 	if len(refs) != 0 {
 		t.Fatalf("expected refs to be deleted, got %+v", refs)
+	}
+}
+
+func TestRunAnalysisPersistence(t *testing.T) {
+	db := newTestDB(t)
+	runID, err := db.InsertRun("disk", &models.CollectorOutput{
+		Check:  "disk",
+		Status: models.StatusOK,
+		Metrics: map[string]any{
+			"used_pct": 72.5,
+		},
+	}, 123)
+	if err != nil {
+		t.Fatalf("InsertRun returned error: %v", err)
+	}
+
+	analysis := RunAnalysis{
+		Severity:    "normal",
+		ShouldAlert: false,
+		Summary:     "Disk usage is stable",
+		Evidence:    "used_pct is within the configured context",
+		Model:       "openai/gpt-test",
+		CreatedAt:   time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC),
+	}
+	if err := db.UpdateRunAnalysis(runID, analysis); err != nil {
+		t.Fatalf("UpdateRunAnalysis returned error: %v", err)
+	}
+	got, err := db.RunAnalysis(runID)
+	if err != nil {
+		t.Fatalf("RunAnalysis returned error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected persisted analysis, got nil")
+	}
+	if got.Severity != analysis.Severity || got.Summary != analysis.Summary || got.Model != analysis.Model {
+		t.Fatalf("unexpected analysis: %+v", got)
+	}
+	if got.ShouldAlert {
+		t.Fatalf("expected should_alert false, got %+v", got)
+	}
+	if !got.CreatedAt.Equal(analysis.CreatedAt) {
+		t.Fatalf("expected created_at %s, got %s", analysis.CreatedAt, got.CreatedAt)
+	}
+}
+
+func TestIncidentNotificationState(t *testing.T) {
+	db := newTestDB(t)
+	notifiedAt := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
+
+	if err := db.CreateIncident("inc-disk-1", "disk", "urgent", "Disk full", "evidence", 1, 1); err != nil {
+		t.Fatalf("CreateIncident returned error: %v", err)
+	}
+	inc, err := db.ActiveIncident("disk")
+	if err != nil {
+		t.Fatalf("ActiveIncident returned error: %v", err)
+	}
+	if inc.LastNotifiedAt != nil {
+		t.Fatalf("expected nil last_notified_at before notification, got %s", *inc.LastNotifiedAt)
+	}
+	if err := db.MarkIncidentNotified("inc-disk-1", notifiedAt); err != nil {
+		t.Fatalf("MarkIncidentNotified returned error: %v", err)
+	}
+	inc, err = db.ActiveIncident("disk")
+	if err != nil {
+		t.Fatalf("second ActiveIncident returned error: %v", err)
+	}
+	if inc.LastNotifiedAt == nil || !inc.LastNotifiedAt.Equal(notifiedAt) {
+		t.Fatalf("expected last_notified_at %s, got %+v", notifiedAt, inc.LastNotifiedAt)
 	}
 }
 

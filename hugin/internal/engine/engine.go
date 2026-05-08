@@ -38,6 +38,12 @@ func New(cfg *config.Config, db *storage.DB, log logger.Logger) *Engine {
 }
 
 func (e *Engine) RunCheck(ctx context.Context, checkID string) error {
+	execRunner := runner.New()
+	defer execRunner.Close()
+	return e.runCheck(ctx, checkID, execRunner)
+}
+
+func (e *Engine) runCheck(ctx context.Context, checkID string, execRunner *runner.Runner) error {
 	check := e.cfg.FindCheck(checkID)
 	if check == nil {
 		return fmt.Errorf("check '%s' not found in configuration", checkID)
@@ -53,7 +59,7 @@ func (e *Engine) RunCheck(ctx context.Context, checkID string) error {
 	defer cancel()
 
 	start := time.Now()
-	output, execErr := runner.Execute(ctx, *check, target)
+	output, execErr := execRunner.Execute(ctx, *check, target)
 	durationMs := time.Since(start).Milliseconds()
 
 	if execErr != nil {
@@ -74,11 +80,6 @@ func (e *Engine) RunCheck(ctx context.Context, checkID string) error {
 	}
 	e.log.Debug("Run saved (id=%d)", runID)
 
-	if check.Analysis.Mode != "ai" {
-		e.log.Debug("Analysis mode is '%s', skipping AI analysis", check.Analysis.Mode)
-		return nil
-	}
-
 	if err := e.runAnalysis(check, checkID, runID, output); err != nil {
 		e.log.Error("Analysis failed: %v", err)
 	}
@@ -90,6 +91,9 @@ func (e *Engine) RunDue(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize task store: %w", err)
 	}
+
+	execRunner := runner.New()
+	defer execRunner.Close()
 
 	var failures []tasks.Failure
 	var handler tasks.Handler = tasks.HandlerFunc(func(ctx context.Context, task tasks.Task) error {
@@ -103,7 +107,7 @@ func (e *Engine) RunDue(ctx context.Context) error {
 		if payload.CheckID == "" {
 			return fmt.Errorf("check task payload is missing check_id")
 		}
-		return e.RunCheck(ctx, payload.CheckID)
+		return e.runCheck(ctx, payload.CheckID, execRunner)
 	})
 
 	handler = tasks.Chain(handler, tasks.GroupConcurrency(1))
@@ -271,24 +275,31 @@ func (e *Engine) runAnalysis(check *config.Check, checkID string, runID int64, o
 		incident = nil
 	}
 
+	modelName := e.analysisModelName()
 	model, err := e.buildModel()
 	if err != nil {
 		e.log.Warn("LLM configuration failed; opening analysis incident: %v", err)
-		return e.processAnalysisUnavailable(check, checkID, runID, err)
+		return e.processAnalysisUnavailable(check, checkID, runID, modelName, err)
 	}
 
 	analyzer := analysis.New(model, e.log)
+	target := e.cfg.Targets[check.Target]
 	result, err := analyzer.Analyze(context.Background(), analysis.Input{
 		CheckID:        checkID,
 		Current:        output,
 		History:        history,
+		TargetContext:  target.Context,
+		CheckContext:   check.Context,
 		Notes:          notes,
 		ActiveIncident: incident,
-		IncludeHistory: historyWindow,
+		HistoryWindow:  historyWindow,
 	})
 	if err != nil {
 		e.log.Warn("LLM analysis failed; opening analysis incident: %v", err)
-		return e.processAnalysisUnavailable(check, checkID, runID, err)
+		return e.processAnalysisUnavailable(check, checkID, runID, modelName, err)
+	}
+	if err := e.recordRunAnalysis(runID, modelName, result, nil); err != nil {
+		return err
 	}
 	if err := e.resolveAnalysisUnavailable(check, checkID, runID); err != nil {
 		return err
@@ -300,18 +311,39 @@ func (e *Engine) runAnalysis(check *config.Check, checkID string, runID int64, o
 	return e.processIncident(check, checkID, result, runID)
 }
 
-func (e *Engine) processAnalysisUnavailable(check *config.Check, checkID string, runID int64, cause error) error {
+func (e *Engine) processAnalysisUnavailable(check *config.Check, checkID string, runID int64, modelName string, cause error) error {
 	result := &analysis.Result{
 		Severity:    analysis.SeverityUrgent,
 		ShouldAlert: true,
 		Summary:     fmt.Sprintf("%s AI analysis unavailable", checkID),
 		Evidence:    fmt.Sprintf("AI analysis failed for check %q: %v", checkID, cause),
 	}
+	if err := e.recordRunAnalysis(runID, modelName, result, cause); err != nil {
+		return err
+	}
 
 	e.log.Info("Analysis: severity=%s should_alert=%v summary=%s", result.Severity, result.ShouldAlert, result.Summary)
 	e.log.Debug("Evidence: %s", result.Evidence)
 
 	return e.processIncident(check, analysisIssueCheckID(checkID), result, runID)
+}
+
+func (e *Engine) recordRunAnalysis(runID int64, modelName string, result *analysis.Result, cause error) error {
+	record := storage.RunAnalysis{
+		Severity:    string(result.Severity),
+		ShouldAlert: result.ShouldAlert,
+		Summary:     result.Summary,
+		Evidence:    result.Evidence,
+		Model:       modelName,
+		CreatedAt:   time.Now().UTC(),
+	}
+	if cause != nil {
+		record.Error = cause.Error()
+	}
+	if err := e.db.UpdateRunAnalysis(runID, record); err != nil {
+		return fmt.Errorf("failed to save analysis result: %w", err)
+	}
+	return nil
 }
 
 func (e *Engine) resolveAnalysisUnavailable(check *config.Check, checkID string, runID int64) error {
@@ -339,6 +371,10 @@ func (e *Engine) processIncident(check *config.Check, checkID string, result *an
 		ntf := notifier.FromConfig(e.cfg, e.log)
 		if err := notifyEvent(ntf, event); err != nil {
 			e.log.Error("Failed to send notification: %v", err)
+			return nil
+		}
+		if err := e.db.MarkIncidentNotified(event.Incident.ID, time.Now().UTC()); err != nil {
+			e.log.Error("Failed to update notification state: %v", err)
 		}
 	}
 
@@ -351,8 +387,14 @@ func analysisIssueCheckID(checkID string) string {
 
 func (e *Engine) buildModel() (llm.Model, error) {
 	provider := e.cfg.LLM.Provider
-	token := os.Getenv("HUGIN_LLM_TOKEN")
-	if provider == "deepseek" {
+	token := ""
+	if e.cfg.LLM.APIKeyEnv != "" {
+		token = os.Getenv(e.cfg.LLM.APIKeyEnv)
+	}
+	if token == "" {
+		token = os.Getenv("HUGIN_LLM_TOKEN")
+	}
+	if token == "" && provider == "deepseek" {
 		token = os.Getenv("DEEPSEEK_API_KEY")
 	}
 	if token == "" {
@@ -374,11 +416,18 @@ func (e *Engine) buildModel() (llm.Model, error) {
 	return m, nil
 }
 
+func (e *Engine) analysisModelName() string {
+	if e.cfg.LLM.Provider == "" && e.cfg.LLM.Model == "" {
+		return ""
+	}
+	return e.cfg.LLM.Provider + "/" + e.cfg.LLM.Model
+}
+
 func parseHistoryWindow(check *config.Check) time.Duration {
 	if check == nil {
 		return 7 * 24 * time.Hour
 	}
-	return parseDuration(check.Analysis.IncludeHistory, 7*24*time.Hour)
+	return parseDuration(check.Analysis.History, 7*24*time.Hour)
 }
 
 func parseDuration(s string, defaultDur time.Duration) time.Duration {

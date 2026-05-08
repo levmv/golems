@@ -42,6 +42,43 @@ func (c *Config) Validate() error {
 	if c.App.MaxConcurrentChecks <= 0 {
 		c.App.MaxConcurrentChecks = 1
 	}
+	if c.LLM.Provider == "" {
+		return fmt.Errorf("llm.provider is required")
+	}
+	if c.LLM.Model == "" {
+		return fmt.Errorf("llm.model is required")
+	}
+	if c.LLM.MaxInputRuns <= 0 {
+		c.LLM.MaxInputRuns = 50
+	}
+	for name, target := range c.Targets {
+		if target.Type == "" {
+			if target.Host == "" || target.Host == "localhost" || target.Host == "127.0.0.1" {
+				target.Type = "local"
+			} else {
+				target.Type = "ssh"
+			}
+		}
+		switch target.Type {
+		case "local":
+			if target.Host == "" {
+				target.Host = "localhost"
+			}
+		case "ssh":
+			if target.Host == "" {
+				return fmt.Errorf("target '%s' is ssh but host is empty", name)
+			}
+			if target.User == "" {
+				return fmt.Errorf("target '%s' is ssh but user is empty", name)
+			}
+			if target.Key == "" {
+				return fmt.Errorf("target '%s' is ssh but key is empty", name)
+			}
+		default:
+			return fmt.Errorf("target '%s' has invalid type %q", name, target.Type)
+		}
+		c.Targets[name] = target
+	}
 	if len(c.Checks) == 0 {
 		return fmt.Errorf("no checks defined")
 	}

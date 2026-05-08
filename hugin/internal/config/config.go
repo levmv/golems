@@ -22,14 +22,17 @@ type AppConfig struct {
 type LLMConfig struct {
 	Provider     string  `yaml:"provider"`
 	Model        string  `yaml:"model"`
+	APIKeyEnv    string  `yaml:"api_key_env"`
 	Temperature  float32 `yaml:"temperature"`
 	MaxInputRuns int     `yaml:"max_input_runs"`
 }
 
 type Target struct {
-	Host string `yaml:"host"`
-	User string `yaml:"user,omitempty"`
-	Key  string `yaml:"key,omitempty"` // Path to SSH key
+	Type    string `yaml:"type,omitempty"` // "local" or "ssh"
+	Host    string `yaml:"host,omitempty"`
+	User    string `yaml:"user,omitempty"`
+	Key     string `yaml:"key,omitempty"` // Path to SSH key
+	Context string `yaml:"context,omitempty"`
 }
 
 type Check struct {
@@ -38,13 +41,13 @@ type Check struct {
 	Command  string        `yaml:"command"`
 	Schedule string        `yaml:"schedule"` // Cron expression
 	Timeout  time.Duration `yaml:"timeout"`
+	Context  string        `yaml:"context,omitempty"`
 	Analysis Analysis      `yaml:"analysis"`
 	Alert    Alert         `yaml:"alert"`
 }
 
 type Analysis struct {
-	Mode           string `yaml:"mode"`            // e.g., "ai"
-	IncludeHistory string `yaml:"include_history"` // e.g., "7d"
+	History string `yaml:"history"` // e.g., "7d"
 }
 
 type Alert struct {

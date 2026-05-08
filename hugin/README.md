@@ -36,9 +36,9 @@ If the LLM is unavailable, Hugin treats that as an operational problem of its ow
 
 ## Design Goals
 
-- **Flexible Execution (Cron or Daemon)**
+- **Flexible Execution**
   - Hugin keeps schedule state in SQLite. You can run `hugin run-due` via a standard system cron job or systemd timer.
-  - Alternatively, use `hugin daemon` for a persistent, long-running background process.
+  - A daemon mode can be added later on the same execution path.
 - **Fast & Efficient**
   - Checks are executed concurrently.
   - SSH connections are pooled and multiplexed. Multiple checks on the same server share a single connection, making execution extremely fast and reducing audit log noise.
@@ -53,7 +53,7 @@ If the LLM is unavailable, Hugin treats that as an operational problem of its ow
 - **Script-friendly**
   - Collectors can be written in Bash, Python, Go, or anything else. A collector only needs to print JSON to stdout.
 - **Local-first storage**
-  - SQLite manages runs, metrics, LLM decisions, alerts, incidents, and user notes. Built-in data retention policies prevent database bloat.
+  - SQLite manages runs, metrics, LLM decisions, alerts, incidents, task state, and user notes. CLI cleanup keeps old run history bounded.
 - **Low-noise alerting**
   - Hugin tracks incident state and alert cooldowns.
 
@@ -81,8 +81,8 @@ A configured scheduled execution of a collector against a target.
 ### Run
 One execution of a check, including timestamps, raw output, parsed metrics, LLM analysis, and the alert decision.
 
-### Note
-Human-provided local context that helps the LLM make better decisions. **Notes are stored exclusively in SQLite and managed via the CLI**, keeping your YAML config clean and preventing state-drift.
+### Context And Notes
+YAML `context` on targets and checks stores stable knowledge that should live with configuration. CLI notes store ad-hoc operator observations in SQLite.
 
 ### Incident
 An ongoing abnormal condition. Hugin groups repeated abnormal runs into one incident instead of sending a new alert every time.
@@ -133,14 +133,13 @@ window        optional collection window, such as 15m or 1h
 
 ## AI-First Analysis
 
-Hugin builds a compact case file for the LLM containing current metrics, recent history bounds, and your CLI-provided operator notes. The LLM responds with strict JSON outlining `severity`, `should_alert`, `summary`, and `evidence`.
+Hugin builds a compact case file for the LLM containing current metrics, configured context, recent history bounds, and your CLI-provided operator notes. The LLM responds with strict JSON outlining `severity`, `should_alert`, `summary`, and `evidence`.
 
 **Analysis availability:**
 Hugin does not include a fallback expression language. Collectors report facts, and the AI makes judgments. If AI analysis cannot run, Hugin opens an urgent analysis incident for that check so the failure is visible and cooldown-controlled.
 ```yaml
     analysis:
-      mode: ai
-      include_history: 7d
+      history: 7d
 ```
 
 ---
@@ -153,9 +152,6 @@ hugin run disk_web1
 
 # Run all scheduled checks that are currently due (ideal for cron / systemd timers)
 hugin run-due
-
-# Run continuously in the background (ideal for docker / systemd services)
-hugin daemon
 
 # Add an operator note (stored in SQLite)
 hugin note disk_web1 "80-86% disk usage is normal if stable."
@@ -185,16 +181,20 @@ app:
 llm:
   provider: openai
   model: gpt-4o-mini
+  api_key_env: OPENAI_API_KEY
   temperature: 0
   max_input_runs: 50
 
 targets:
   web1:
+    type: ssh
     host: web1.example.com
     user: hugin
     key: ~/.ssh/hugin_web1
+    context: |
+      Small VPS. Nightly backups run around 03:00.
   local:
-    host: localhost
+    type: local
 
 checks:
   - id: disk_web1
@@ -202,9 +202,11 @@ checks:
     command: /usr/local/bin/collect_disk.sh
     schedule: "*/15 * * * *"
     timeout: 10s
+    context: |
+      /var being 80-86% used is normal if stable.
+      Alert if free space becomes very low or usage grows quickly.
     analysis:
-      mode: ai
-      include_history: 7d
+      history: 7d
     alert:
       cooldown: 2h
       repeat_after: 12h
@@ -215,13 +217,11 @@ checks:
     command: hugin_health_check
     schedule: "*/5 * * * *"
     timeout: 5s
-    analysis:
-      mode: ai
     alert:
       cooldown: 1h
 
-# Note: Operator notes are managed via the CLI (e.g., `hugin note web1 disk "Normal if stable"`) 
-# and are intentionally excluded from the YAML to prevent state-drift.
+# Stable context belongs in YAML. Ad-hoc operator notes are managed via the CLI,
+# for example: `hugin note disk_web1 "Temporary backup migration in progress"`.
 
 notifiers:
   telegram:

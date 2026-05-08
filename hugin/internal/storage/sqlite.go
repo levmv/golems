@@ -59,6 +59,13 @@ func initSchema(db *sql.DB) error {
 		errors JSON,
 		duration_ms INTEGER NOT NULL DEFAULT 0,
 		window TEXT NOT NULL DEFAULT '',
+		analysis_severity TEXT NOT NULL DEFAULT '',
+		analysis_should_alert INTEGER,
+		analysis_summary TEXT NOT NULL DEFAULT '',
+		analysis_evidence TEXT NOT NULL DEFAULT '',
+		analysis_error TEXT NOT NULL DEFAULT '',
+		analysis_model TEXT NOT NULL DEFAULT '',
+		analysis_created_at DATETIME,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -74,6 +81,7 @@ func initSchema(db *sql.DB) error {
 		evidence TEXT,
 		first_run_id INTEGER REFERENCES runs(id),
 		last_run_id INTEGER REFERENCES runs(id),
+		last_notified_at DATETIME,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		resolved_at DATETIME,
 		resolution_note TEXT
@@ -101,7 +109,58 @@ func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(schema); err != nil {
 		return err
 	}
+	if err := ensureColumn(db, "runs", "analysis_severity", "analysis_severity TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "runs", "analysis_should_alert", "analysis_should_alert INTEGER"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "runs", "analysis_summary", "analysis_summary TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "runs", "analysis_evidence", "analysis_evidence TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "runs", "analysis_error", "analysis_error TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "runs", "analysis_model", "analysis_model TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "runs", "analysis_created_at", "analysis_created_at DATETIME"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "incidents", "last_notified_at", "last_notified_at DATETIME"); err != nil {
+		return err
+	}
 	return tasksqlite.EnsureSchema(context.Background(), db, taskStoreOptions)
+}
+
+func ensureColumn(db *sql.DB, table string, name string, definition string) error {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var colName, colType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if colName == name {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s`, table, definition))
+	return err
 }
 
 func (d *DB) TaskStore() (tasks.Store, error) {
@@ -160,6 +219,16 @@ type RunRecord struct {
 	CreatedAt  time.Time
 }
 
+type RunAnalysis struct {
+	Severity    string
+	ShouldAlert bool
+	Summary     string
+	Evidence    string
+	Error       string
+	Model       string
+	CreatedAt   time.Time
+}
+
 // IncidentRecord is a row from the incidents table.
 type IncidentRecord struct {
 	ID             string
@@ -170,6 +239,7 @@ type IncidentRecord struct {
 	Evidence       string
 	FirstRunID     *int64
 	LastRunID      *int64
+	LastNotifiedAt *time.Time
 	CreatedAt      time.Time
 	ResolvedAt     *time.Time
 	ResolutionNote string
@@ -190,6 +260,67 @@ func (d *DB) InsertRun(checkID string, output *models.CollectorOutput, durationM
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+func (d *DB) UpdateRunAnalysis(runID int64, analysis RunAnalysis) error {
+	if analysis.CreatedAt.IsZero() {
+		analysis.CreatedAt = time.Now().UTC()
+	}
+	_, err := d.sql.Exec(
+		`UPDATE runs
+		    SET analysis_severity = ?,
+		        analysis_should_alert = ?,
+		        analysis_summary = ?,
+		        analysis_evidence = ?,
+		        analysis_error = ?,
+		        analysis_model = ?,
+		        analysis_created_at = ?
+		  WHERE id = ?`,
+		analysis.Severity,
+		analysis.ShouldAlert,
+		analysis.Summary,
+		analysis.Evidence,
+		analysis.Error,
+		analysis.Model,
+		analysis.CreatedAt.UTC(),
+		runID,
+	)
+	return err
+}
+
+func (d *DB) RunAnalysis(runID int64) (*RunAnalysis, error) {
+	row := d.sql.QueryRow(
+		`SELECT analysis_severity, analysis_should_alert, analysis_summary,
+		        analysis_evidence, analysis_error, analysis_model, analysis_created_at
+		   FROM runs
+		  WHERE id = ?`,
+		runID,
+	)
+	var analysis RunAnalysis
+	var shouldAlert sql.NullBool
+	var createdAt sql.NullTime
+	if err := row.Scan(
+		&analysis.Severity,
+		&shouldAlert,
+		&analysis.Summary,
+		&analysis.Evidence,
+		&analysis.Error,
+		&analysis.Model,
+		&createdAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, sql.ErrNoRows
+		}
+		return nil, err
+	}
+	if analysis.Severity == "" && !shouldAlert.Valid && analysis.Summary == "" && analysis.Error == "" {
+		return nil, nil
+	}
+	analysis.ShouldAlert = shouldAlert.Valid && shouldAlert.Bool
+	if createdAt.Valid {
+		analysis.CreatedAt = createdAt.Time
+	}
+	return &analysis, nil
 }
 
 // RunsSince returns all runs for a check after the given time, ordered newest first.
@@ -229,7 +360,7 @@ func (d *DB) RecentRuns(checkID string, limit int) ([]RunRecord, error) {
 // ActiveIncident returns the currently active (unresolved) incident for a check, if any.
 func (d *DB) ActiveIncident(checkID string) (*IncidentRecord, error) {
 	row := d.sql.QueryRow(
-		`SELECT id, check_id, status, severity, summary, evidence, first_run_id, last_run_id, created_at, resolved_at, resolution_note
+		`SELECT id, check_id, status, severity, summary, evidence, first_run_id, last_run_id, last_notified_at, created_at, resolved_at, resolution_note
 		 FROM incidents
 		 WHERE check_id = ? AND status = 'active'
 		 ORDER BY created_at DESC
@@ -250,7 +381,7 @@ func (d *DB) ActiveIncident(checkID string) (*IncidentRecord, error) {
 // Incident returns an incident by ID.
 func (d *DB) Incident(incidentID string) (*IncidentRecord, error) {
 	row := d.sql.QueryRow(
-		`SELECT id, check_id, status, severity, summary, evidence, first_run_id, last_run_id, created_at, resolved_at, resolution_note
+		`SELECT id, check_id, status, severity, summary, evidence, first_run_id, last_run_id, last_notified_at, created_at, resolved_at, resolution_note
 		 FROM incidents
 		 WHERE id = ?`,
 		incidentID,
@@ -283,6 +414,24 @@ func (d *DB) UpdateIncidentRun(incidentID string, lastRunID int64) error {
 		lastRunID, incidentID,
 	)
 	return err
+}
+
+func (d *DB) MarkIncidentNotified(incidentID string, notifiedAt time.Time) error {
+	res, err := d.sql.Exec(
+		`UPDATE incidents SET last_notified_at = ? WHERE id = ?`,
+		notifiedAt.UTC(), incidentID,
+	)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // ResolveIncident marks an incident as resolved.
@@ -370,13 +519,17 @@ func scanIncident(row *sql.Row, inc *IncidentRecord) error {
 	var evidence sql.NullString
 	var resolutionNote sql.NullString
 	var resolvedAt sql.NullTime
+	var lastNotifiedAt sql.NullTime
 	err := row.Scan(
 		&inc.ID, &inc.CheckID, &inc.Status, &inc.Severity, &inc.Summary,
-		&evidence, &inc.FirstRunID, &inc.LastRunID,
+		&evidence, &inc.FirstRunID, &inc.LastRunID, &lastNotifiedAt,
 		&inc.CreatedAt, &resolvedAt, &resolutionNote,
 	)
 	inc.Evidence = evidence.String
 	inc.ResolutionNote = resolutionNote.String
+	if lastNotifiedAt.Valid {
+		inc.LastNotifiedAt = &lastNotifiedAt.Time
+	}
 	if resolvedAt.Valid {
 		inc.ResolvedAt = &resolvedAt.Time
 	}
