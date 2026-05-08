@@ -4,19 +4,26 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/levmv/golems/hugin/internal/models"
-	"github.com/levmv/golems/pkg/schedule"
+	"github.com/levmv/golems/pkg/tasks"
+	tasksqlite "github.com/levmv/golems/pkg/tasks/sqlite"
 
 	_ "modernc.org/sqlite"
 )
 
+var taskStoreOptions = tasksqlite.Options{Table: "tasks"}
+
 type DB struct {
 	sql *sql.DB
+}
+
+type CheckTaskRef struct {
+	CheckID     string
+	TaskID      string
+	Fingerprint string
 }
 
 // New initializes the SQLite database and ensures the schema exists.
@@ -84,26 +91,60 @@ func initSchema(db *sql.DB) error {
 
 	CREATE INDEX IF NOT EXISTS idx_notes_check_id ON notes(check_id);
 
-	CREATE TABLE IF NOT EXISTS schedule_runs (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		job_id TEXT NOT NULL,
-		occurrence_key TEXT NOT NULL,
-		kind TEXT NOT NULL DEFAULT '',
-		ref TEXT NOT NULL DEFAULT '',
-		job_group TEXT NOT NULL DEFAULT '',
-		due_at DATETIME NOT NULL,
-		started_at DATETIME NOT NULL,
-		finished_at DATETIME,
-		status TEXT NOT NULL,
-		error TEXT NOT NULL DEFAULT '',
-		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(job_id, occurrence_key)
+	CREATE TABLE IF NOT EXISTS hugin_check_tasks (
+		check_id TEXT PRIMARY KEY,
+		task_id TEXT NOT NULL,
+		fingerprint TEXT NOT NULL
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_schedule_runs_job_id ON schedule_runs(job_id);
-	CREATE INDEX IF NOT EXISTS idx_schedule_runs_due_at ON schedule_runs(due_at);
 	`
-	_, err := db.Exec(schema)
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	return tasksqlite.EnsureSchema(context.Background(), db, taskStoreOptions)
+}
+
+func (d *DB) TaskStore() (tasks.Store, error) {
+	return tasksqlite.New(d.sql, taskStoreOptions)
+}
+
+func (d *DB) CheckTaskRefs(ctx context.Context) ([]CheckTaskRef, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT check_id, task_id, fingerprint FROM hugin_check_tasks`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var refs []CheckTaskRef
+	for rows.Next() {
+		var ref CheckTaskRef
+		if err := rows.Scan(&ref.CheckID, &ref.TaskID, &ref.Fingerprint); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return refs, nil
+}
+
+func (d *DB) UpsertCheckTaskRef(ctx context.Context, ref CheckTaskRef) error {
+	_, err := d.sql.ExecContext(ctx, `
+		INSERT INTO hugin_check_tasks (check_id, task_id, fingerprint)
+		VALUES (?, ?, ?)
+		ON CONFLICT(check_id) DO UPDATE SET
+			task_id = excluded.task_id,
+			fingerprint = excluded.fingerprint`,
+		ref.CheckID,
+		ref.TaskID,
+		ref.Fingerprint,
+	)
+	return err
+}
+
+func (d *DB) DeleteCheckTaskRef(ctx context.Context, checkID string) error {
+	_, err := d.sql.ExecContext(ctx, `DELETE FROM hugin_check_tasks WHERE check_id = ?`, checkID)
 	return err
 }
 
@@ -310,102 +351,6 @@ func (d *DB) DeleteOldRuns(before time.Time) (int64, error) {
 	return res.RowsAffected()
 }
 
-// LastRun returns the latest scheduler coordination run for a job.
-func (d *DB) LastRun(ctx context.Context, jobID string) (*schedule.RunRecord, error) {
-	row := d.sql.QueryRowContext(ctx,
-		`SELECT id, job_id, occurrence_key, kind, ref, job_group, due_at, started_at, finished_at, status, error
-		 FROM schedule_runs
-		 WHERE job_id = ?
-		 ORDER BY due_at DESC, started_at DESC, id DESC
-		 LIMIT 1`,
-		jobID,
-	)
-	rec, err := scanScheduleRun(row)
-	if err == sql.ErrNoRows {
-		return nil, schedule.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &rec, nil
-}
-
-// LastRuns returns the latest scheduler coordination run for each requested job.
-func (d *DB) LastRuns(ctx context.Context, jobIDs []string) (map[string]schedule.RunRecord, error) {
-	result := make(map[string]schedule.RunRecord, len(jobIDs))
-	for _, jobID := range jobIDs {
-		rec, err := d.LastRun(ctx, jobID)
-		if errors.Is(err, schedule.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		result[jobID] = *rec
-	}
-	return result, nil
-}
-
-// TryCreateRun atomically claims one scheduler occurrence.
-func (d *DB) TryCreateRun(ctx context.Context, record schedule.RunRecord) (schedule.RunRecord, bool, error) {
-	res, err := d.sql.ExecContext(ctx,
-		`INSERT OR IGNORE INTO schedule_runs
-		 (job_id, occurrence_key, kind, ref, job_group, due_at, started_at, status, error)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		record.JobID,
-		record.OccurrenceKey,
-		record.Kind,
-		record.Ref,
-		record.Group,
-		record.DueAt.UTC(),
-		record.StartedAt.UTC(),
-		string(record.Status),
-		record.Error,
-	)
-	if err != nil {
-		return schedule.RunRecord{}, false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return schedule.RunRecord{}, false, err
-	}
-	if n == 0 {
-		return schedule.RunRecord{}, false, nil
-	}
-
-	id, err := res.LastInsertId()
-	if err != nil {
-		return schedule.RunRecord{}, false, err
-	}
-	record.ID = strconv.FormatInt(id, 10)
-	return record, true, nil
-}
-
-// FinishRun records the scheduler outcome for a claimed occurrence.
-func (d *DB) FinishRun(ctx context.Context, runID string, status schedule.RunStatus, message string, finishedAt time.Time) error {
-	id, err := strconv.ParseInt(runID, 10, 64)
-	if err != nil {
-		return schedule.ErrNotFound
-	}
-	res, err := d.sql.ExecContext(ctx,
-		`UPDATE schedule_runs
-		 SET status = ?, error = ?, finished_at = ?
-		 WHERE id = ?`,
-		string(status), message, finishedAt.UTC(), id,
-	)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return schedule.ErrNotFound
-	}
-	return nil
-}
-
 func scanRuns(rows *sql.Rows) ([]RunRecord, error) {
 	var runs []RunRecord
 	for rows.Next() {
@@ -419,36 +364,6 @@ func scanRuns(rows *sql.Rows) ([]RunRecord, error) {
 		runs = append(runs, r)
 	}
 	return runs, rows.Err()
-}
-
-type scanner interface {
-	Scan(dest ...any) error
-}
-
-func scanScheduleRun(row scanner) (schedule.RunRecord, error) {
-	var rec schedule.RunRecord
-	var id int64
-	var finishedAt sql.NullTime
-	if err := row.Scan(
-		&id,
-		&rec.JobID,
-		&rec.OccurrenceKey,
-		&rec.Kind,
-		&rec.Ref,
-		&rec.Group,
-		&rec.DueAt,
-		&rec.StartedAt,
-		&finishedAt,
-		&rec.Status,
-		&rec.Error,
-	); err != nil {
-		return schedule.RunRecord{}, err
-	}
-	rec.ID = strconv.FormatInt(id, 10)
-	if finishedAt.Valid {
-		rec.FinishedAt = &finishedAt.Time
-	}
-	return rec, nil
 }
 
 func scanIncident(row *sql.Row, inc *IncidentRecord) error {

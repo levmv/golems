@@ -5,7 +5,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/levmv/golems/pkg/schedule"
+	"github.com/levmv/golems/pkg/tasks"
 	"gopkg.in/yaml.v3"
 )
 
@@ -64,7 +64,7 @@ func (c *Config) Validate() error {
 		if check.Schedule == "" {
 			return fmt.Errorf("check '%s' is missing a schedule", check.ID)
 		}
-		if err := (schedule.JobSpec{ID: check.ID, Trigger: schedule.Cron(check.Schedule)}).Validate(); err != nil {
+		if err := tasks.Cron(check.Schedule, c.App.Timezone).Validate(); err != nil {
 			return fmt.Errorf("check '%s' has invalid schedule %q: %w", check.ID, check.Schedule, err)
 		}
 		if check.Timeout <= 0 {

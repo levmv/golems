@@ -2,109 +2,98 @@ package storage
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/levmv/golems/pkg/schedule"
+	"github.com/levmv/golems/pkg/tasks"
 )
 
-func TestScheduleRunClaimLifecycle(t *testing.T) {
-	db := newTestDB(t)
-	ctx := context.Background()
-	dueAt := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
-	startedAt := dueAt.Add(time.Second)
-
-	_, err := db.LastRun(ctx, "job-1")
-	if !errors.Is(err, schedule.ErrNotFound) {
-		t.Fatalf("expected missing LastRun to return ErrNotFound, got %v", err)
-	}
-
-	record := schedule.RunRecord{
-		JobID:         "job-1",
-		OccurrenceKey: "2026-05-07T12:00:00Z",
-		Kind:          "hugin.check",
-		Ref:           "disk",
-		Group:         "local",
-		DueAt:         dueAt,
-		StartedAt:     startedAt,
-		Status:        schedule.RunRunning,
-	}
-
-	claimed, ok, err := db.TryCreateRun(ctx, record)
-	if err != nil {
-		t.Fatalf("TryCreateRun returned error: %v", err)
-	}
-	if !ok {
-		t.Fatalf("expected first TryCreateRun to claim")
-	}
-	if claimed.ID == "" {
-		t.Fatalf("expected claimed run ID")
-	}
-
-	duplicate, ok, err := db.TryCreateRun(ctx, record)
-	if err != nil {
-		t.Fatalf("duplicate TryCreateRun returned error: %v", err)
-	}
-	if ok {
-		t.Fatalf("expected duplicate TryCreateRun not to claim: %#v", duplicate)
-	}
-
-	finishedAt := startedAt.Add(2 * time.Second)
-	if err := db.FinishRun(ctx, claimed.ID, schedule.RunFailed, "collector failed", finishedAt); err != nil {
-		t.Fatalf("FinishRun returned error: %v", err)
-	}
-
-	last, err := db.LastRun(ctx, "job-1")
-	if err != nil {
-		t.Fatalf("LastRun returned error: %v", err)
-	}
-	if last.ID != claimed.ID {
-		t.Fatalf("expected LastRun ID %q, got %q", claimed.ID, last.ID)
-	}
-	if last.Status != schedule.RunFailed {
-		t.Fatalf("expected failed status, got %q", last.Status)
-	}
-	if last.Error != "collector failed" {
-		t.Fatalf("expected error message to be stored, got %q", last.Error)
-	}
-	if last.FinishedAt == nil || !last.FinishedAt.Equal(finishedAt) {
-		t.Fatalf("expected finished_at %s, got %#v", finishedAt, last.FinishedAt)
-	}
-}
-
-func TestLastRunsSkipsMissingJobs(t *testing.T) {
+func TestTaskStoreIsInitializedInHuginDB(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 5, 7, 12, 0, 0, 0, time.UTC)
+	next := now
 
-	_, ok, err := db.TryCreateRun(ctx, schedule.RunRecord{
-		JobID:         "job-1",
-		OccurrenceKey: "initial",
-		DueAt:         now,
-		StartedAt:     now,
-		Status:        schedule.RunRunning,
+	store, err := db.TaskStore()
+	if err != nil {
+		t.Fatalf("TaskStore returned error: %v", err)
+	}
+
+	if err := store.Enqueue(ctx, tasks.Task{
+		ID:          "task-1",
+		Kind:        "hugin.check",
+		Payload:     []byte(`{"check_id":"disk"}`),
+		Schedule:    tasks.Once(now),
+		Group:       "target:web",
+		Timeout:     time.Second,
+		MaxAttempts: 3,
+		NextRunAt:   &next,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}); err != nil {
+		t.Fatalf("Enqueue returned error: %v", err)
+	}
+	claimed, err := store.ClaimDue(ctx, now, time.Minute, 0, "token")
+	if err != nil {
+		t.Fatalf("ClaimDue returned error: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("expected one claimed task, got %d", len(claimed))
+	}
+
+	nextRun := now.Add(time.Hour)
+	ok, err := store.Finish(ctx, tasks.Finish{
+		ID:         "task-1",
+		LockToken:  "token",
+		FinishedAt: now.Add(time.Second),
+		NextRunAt:  &nextRun,
 	})
 	if err != nil {
-		t.Fatalf("TryCreateRun returned error: %v", err)
+		t.Fatalf("Finish returned error: %v", err)
 	}
 	if !ok {
-		t.Fatalf("expected TryCreateRun to claim")
+		t.Fatal("expected Finish to update claimed job")
+	}
+}
+
+func TestCheckTaskRefs(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	ref := CheckTaskRef{CheckID: "disk", TaskID: "hugin.check:disk", Fingerprint: "first"}
+	if err := db.UpsertCheckTaskRef(ctx, ref); err != nil {
+		t.Fatalf("UpsertCheckTaskRef returned error: %v", err)
+	}
+	refs, err := db.CheckTaskRefs(ctx)
+	if err != nil {
+		t.Fatalf("CheckTaskRefs returned error: %v", err)
+	}
+	if len(refs) != 1 || refs[0] != ref {
+		t.Fatalf("unexpected refs: %+v", refs)
 	}
 
-	runs, err := db.LastRuns(ctx, []string{"job-1", "missing"})
+	ref.Fingerprint = "second"
+	if err := db.UpsertCheckTaskRef(ctx, ref); err != nil {
+		t.Fatalf("second UpsertCheckTaskRef returned error: %v", err)
+	}
+	refs, err = db.CheckTaskRefs(ctx)
 	if err != nil {
-		t.Fatalf("LastRuns returned error: %v", err)
+		t.Fatalf("second CheckTaskRefs returned error: %v", err)
 	}
-	if len(runs) != 1 {
-		t.Fatalf("expected 1 run, got %d: %#v", len(runs), runs)
+	if len(refs) != 1 || refs[0] != ref {
+		t.Fatalf("unexpected refs after upsert: %+v", refs)
 	}
-	if _, ok := runs["job-1"]; !ok {
-		t.Fatalf("expected job-1 in LastRuns result: %#v", runs)
+
+	if err := db.DeleteCheckTaskRef(ctx, ref.CheckID); err != nil {
+		t.Fatalf("DeleteCheckTaskRef returned error: %v", err)
 	}
-	if _, ok := runs["missing"]; ok {
-		t.Fatalf("did not expect missing job in LastRuns result: %#v", runs)
+	refs, err = db.CheckTaskRefs(ctx)
+	if err != nil {
+		t.Fatalf("final CheckTaskRefs returned error: %v", err)
+	}
+	if len(refs) != 0 {
+		t.Fatalf("expected refs to be deleted, got %+v", refs)
 	}
 }
 

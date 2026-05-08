@@ -37,7 +37,7 @@ If the LLM is unavailable, Hugin treats that as an operational problem of its ow
 ## Design Goals
 
 - **Flexible Execution (Cron or Daemon)**
-  - Hugin can act statelessly. You can run `hugin run-due` via a standard system cron job or systemd timer.
+  - Hugin keeps schedule state in SQLite. You can run `hugin run-due` via a standard system cron job or systemd timer.
   - Alternatively, use `hugin daemon` for a persistent, long-running background process.
 - **Fast & Efficient**
   - Checks are executed concurrently.

@@ -2,6 +2,10 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -17,7 +21,7 @@ import (
 	"github.com/levmv/golems/hugin/internal/storage"
 	"github.com/levmv/golems/pkg/llm"
 	"github.com/levmv/golems/pkg/logger"
-	jobschedule "github.com/levmv/golems/pkg/schedule"
+	"github.com/levmv/golems/pkg/tasks"
 )
 
 const checkJobKind = "hugin.check"
@@ -82,52 +86,169 @@ func (e *Engine) RunCheck(ctx context.Context, checkID string) error {
 }
 
 func (e *Engine) RunDue(ctx context.Context) error {
-	var runner jobschedule.Runner = jobschedule.RunnerFunc(func(ctx context.Context, job jobschedule.Job) error {
-		if job.Spec.Kind != checkJobKind {
-			return fmt.Errorf("unknown scheduled job kind: %s", job.Spec.Kind)
-		}
-		return e.RunCheck(ctx, job.Spec.Ref)
-	})
-	runner = jobschedule.Chain(runner, jobschedule.GroupConcurrency(1))
-	s := jobschedule.New(e.db, runner, jobschedule.Options{
-		MaxConcurrent: e.cfg.App.MaxConcurrentChecks,
-	})
-
-	jobs, err := s.Due(ctx, jobSpecs(e.cfg))
+	store, err := e.db.TaskStore()
 	if err != nil {
-		return fmt.Errorf("failed to determine due checks: %w", err)
+		return fmt.Errorf("failed to initialize task store: %w", err)
 	}
 
-	if len(jobs) == 0 {
-		e.log.Info("No checks are due")
+	var failures []tasks.Failure
+	var handler tasks.Handler = tasks.HandlerFunc(func(ctx context.Context, task tasks.Task) error {
+		if task.Kind != checkJobKind {
+			return fmt.Errorf("unknown scheduled task kind: %s", task.Kind)
+		}
+		payload, err := tasks.DecodeJSON[checkTaskPayload](task)
+		if err != nil {
+			return fmt.Errorf("decode check task payload: %w", err)
+		}
+		if payload.CheckID == "" {
+			return fmt.Errorf("check task payload is missing check_id")
+		}
+		return e.RunCheck(ctx, payload.CheckID)
+	})
+
+	handler = tasks.Chain(handler, tasks.GroupConcurrency(1))
+	q, err := tasks.New(store, handler, tasks.Options{
+		MaxConcurrent: e.cfg.App.MaxConcurrentChecks,
+		OnFailure: func(failure tasks.Failure) {
+			failures = append(failures, failure)
+			if failure.Exhausted {
+				e.log.Error("Scheduled check task %s exhausted attempts: %v", failure.Task.ID, failure.Err)
+				return
+			}
+			e.log.Warn("Scheduled check task %s failed: %v", failure.Task.ID, failure.Err)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize task queue: %w", err)
+	}
+
+	if err := e.syncCheckTasks(ctx, q); err != nil {
+		return fmt.Errorf("failed to sync scheduled check tasks: %w", err)
+	}
+
+	if err := q.RunOnce(ctx); err != nil {
+		return err
+	}
+	if len(failures) == 0 {
+		e.log.Info("Scheduled checks processed")
 		return nil
 	}
+	var joined error
+	for _, failure := range failures {
+		joined = errors.Join(joined, failure.Err)
+	}
+	return fmt.Errorf("one or more scheduled checks failed: %w", joined)
+}
 
-	e.log.Info("Running %d due check(s)", len(jobs))
-	if err := s.RunJobs(ctx, jobs); err != nil {
-		return fmt.Errorf("one or more scheduled checks failed: %w", err)
+type checkTaskPayload struct {
+	CheckID string `json:"check_id"`
+}
+
+type desiredCheckTask struct {
+	ref     storage.CheckTaskRef
+	enqueue tasks.Enqueue
+}
+
+func (e *Engine) syncCheckTasks(ctx context.Context, q *tasks.Queue) error {
+	refs, err := e.db.CheckTaskRefs(ctx)
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]storage.CheckTaskRef, len(refs))
+	for _, ref := range refs {
+		existing[ref.CheckID] = ref
+	}
+
+	desired := checkTasks(e.cfg, time.Now().UTC())
+	for checkID, task := range desired {
+		current, ok := existing[checkID]
+		if ok && current.Fingerprint == task.ref.Fingerprint {
+			if _, err := q.Get(ctx, current.TaskID); err == nil {
+				continue
+			} else if !errors.Is(err, tasks.ErrNotFound) {
+				return fmt.Errorf("load existing task for check %q: %w", checkID, err)
+			}
+		}
+		if ok {
+			if _, err := q.Delete(ctx, current.TaskID); err != nil {
+				return fmt.Errorf("delete stale task for check %q: %w", checkID, err)
+			}
+		}
+		if _, err := q.Delete(ctx, task.ref.TaskID); err != nil {
+			return fmt.Errorf("delete duplicate task for check %q: %w", checkID, err)
+		}
+		if _, err := q.Enqueue(ctx, task.enqueue); err != nil {
+			return fmt.Errorf("enqueue task for check %q: %w", checkID, err)
+		}
+		if err := e.db.UpsertCheckTaskRef(ctx, task.ref); err != nil {
+			return fmt.Errorf("record task ref for check %q: %w", checkID, err)
+		}
+	}
+
+	for _, ref := range refs {
+		if _, ok := desired[ref.CheckID]; ok {
+			continue
+		}
+		if _, err := q.Delete(ctx, ref.TaskID); err != nil {
+			return fmt.Errorf("delete task for removed check %q: %w", ref.CheckID, err)
+		}
+		if err := e.db.DeleteCheckTaskRef(ctx, ref.CheckID); err != nil {
+			return fmt.Errorf("delete task ref for removed check %q: %w", ref.CheckID, err)
+		}
 	}
 	return nil
 }
 
-func jobSpecs(cfg *config.Config) []jobschedule.JobSpec {
-	specs := make([]jobschedule.JobSpec, 0, len(cfg.Checks))
+func checkTasks(cfg *config.Config, seedAt time.Time) map[string]desiredCheckTask {
+	out := make(map[string]desiredCheckTask, len(cfg.Checks))
 	for _, check := range cfg.Checks {
-		specs = append(specs, jobschedule.JobSpec{
-			ID:         check.ID,
-			Kind:       checkJobKind,
-			Ref:        check.ID,
-			Group:      check.Target,
-			Trigger:    jobschedule.Cron(check.Schedule),
-			Timezone:   cfg.App.Timezone,
-			Timeout:    check.Timeout,
-			InitialRun: true,
-			Metadata: map[string]string{
-				"target": check.Target,
+		taskID := checkTaskID(check.ID)
+		payload, _ := tasks.JSONPayload(checkTaskPayload{CheckID: check.ID})
+		fingerprint := checkTaskFingerprint(check, cfg.App.Timezone)
+		out[check.ID] = desiredCheckTask{
+			ref: storage.CheckTaskRef{
+				CheckID:     check.ID,
+				TaskID:      taskID,
+				Fingerprint: fingerprint,
 			},
-		})
+			enqueue: tasks.Enqueue{
+				ID:       taskID,
+				Kind:     checkJobKind,
+				Payload:  payload,
+				Group:    check.Target,
+				Schedule: tasks.CronFrom(check.Schedule, cfg.App.Timezone, seedAt),
+				Timeout:  check.Timeout,
+				Metadata: map[string]string{
+					"check_id":    check.ID,
+					"target":      check.Target,
+					"fingerprint": fingerprint,
+				},
+			},
+		}
 	}
-	return specs
+	return out
+}
+
+func checkTaskID(checkID string) string {
+	return "hugin.check:" + checkID
+}
+
+func checkTaskFingerprint(check config.Check, timezone string) string {
+	data, _ := json.Marshal(struct {
+		CheckID   string `json:"check_id"`
+		Target    string `json:"target"`
+		Schedule  string `json:"schedule"`
+		Timezone  string `json:"timezone"`
+		TimeoutNS int64  `json:"timeout_ns"`
+	}{
+		CheckID:   check.ID,
+		Target:    check.Target,
+		Schedule:  check.Schedule,
+		Timezone:  timezone,
+		TimeoutNS: int64(check.Timeout),
+	})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func (e *Engine) runAnalysis(check *config.Check, checkID string, runID int64, output *models.CollectorOutput) error {
