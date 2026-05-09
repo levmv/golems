@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -u
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+check=$(collector_check_id "load")
+
+if [ ! -r /proc/loadavg ]; then
+	emit_error "$check" "LOADAVG_UNAVAILABLE" "/proc/loadavg is not readable"
+	exit 0
+fi
+
+read -r load1 load5 load15 process_counts _ < /proc/loadavg
+runnable_processes=${process_counts%/*}
+total_processes=${process_counts#*/}
+cpu_count=$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '0')
+
+printf '{"check":%s,"status":"ok","metrics":{"load1":%s,"load5":%s,"load15":%s,"runnable_processes":%s,"total_processes":%s,"cpu_count":%s}}\n' \
+	"$(json_string "$check")" \
+	"$load1" \
+	"$load5" \
+	"$load15" \
+	"$runnable_processes" \
+	"$total_processes" \
+	"$cpu_count"

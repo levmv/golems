@@ -2,14 +2,12 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/levmv/golems/hugin/internal/analysis"
@@ -28,13 +26,24 @@ const checkJobKind = "hugin.check"
 const analysisIssueSuffix = ":analysis"
 
 type Engine struct {
-	cfg *config.Config
-	db  *storage.DB
-	log logger.Logger
+	cfg               *config.Config
+	db                *storage.DB
+	log               logger.Logger
+	analysisModel     llm.Model
+	analysisModelErr  error
+	analysisModelName string
 }
 
 func New(cfg *config.Config, db *storage.DB, log logger.Logger) *Engine {
-	return &Engine{cfg: cfg, db: db, log: log}
+	model, modelErr := buildModel(cfg)
+	return &Engine{
+		cfg:               cfg,
+		db:                db,
+		log:               log,
+		analysisModel:     model,
+		analysisModelErr:  modelErr,
+		analysisModelName: analysisModelName(cfg),
+	}
 }
 
 func (e *Engine) RunCheck(ctx context.Context, checkID string) error {
@@ -44,6 +53,10 @@ func (e *Engine) RunCheck(ctx context.Context, checkID string) error {
 }
 
 func (e *Engine) runCheck(ctx context.Context, checkID string, execRunner *runner.Runner) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	check := e.cfg.FindCheck(checkID)
 	if check == nil {
 		return fmt.Errorf("check '%s' not found in configuration", checkID)
@@ -55,12 +68,17 @@ func (e *Engine) runCheck(ctx context.Context, checkID string, execRunner *runne
 	}
 	e.log.Info("Executing check '%s' on target '%s' (%s)", checkID, check.Target, target.Host)
 
-	ctx, cancel := context.WithTimeout(ctx, check.Timeout)
+	execCtx, cancel := context.WithTimeout(ctx, check.Timeout)
 	defer cancel()
 
 	start := time.Now()
-	output, execErr := execRunner.Execute(ctx, *check, target)
+	output, execErr := execRunner.Execute(execCtx, *check, target)
 	durationMs := time.Since(start).Milliseconds()
+
+	if err := ctx.Err(); err != nil {
+		e.log.Info("Check '%s' canceled during execution", checkID)
+		return err
+	}
 
 	if execErr != nil {
 		e.log.Error("Execution failed after %dms: %v", durationMs, execErr)
@@ -80,59 +98,40 @@ func (e *Engine) runCheck(ctx context.Context, checkID string, execRunner *runne
 	}
 	e.log.Debug("Run saved (id=%d)", runID)
 
-	if err := e.runAnalysis(check, checkID, runID, output); err != nil {
+	if err := e.runAnalysis(ctx, check, checkID, runID, output); err != nil {
 		e.log.Error("Analysis failed: %v", err)
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			return ctxErr
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		e.log.Info("Check '%s' canceled after execution", checkID)
+		return err
 	}
 	return nil
 }
 
 func (e *Engine) RunDue(ctx context.Context) error {
-	store, err := e.db.TaskStore()
-	if err != nil {
-		return fmt.Errorf("failed to initialize task store: %w", err)
-	}
-
-	execRunner := runner.New()
-	defer execRunner.Close()
-
-	var failures []tasks.Failure
-	var handler tasks.Handler = tasks.HandlerFunc(func(ctx context.Context, task tasks.Task) error {
-		if task.Kind != checkJobKind {
-			return fmt.Errorf("unknown scheduled task kind: %s", task.Kind)
-		}
-		payload, err := tasks.DecodeJSON[checkTaskPayload](task)
-		if err != nil {
-			return fmt.Errorf("decode check task payload: %w", err)
-		}
-		if payload.CheckID == "" {
-			return fmt.Errorf("check task payload is missing check_id")
-		}
-		return e.runCheck(ctx, payload.CheckID, execRunner)
-	})
-
-	handler = tasks.Chain(handler, tasks.GroupConcurrency(1))
-	q, err := tasks.New(store, handler, tasks.Options{
-		MaxConcurrent: e.cfg.App.MaxConcurrentChecks,
-		OnFailure: func(failure tasks.Failure) {
-			failures = append(failures, failure)
-			if failure.Exhausted {
-				e.log.Error("Scheduled check task %s exhausted attempts: %v", failure.Task.ID, failure.Err)
-				return
-			}
-			e.log.Warn("Scheduled check task %s failed: %v", failure.Task.ID, failure.Err)
-		},
+	scheduled, err := e.newScheduledCheckQueue(scheduledCheckQueueOptions{
+		collectFailures: true,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to initialize task queue: %w", err)
+		return err
 	}
+	defer func() {
+		if err := scheduled.Close(); err != nil {
+			e.log.Warn("Failed to close scheduled runner: %v", err)
+		}
+	}()
 
-	if err := e.syncCheckTasks(ctx, q); err != nil {
+	if err := e.syncCheckTasks(ctx, scheduled.queue); err != nil {
 		return fmt.Errorf("failed to sync scheduled check tasks: %w", err)
 	}
 
-	if err := q.RunOnce(ctx); err != nil {
+	if err := scheduled.queue.RunOnce(ctx); err != nil {
 		return err
 	}
+	failures := scheduled.failuresSnapshot()
 	if len(failures) == 0 {
 		e.log.Info("Scheduled checks processed")
 		return nil
@@ -144,63 +143,182 @@ func (e *Engine) RunDue(ctx context.Context) error {
 	return fmt.Errorf("one or more scheduled checks failed: %w", joined)
 }
 
+func (e *Engine) RunDaemon(ctx context.Context) error {
+	scheduled, err := e.newScheduledCheckQueue(scheduledCheckQueueOptions{
+		onError: func(err error) {
+			e.log.Error("Scheduled check loop error: %v", err)
+		},
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := scheduled.Close(); err != nil {
+			e.log.Warn("Failed to close scheduled runner: %v", err)
+		}
+	}()
+
+	if err := e.syncCheckTasks(ctx, scheduled.queue); err != nil {
+		return fmt.Errorf("failed to sync scheduled check tasks: %w", err)
+	}
+
+	e.log.Info("Hugin daemon started")
+	if err := scheduled.queue.RunLoop(ctx); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+			e.log.Info("Hugin daemon stopped")
+			return nil
+		}
+		return err
+	}
+	e.log.Info("Hugin daemon stopped")
+	return nil
+}
+
+type scheduledCheckQueueOptions struct {
+	collectFailures bool
+	onError         func(error)
+}
+
+type scheduledCheckQueue struct {
+	queue      *tasks.Queue
+	execRunner *runner.Runner
+	mu         sync.Mutex
+	failures   []tasks.Failure
+}
+
+func (q *scheduledCheckQueue) Close() error {
+	if q == nil || q.execRunner == nil {
+		return nil
+	}
+	return q.execRunner.Close()
+}
+
+func (q *scheduledCheckQueue) addFailure(failure tasks.Failure) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.failures = append(q.failures, failure)
+}
+
+func (q *scheduledCheckQueue) failuresSnapshot() []tasks.Failure {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return append([]tasks.Failure(nil), q.failures...)
+}
+
+func (e *Engine) newScheduledCheckQueue(opts scheduledCheckQueueOptions) (*scheduledCheckQueue, error) {
+	store, err := e.db.TaskStore()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize task store: %w", err)
+	}
+
+	scheduled := &scheduledCheckQueue{
+		execRunner: runner.New(),
+	}
+	var handler tasks.Handler = tasks.HandlerFunc(func(ctx context.Context, task tasks.Task) error {
+		if task.Kind != checkJobKind {
+			return fmt.Errorf("unknown scheduled task kind: %s", task.Kind)
+		}
+		payload, err := tasks.DecodeJSON[checkTaskPayload](task)
+		if err != nil {
+			return fmt.Errorf("decode check task payload: %w", err)
+		}
+		if payload.CheckID == "" {
+			return fmt.Errorf("check task payload is missing check_id")
+		}
+		if e.cfg.FindCheck(payload.CheckID) == nil {
+			return tasks.Discardf("hugin check %q is no longer in configuration", payload.CheckID)
+		}
+		return e.runCheck(ctx, payload.CheckID, scheduled.execRunner)
+	})
+
+	handler = tasks.Chain(handler, tasks.GroupConcurrency(1))
+	q, err := tasks.New(store, handler, tasks.Options{
+		MaxConcurrent: e.cfg.App.MaxConcurrentChecks,
+		OnFailure: func(failure tasks.Failure) {
+			if opts.collectFailures {
+				scheduled.addFailure(failure)
+			}
+			if failure.Exhausted {
+				e.log.Error("Scheduled check task %s exhausted attempts: %v", failure.Task.ID, failure.Err)
+				return
+			}
+			e.log.Warn("Scheduled check task %s failed: %v", failure.Task.ID, failure.Err)
+		},
+		OnError: opts.onError,
+	})
+	if err != nil {
+		_ = scheduled.Close()
+		return nil, fmt.Errorf("failed to initialize task queue: %w", err)
+	}
+	scheduled.queue = q
+	return scheduled, nil
+}
+
 type checkTaskPayload struct {
 	CheckID string `json:"check_id"`
 }
 
 type desiredCheckTask struct {
-	ref     storage.CheckTaskRef
 	enqueue tasks.Enqueue
 }
 
 func (e *Engine) syncCheckTasks(ctx context.Context, q *tasks.Queue) error {
-	refs, err := e.db.CheckTaskRefs(ctx)
-	if err != nil {
-		return err
-	}
-	existing := make(map[string]storage.CheckTaskRef, len(refs))
-	for _, ref := range refs {
-		existing[ref.CheckID] = ref
-	}
-
 	desired := checkTasks(e.cfg, time.Now().UTC())
 	for checkID, task := range desired {
-		current, ok := existing[checkID]
-		if ok && current.Fingerprint == task.ref.Fingerprint {
-			if _, err := q.Get(ctx, current.TaskID); err == nil {
+		current, err := q.Get(ctx, task.enqueue.ID)
+		if err == nil {
+			if scheduledCheckTaskMatches(current, task.enqueue) {
 				continue
-			} else if !errors.Is(err, tasks.ErrNotFound) {
-				return fmt.Errorf("load existing task for check %q: %w", checkID, err)
 			}
-		}
-		if ok {
-			if _, err := q.Delete(ctx, current.TaskID); err != nil {
+			if _, err := q.Delete(ctx, current.ID); err != nil {
 				return fmt.Errorf("delete stale task for check %q: %w", checkID, err)
 			}
-		}
-		if _, err := q.Delete(ctx, task.ref.TaskID); err != nil {
-			return fmt.Errorf("delete duplicate task for check %q: %w", checkID, err)
+		} else if !errors.Is(err, tasks.ErrNotFound) {
+			return fmt.Errorf("load existing task for check %q: %w", checkID, err)
 		}
 		if _, err := q.Enqueue(ctx, task.enqueue); err != nil {
 			return fmt.Errorf("enqueue task for check %q: %w", checkID, err)
 		}
-		if err := e.db.UpsertCheckTaskRef(ctx, task.ref); err != nil {
-			return fmt.Errorf("record task ref for check %q: %w", checkID, err)
-		}
-	}
-
-	for _, ref := range refs {
-		if _, ok := desired[ref.CheckID]; ok {
-			continue
-		}
-		if _, err := q.Delete(ctx, ref.TaskID); err != nil {
-			return fmt.Errorf("delete task for removed check %q: %w", ref.CheckID, err)
-		}
-		if err := e.db.DeleteCheckTaskRef(ctx, ref.CheckID); err != nil {
-			return fmt.Errorf("delete task ref for removed check %q: %w", ref.CheckID, err)
-		}
 	}
 	return nil
+}
+
+func scheduledCheckTaskMatches(task tasks.Task, desired tasks.Enqueue) bool {
+	if task.ID != desired.ID || task.Kind != desired.Kind || task.Group != desired.Group || task.Timeout != desired.Timeout {
+		return false
+	}
+	payload, err := tasks.DecodeJSON[checkTaskPayload](task)
+	if err != nil || payload.CheckID == "" {
+		return false
+	}
+	desiredPayload, err := decodeCheckTaskPayload(desired.Payload)
+	if err != nil || payload.CheckID != desiredPayload.CheckID {
+		return false
+	}
+	return sameScheduledCheckSchedule(task.Schedule, desired.Schedule)
+}
+
+func decodeCheckTaskPayload(payload []byte) (checkTaskPayload, error) {
+	task := tasks.Task{Payload: payload}
+	return tasks.DecodeJSON[checkTaskPayload](task)
+}
+
+func sameScheduledCheckSchedule(current tasks.Schedule, desired tasks.Schedule) bool {
+	if current.Kind != desired.Kind {
+		return false
+	}
+	switch desired.Kind {
+	case tasks.ScheduleCron:
+		// CronFrom.Start is the first materialization seed; changing it during
+		// sync should not replace an otherwise unchanged durable task.
+		return current.CronExpr == desired.CronExpr && current.Timezone == desired.Timezone
+	case tasks.ScheduleEvery:
+		return current.Interval == desired.Interval
+	case tasks.ScheduleOnce:
+		return current.At.Equal(desired.At)
+	default:
+		return false
+	}
 }
 
 func checkTasks(cfg *config.Config, seedAt time.Time) map[string]desiredCheckTask {
@@ -208,13 +326,7 @@ func checkTasks(cfg *config.Config, seedAt time.Time) map[string]desiredCheckTas
 	for _, check := range cfg.Checks {
 		taskID := checkTaskID(check.ID)
 		payload, _ := tasks.JSONPayload(checkTaskPayload{CheckID: check.ID})
-		fingerprint := checkTaskFingerprint(check, cfg.App.Timezone)
 		out[check.ID] = desiredCheckTask{
-			ref: storage.CheckTaskRef{
-				CheckID:     check.ID,
-				TaskID:      taskID,
-				Fingerprint: fingerprint,
-			},
 			enqueue: tasks.Enqueue{
 				ID:       taskID,
 				Kind:     checkJobKind,
@@ -223,9 +335,11 @@ func checkTasks(cfg *config.Config, seedAt time.Time) map[string]desiredCheckTas
 				Schedule: tasks.CronFrom(check.Schedule, cfg.App.Timezone, seedAt),
 				Timeout:  check.Timeout,
 				Metadata: map[string]string{
-					"check_id":    check.ID,
-					"target":      check.Target,
-					"fingerprint": fingerprint,
+					"check_id":   check.ID,
+					"target":     check.Target,
+					"schedule":   check.Schedule,
+					"timezone":   cfg.App.Timezone,
+					"timeout_ns": strconv.FormatInt(int64(check.Timeout), 10),
 				},
 			},
 		}
@@ -237,27 +351,13 @@ func checkTaskID(checkID string) string {
 	return "hugin.check:" + checkID
 }
 
-func checkTaskFingerprint(check config.Check, timezone string) string {
-	data, _ := json.Marshal(struct {
-		CheckID   string `json:"check_id"`
-		Target    string `json:"target"`
-		Schedule  string `json:"schedule"`
-		Timezone  string `json:"timezone"`
-		TimeoutNS int64  `json:"timeout_ns"`
-	}{
-		CheckID:   check.ID,
-		Target:    check.Target,
-		Schedule:  check.Schedule,
-		Timezone:  timezone,
-		TimeoutNS: int64(check.Timeout),
-	})
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
+func (e *Engine) runAnalysis(ctx context.Context, check *config.Check, checkID string, runID int64, output *models.CollectorOutput) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-func (e *Engine) runAnalysis(check *config.Check, checkID string, runID int64, output *models.CollectorOutput) error {
 	historyWindow := parseHistoryWindow(check)
-	history, err := e.db.RunsSince(checkID, time.Now().Add(-historyWindow), e.cfg.LLM.MaxInputRuns)
+	history, err := e.db.RunsSinceExcluding(checkID, time.Now().Add(-historyWindow), runID, e.cfg.LLM.MaxInputRuns)
 	if err != nil {
 		return fmt.Errorf("failed to fetch history: %w", err)
 	}
@@ -275,16 +375,18 @@ func (e *Engine) runAnalysis(check *config.Check, checkID string, runID int64, o
 		incident = nil
 	}
 
-	modelName := e.analysisModelName()
-	model, err := e.buildModel()
+	model, err := e.model()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		e.log.Warn("LLM configuration failed; opening analysis incident: %v", err)
-		return e.processAnalysisUnavailable(check, checkID, runID, modelName, err)
+		return e.processAnalysisUnavailable(check, checkID, runID, e.analysisModelName, err)
 	}
 
 	analyzer := analysis.New(model, e.log)
 	target := e.cfg.Targets[check.Target]
-	result, err := analyzer.Analyze(context.Background(), analysis.Input{
+	result, err := analyzer.Analyze(ctx, analysis.Input{
 		CheckID:        checkID,
 		Current:        output,
 		History:        history,
@@ -295,13 +397,25 @@ func (e *Engine) runAnalysis(check *config.Check, checkID string, runID int64, o
 		HistoryWindow:  historyWindow,
 	})
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		e.log.Warn("LLM analysis failed; opening analysis incident: %v", err)
-		return e.processAnalysisUnavailable(check, checkID, runID, modelName, err)
+		return e.processAnalysisUnavailable(check, checkID, runID, e.analysisModelName, err)
 	}
-	if err := e.recordRunAnalysis(runID, modelName, result, nil); err != nil {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := e.recordRunAnalysis(runID, e.analysisModelName, result, nil); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := e.resolveAnalysisUnavailable(check, checkID, runID); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 
@@ -385,11 +499,18 @@ func analysisIssueCheckID(checkID string) string {
 	return checkID + analysisIssueSuffix
 }
 
-func (e *Engine) buildModel() (llm.Model, error) {
-	provider := e.cfg.LLM.Provider
+func (e *Engine) model() (llm.Model, error) {
+	if e.analysisModelErr != nil {
+		return llm.Model{}, e.analysisModelErr
+	}
+	return e.analysisModel, nil
+}
+
+func buildModel(cfg *config.Config) (llm.Model, error) {
+	provider := cfg.LLM.Provider
 	token := ""
-	if e.cfg.LLM.APIKeyEnv != "" {
-		token = os.Getenv(e.cfg.LLM.APIKeyEnv)
+	if cfg.LLM.APIKeyEnv != "" {
+		token = os.Getenv(cfg.LLM.APIKeyEnv)
 	}
 	if token == "" {
 		token = os.Getenv("HUGIN_LLM_TOKEN")
@@ -405,22 +526,22 @@ func (e *Engine) buildModel() (llm.Model, error) {
 	}
 
 	reg := llm.NewRegistry().WithProvider(provider, token)
-	m, err := reg.Model(provider + "/" + e.cfg.LLM.Model)
+	m, err := reg.Model(provider + "/" + cfg.LLM.Model)
 	if err != nil {
 		return llm.Model{}, err
 	}
 
-	if e.cfg.LLM.Temperature > 0 {
-		m = m.WithTemperature(e.cfg.LLM.Temperature)
+	if cfg.LLM.Temperature > 0 {
+		m = m.WithTemperature(cfg.LLM.Temperature)
 	}
 	return m, nil
 }
 
-func (e *Engine) analysisModelName() string {
-	if e.cfg.LLM.Provider == "" && e.cfg.LLM.Model == "" {
+func analysisModelName(cfg *config.Config) string {
+	if cfg.LLM.Provider == "" && cfg.LLM.Model == "" {
 		return ""
 	}
-	return e.cfg.LLM.Provider + "/" + e.cfg.LLM.Model
+	return cfg.LLM.Provider + "/" + cfg.LLM.Model
 }
 
 func parseHistoryWindow(check *config.Check) time.Duration {

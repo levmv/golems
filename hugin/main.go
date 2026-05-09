@@ -6,8 +6,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/levmv/golems/hugin/internal/config"
@@ -93,6 +95,9 @@ func main() {
 	case "run-due":
 		handleRunDue(eng, log)
 
+	case "daemon":
+		handleDaemon(eng, log)
+
 	case "validate":
 		handleValidate(cfg, log)
 
@@ -144,6 +149,16 @@ func handleRuns(db *storage.DB, checkID string, log logger.Logger) {
 
 func handleRunDue(eng *engine.Engine, log logger.Logger) {
 	if err := eng.RunDue(context.Background()); err != nil {
+		log.Error("%v", err)
+		os.Exit(1)
+	}
+}
+
+func handleDaemon(eng *engine.Engine, log logger.Logger) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := eng.RunDaemon(ctx); err != nil {
 		log.Error("%v", err)
 		os.Exit(1)
 	}
@@ -203,6 +218,7 @@ func printUsage() {
 	fmt.Println("\nUsage:")
 	fmt.Println("  hugin run <check_id>            Execute a check and analyze results")
 	fmt.Println("  hugin run-due                   Run all checks that are due")
+	fmt.Println("  hugin daemon                    Run scheduled checks continuously")
 	fmt.Println("  hugin note <check_id> <msg>     Add an operator note for a check")
 	fmt.Println("  hugin runs <check_id>           Show recent runs for a check")
 	fmt.Println("  hugin resolve <incident_id>     Manually resolve an incident")

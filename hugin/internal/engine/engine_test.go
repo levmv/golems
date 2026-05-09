@@ -2,13 +2,18 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/levmv/golems/hugin/internal/config"
+	"github.com/levmv/golems/hugin/internal/models"
 	"github.com/levmv/golems/hugin/internal/storage"
 	"github.com/levmv/golems/pkg/logger"
 	"github.com/levmv/golems/pkg/tasks"
@@ -32,16 +37,17 @@ func TestSyncCheckTasksReconcilesConfigWithTaskQueue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskStore returned error: %v", err)
 	}
-	q := mustTaskQueue(t, store)
+	countingStore := &countingTaskStore{
+		Store:        store,
+		deleteCounts: make(map[string]int),
+	}
+	q := mustTaskQueue(t, countingStore)
 
 	if err := eng.syncCheckTasks(ctx, q); err != nil {
 		t.Fatalf("syncCheckTasks returned error: %v", err)
 	}
-	ref := onlyCheckTaskRef(t, db)
-	if ref.CheckID != "disk" || ref.TaskID != checkTaskID("disk") {
-		t.Fatalf("unexpected ref after first sync: %+v", ref)
-	}
-	task, err := store.Get(ctx, ref.TaskID)
+	taskID := checkTaskID("disk")
+	task, err := store.Get(ctx, taskID)
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
 	}
@@ -53,7 +59,7 @@ func TestSyncCheckTasksReconcilesConfigWithTaskQueue(t *testing.T) {
 	if err := eng.syncCheckTasks(ctx, q); err != nil {
 		t.Fatalf("second syncCheckTasks returned error: %v", err)
 	}
-	task, err = store.Get(ctx, ref.TaskID)
+	task, err = store.Get(ctx, taskID)
 	if err != nil {
 		t.Fatalf("second Get returned error: %v", err)
 	}
@@ -61,13 +67,13 @@ func TestSyncCheckTasksReconcilesConfigWithTaskQueue(t *testing.T) {
 		t.Fatalf("unchanged sync should preserve existing task, created_at changed from %s to %s", createdAt, task.CreatedAt)
 	}
 
-	if ok, err := q.Delete(ctx, ref.TaskID); err != nil || !ok {
+	if ok, err := q.Delete(ctx, taskID); err != nil || !ok {
 		t.Fatalf("Delete existing task returned ok=%v err=%v", ok, err)
 	}
 	if err := eng.syncCheckTasks(ctx, q); err != nil {
 		t.Fatalf("repair syncCheckTasks returned error: %v", err)
 	}
-	task, err = store.Get(ctx, ref.TaskID)
+	task, err = store.Get(ctx, taskID)
 	if err != nil {
 		t.Fatalf("repair Get returned error: %v", err)
 	}
@@ -75,15 +81,15 @@ func TestSyncCheckTasksReconcilesConfigWithTaskQueue(t *testing.T) {
 		t.Fatalf("expected missing task to be repaired, got %+v", task)
 	}
 
+	countingStore.resetDeleteCounts()
 	cfg.Checks[0].Schedule = "*/10 * * * *"
 	if err := eng.syncCheckTasks(ctx, q); err != nil {
 		t.Fatalf("changed syncCheckTasks returned error: %v", err)
 	}
-	changedRef := onlyCheckTaskRef(t, db)
-	if changedRef.Fingerprint == ref.Fingerprint {
-		t.Fatalf("expected fingerprint to change, got %q", changedRef.Fingerprint)
+	if got := countingStore.deleteCount(taskID); got != 1 {
+		t.Fatalf("changed sync should delete deterministic task ID once, got %d deletes", got)
 	}
-	task, err = store.Get(ctx, changedRef.TaskID)
+	task, err = store.Get(ctx, taskID)
 	if err != nil {
 		t.Fatalf("changed Get returned error: %v", err)
 	}
@@ -91,20 +97,219 @@ func TestSyncCheckTasksReconcilesConfigWithTaskQueue(t *testing.T) {
 		t.Fatalf("expected updated schedule, got %+v", task.Schedule)
 	}
 
-	cfg.Checks = nil
+	countingStore.resetDeleteCounts()
+	cfg.Checks[0].Timeout = 2 * time.Second
 	if err := eng.syncCheckTasks(ctx, q); err != nil {
-		t.Fatalf("removed syncCheckTasks returned error: %v", err)
+		t.Fatalf("timeout syncCheckTasks returned error: %v", err)
 	}
-	refs, err := db.CheckTaskRefs(ctx)
+	if got := countingStore.deleteCount(taskID); got != 1 {
+		t.Fatalf("timeout change should delete deterministic task ID once, got %d deletes", got)
+	}
+	task, err = store.Get(ctx, taskID)
 	if err != nil {
-		t.Fatalf("CheckTaskRefs returned error: %v", err)
+		t.Fatalf("timeout Get returned error: %v", err)
 	}
-	if len(refs) != 0 {
-		t.Fatalf("expected refs to be removed, got %+v", refs)
+	if task.Timeout != 2*time.Second {
+		t.Fatalf("expected updated timeout, got %s", task.Timeout)
 	}
-	_, err = store.Get(ctx, changedRef.TaskID)
+
+	countingStore.resetDeleteCounts()
+	cfg.Targets["db"] = config.Target{Host: "db.example.test"}
+	cfg.Checks[0].Target = "db"
+	if err := eng.syncCheckTasks(ctx, q); err != nil {
+		t.Fatalf("target syncCheckTasks returned error: %v", err)
+	}
+	if got := countingStore.deleteCount(taskID); got != 1 {
+		t.Fatalf("target change should delete deterministic task ID once, got %d deletes", got)
+	}
+	task, err = store.Get(ctx, taskID)
+	if err != nil {
+		t.Fatalf("target Get returned error: %v", err)
+	}
+	if task.Group != "db" {
+		t.Fatalf("expected updated target group, got %q", task.Group)
+	}
+}
+
+func TestRunDueDiscardsRemovedCheckTask(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.New(filepath.Join(t.TempDir(), "hugin.db"))
+	if err != nil {
+		t.Fatalf("storage.New returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+
+	cfg := testConfig()
+	eng := New(cfg, db, logger.New(logger.Config{Out: io.Discard, Err: io.Discard}))
+	store, err := db.TaskStore()
+	if err != nil {
+		t.Fatalf("TaskStore returned error: %v", err)
+	}
+	q := mustTaskQueue(t, store)
+
+	if err := eng.syncCheckTasks(ctx, q); err != nil {
+		t.Fatalf("syncCheckTasks returned error: %v", err)
+	}
+	taskID := checkTaskID("disk")
+	if _, err := store.Get(ctx, taskID); err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	cfg.Checks = nil
+
+	if err := eng.RunDue(ctx); err != nil {
+		t.Fatalf("RunDue returned error: %v", err)
+	}
+	_, err = store.Get(ctx, taskID)
 	if !errors.Is(err, tasks.ErrNotFound) {
-		t.Fatalf("expected task to be removed, got %v", err)
+		t.Fatalf("expected removed check task to be discarded, got %v", err)
+	}
+}
+
+func TestNewCachesAnalysisModelConfiguration(t *testing.T) {
+	const tokenEnv = "HUGIN_TEST_LLM_TOKEN"
+	t.Setenv(tokenEnv, "test-token")
+
+	cfg := testConfig()
+	cfg.LLM = config.LLMConfig{
+		Provider:  "openai",
+		Model:     "gpt-test",
+		APIKeyEnv: tokenEnv,
+	}
+	eng := New(cfg, nil, logger.New(logger.Config{Out: io.Discard, Err: io.Discard}))
+
+	if err := os.Unsetenv(tokenEnv); err != nil {
+		t.Fatalf("Unsetenv returned error: %v", err)
+	}
+	if _, err := eng.model(); err != nil {
+		t.Fatalf("expected cached model after env was unset, got %v", err)
+	}
+}
+
+func TestRunDueCancellationLeavesClaimedTaskUnfinished(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.New(filepath.Join(t.TempDir(), "hugin.db"))
+	if err != nil {
+		t.Fatalf("storage.New returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+
+	started := filepath.Join(t.TempDir(), "started")
+	cfg := testConfig()
+	cfg.Targets["web"] = config.Target{Type: "local", Host: "localhost"}
+	cfg.Checks[0].Command = "touch " + strconv.Quote(started) + "; exec sleep 5"
+	cfg.Checks[0].Timeout = 30 * time.Second
+	eng := New(cfg, db, logger.New(logger.Config{Out: io.Discard, Err: io.Discard}))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.RunDue(runCtx)
+	}()
+
+	waitForFile(t, started)
+	cancel()
+	if err := waitEngineErr(t, errCh); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+
+	store, err := db.TaskStore()
+	if err != nil {
+		t.Fatalf("TaskStore returned error: %v", err)
+	}
+	task, err := store.Get(ctx, checkTaskID("disk"))
+	if err != nil {
+		t.Fatalf("Get returned error: %v", err)
+	}
+	if task.LockedAt == nil || task.LockToken == "" {
+		t.Fatalf("expected canceled task to remain claimed until lease expiry, got %+v", task)
+	}
+	if task.Attempts != 0 || task.LastError != "" || task.NextRunAt == nil {
+		t.Fatalf("expected cancellation to avoid failure/success state, got %+v", task)
+	}
+	runs, err := db.RecentRuns("disk", 20)
+	if err != nil {
+		t.Fatalf("RecentRuns returned error: %v", err)
+	}
+	if len(runs) != 0 {
+		t.Fatalf("expected canceled execution not to persist a run, got %+v", runs)
+	}
+}
+
+func TestRunAnalysisCancellationDoesNotOpenAnalysisUnavailableIncident(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.New(filepath.Join(t.TempDir(), "hugin.db"))
+	if err != nil {
+		t.Fatalf("storage.New returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+
+	cfg := testConfig()
+	eng := New(cfg, db, logger.New(logger.Config{Out: io.Discard, Err: io.Discard}))
+	output := &models.CollectorOutput{
+		Check:   "disk",
+		Status:  models.StatusOK,
+		Metrics: map[string]any{"ok": true},
+	}
+	runID, err := db.InsertRun("disk", output, 10)
+	if err != nil {
+		t.Fatalf("InsertRun returned error: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cancel()
+	if err := eng.runAnalysis(runCtx, &cfg.Checks[0], "disk", runID, output); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if got, err := db.RunAnalysis(runID); err != nil || got != nil {
+		t.Fatalf("expected no analysis record on cancellation, got analysis=%+v err=%v", got, err)
+	}
+	if _, err := db.Incident(analysisIssueCheckID("disk")); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("expected no analysis-unavailable incident, got %v", err)
+	}
+}
+
+func TestRunDaemonReturnsNilOnCancellation(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.New(filepath.Join(t.TempDir(), "hugin.db"))
+	if err != nil {
+		t.Fatalf("storage.New returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+
+	cfg := testConfig()
+	cfg.Targets["web"] = config.Target{Type: "local", Host: "localhost"}
+	cfg.Checks[0].Command = `printf '%s\n' '{"check":"disk","status":"ok","metrics":{"ok":true}}'`
+	eng := New(cfg, db, logger.New(logger.Config{Out: io.Discard, Err: io.Discard}))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- eng.RunDaemon(runCtx)
+	}()
+
+	waitForRuns(t, db, "disk", 1)
+	cancel()
+	if err := waitEngineErr(t, errCh); err != nil {
+		t.Fatalf("expected graceful daemon cancellation to return nil, got %v", err)
 	}
 }
 
@@ -129,6 +334,57 @@ func testConfig() *config.Config {
 	}
 }
 
+func waitForRuns(t *testing.T, db *storage.DB, checkID string, want int) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+
+	for {
+		runs, err := db.RecentRuns(checkID, want)
+		if err != nil {
+			t.Fatalf("RecentRuns returned error: %v", err)
+		}
+		if len(runs) >= want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d run(s) for %s", want, checkID)
+		case <-tick.C:
+		}
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	deadline := time.After(time.Second)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %s", path)
+		case <-tick.C:
+		}
+	}
+}
+
+func waitEngineErr(t *testing.T, errCh <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for engine")
+		return nil
+	}
+}
+
 func mustTaskQueue(t *testing.T, store tasks.Store) *tasks.Queue {
 	t.Helper()
 	q, err := tasks.New(store, tasks.HandlerFunc(func(ctx context.Context, task tasks.Task) error {
@@ -140,14 +396,27 @@ func mustTaskQueue(t *testing.T, store tasks.Store) *tasks.Queue {
 	return q
 }
 
-func onlyCheckTaskRef(t *testing.T, db *storage.DB) storage.CheckTaskRef {
-	t.Helper()
-	refs, err := db.CheckTaskRefs(context.Background())
-	if err != nil {
-		t.Fatalf("CheckTaskRefs returned error: %v", err)
-	}
-	if len(refs) != 1 {
-		t.Fatalf("expected one ref, got %+v", refs)
-	}
-	return refs[0]
+type countingTaskStore struct {
+	tasks.Store
+	mu           sync.Mutex
+	deleteCounts map[string]int
+}
+
+func (s *countingTaskStore) Delete(ctx context.Context, id string) (bool, error) {
+	s.mu.Lock()
+	s.deleteCounts[id]++
+	s.mu.Unlock()
+	return s.Store.Delete(ctx, id)
+}
+
+func (s *countingTaskStore) resetDeleteCounts() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.deleteCounts)
+}
+
+func (s *countingTaskStore) deleteCount(id string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deleteCounts[id]
 }

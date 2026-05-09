@@ -185,6 +185,37 @@ func TestRunOnceFailureRetriesThenDead(t *testing.T) {
 	}
 }
 
+func TestRunOnceDiscardDeletesClaimedTaskWithoutFailure(t *testing.T) {
+	now := testNow()
+	var failures []Failure
+	q := mustQueue(t, NewMemoryStore(), HandlerFunc(func(ctx context.Context, task Task) error {
+		return Discardf("task %s is obsolete", task.ID)
+	}), Options{
+		Now: func() time.Time { return now },
+		OnFailure: func(failure Failure) {
+			failures = append(failures, failure)
+		},
+	})
+
+	if _, err := q.Enqueue(context.Background(), Enqueue{
+		ID:       "task-1",
+		Kind:     "test.discard",
+		Schedule: EveryFrom(now, time.Hour),
+	}); err != nil {
+		t.Fatalf("Enqueue returned error: %v", err)
+	}
+	if err := q.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce returned error: %v", err)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("expected no failure callbacks for discarded task, got %+v", failures)
+	}
+	_, err := q.Get(context.Background(), "task-1")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected discarded task to be deleted, got %v", err)
+	}
+}
+
 func TestExpiredLeaseReclaimDoesNotExhaustWithoutHandlerFailure(t *testing.T) {
 	now := testNow()
 	store := NewMemoryStore()

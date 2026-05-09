@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/levmv/golems/hugin/internal/models"
@@ -16,19 +18,15 @@ import (
 
 var taskStoreOptions = tasksqlite.Options{Table: "tasks"}
 
+const sqliteBusyTimeout = 5 * time.Second
+
 type DB struct {
 	sql *sql.DB
 }
 
-type CheckTaskRef struct {
-	CheckID     string
-	TaskID      string
-	Fingerprint string
-}
-
 // New initializes the SQLite database and ensures the schema exists.
 func New(dbPath string) (*DB, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
@@ -47,6 +45,17 @@ func New(dbPath string) (*DB, error) {
 	}
 
 	return &DB{sql: db}, nil
+}
+
+func sqliteDSN(dbPath string) string {
+	query := url.Values{}
+	query.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", sqliteBusyTimeout.Milliseconds()))
+
+	separator := "?"
+	if strings.Contains(dbPath, "?") {
+		separator = "&"
+	}
+	return dbPath + separator + query.Encode()
 }
 
 func initSchema(db *sql.DB) error {
@@ -98,12 +107,6 @@ func initSchema(db *sql.DB) error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_notes_check_id ON notes(check_id);
-
-	CREATE TABLE IF NOT EXISTS hugin_check_tasks (
-		check_id TEXT PRIMARY KEY,
-		task_id TEXT NOT NULL,
-		fingerprint TEXT NOT NULL
-	);
 
 	`
 	if _, err := db.Exec(schema); err != nil {
@@ -165,46 +168,6 @@ func ensureColumn(db *sql.DB, table string, name string, definition string) erro
 
 func (d *DB) TaskStore() (tasks.Store, error) {
 	return tasksqlite.New(d.sql, taskStoreOptions)
-}
-
-func (d *DB) CheckTaskRefs(ctx context.Context) ([]CheckTaskRef, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT check_id, task_id, fingerprint FROM hugin_check_tasks`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var refs []CheckTaskRef
-	for rows.Next() {
-		var ref CheckTaskRef
-		if err := rows.Scan(&ref.CheckID, &ref.TaskID, &ref.Fingerprint); err != nil {
-			return nil, err
-		}
-		refs = append(refs, ref)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return refs, nil
-}
-
-func (d *DB) UpsertCheckTaskRef(ctx context.Context, ref CheckTaskRef) error {
-	_, err := d.sql.ExecContext(ctx, `
-		INSERT INTO hugin_check_tasks (check_id, task_id, fingerprint)
-		VALUES (?, ?, ?)
-		ON CONFLICT(check_id) DO UPDATE SET
-			task_id = excluded.task_id,
-			fingerprint = excluded.fingerprint`,
-		ref.CheckID,
-		ref.TaskID,
-		ref.Fingerprint,
-	)
-	return err
-}
-
-func (d *DB) DeleteCheckTaskRef(ctx context.Context, checkID string) error {
-	_, err := d.sql.ExecContext(ctx, `DELETE FROM hugin_check_tasks WHERE check_id = ?`, checkID)
-	return err
 }
 
 // RunRecord is a row from the runs table.
@@ -340,6 +303,23 @@ func (d *DB) RunsSince(checkID string, since time.Time, limit int) ([]RunRecord,
 	return scanRuns(rows)
 }
 
+// RunsSinceExcluding returns runs for a check after the given time, excluding one run ID.
+func (d *DB) RunsSinceExcluding(checkID string, since time.Time, excludeRunID int64, limit int) ([]RunRecord, error) {
+	rows, err := d.sql.Query(
+		`SELECT id, check_id, status, metrics, errors, duration_ms, window, created_at
+		 FROM runs
+		 WHERE check_id = ? AND created_at >= ? AND id <> ?
+		 ORDER BY created_at DESC
+		 LIMIT ?`,
+		checkID, since.UTC(), excludeRunID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanRuns(rows)
+}
+
 // RecentRuns returns the most recent runs for a check.
 func (d *DB) RecentRuns(checkID string, limit int) ([]RunRecord, error) {
 	rows, err := d.sql.Query(
@@ -407,13 +387,32 @@ func (d *DB) CreateIncident(id, checkID, severity, summary, evidence string, fir
 	return err
 }
 
-// UpdateIncidentRun updates the last_run_id of an incident (used when new runs belong to same incident).
-func (d *DB) UpdateIncidentRun(incidentID string, lastRunID int64) error {
-	_, err := d.sql.Exec(
-		`UPDATE incidents SET last_run_id = ? WHERE id = ?`,
-		lastRunID, incidentID,
+// UpdateIncident refreshes the visible state of an active incident.
+func (d *DB) UpdateIncident(incidentID string, severity, summary, evidence string, lastRunID int64) error {
+	res, err := d.sql.Exec(
+		`UPDATE incidents
+		    SET severity = ?,
+		        summary = ?,
+		        evidence = ?,
+		        last_run_id = ?
+		  WHERE id = ?`,
+		severity,
+		summary,
+		evidence,
+		lastRunID,
+		incidentID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (d *DB) MarkIncidentNotified(incidentID string, notifiedAt time.Time) error {
@@ -487,11 +486,14 @@ func (d *DB) AddNote(checkID, content string) error {
 // DeleteOldRuns removes runs older than the cutoff, except those tied to active incidents.
 func (d *DB) DeleteOldRuns(before time.Time) (int64, error) {
 	res, err := d.sql.Exec(
-		`DELETE FROM runs WHERE created_at < ? AND id NOT IN (
-			SELECT first_run_id FROM incidents WHERE status = 'active'
-			UNION
-			SELECT last_run_id FROM incidents WHERE status = 'active'
-		)`,
+		`DELETE FROM runs
+		  WHERE created_at < ?
+		    AND NOT EXISTS (
+			    SELECT 1
+			      FROM incidents
+			     WHERE status = 'active'
+			       AND (first_run_id = runs.id OR last_run_id = runs.id)
+		    )`,
 		before.UTC(),
 	)
 	if err != nil {

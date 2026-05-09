@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -u
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+check=$(collector_check_id "systemd_service")
+unit=${HUGIN_SYSTEMD_UNIT:-${1:-}}
+
+if [ -z "$unit" ]; then
+	emit_error "$check" "UNIT_REQUIRED" "set HUGIN_SYSTEMD_UNIT or pass a unit name as the first argument"
+	exit 0
+fi
+if ! command -v systemctl >/dev/null 2>&1; then
+	emit_error "$check" "SYSTEMCTL_MISSING" "systemctl command is required"
+	exit 0
+fi
+
+show_output=$(systemctl show "$unit" \
+	--property=LoadState \
+	--property=ActiveState \
+	--property=SubState \
+	--property=UnitFileState \
+	--property=NRestarts 2>&1)
+if [ $? -ne 0 ]; then
+	emit_error "$check" "SYSTEMD_SHOW_FAILED" "$show_output"
+	exit 0
+fi
+
+property_value() {
+	local property=$1
+	printf '%s\n' "$show_output" | awk -F= -v key="$property" '$1 == key { sub(/^[^=]*=/, ""); print; exit }'
+}
+
+load_state=$(property_value LoadState)
+active_state=$(property_value ActiveState)
+sub_state=$(property_value SubState)
+unit_file_state=$(property_value UnitFileState)
+restart_count=$(property_value NRestarts)
+
+if [ -z "$load_state" ] && [ -z "$active_state" ]; then
+	emit_error "$check" "SYSTEMD_SHOW_FAILED" "systemctl show did not return state for $unit"
+	exit 0
+fi
+if [[ ! "$restart_count" =~ ^[0-9]+$ ]]; then
+	restart_count=0
+fi
+
+printf '{"check":%s,"status":"ok","metrics":{"unit":%s,"load_state":%s,"active_state":%s,"sub_state":%s,"unit_file_state":%s,"restart_count":%s}}\n' \
+	"$(json_string "$check")" \
+	"$(json_string "$unit")" \
+	"$(json_string "$load_state")" \
+	"$(json_string "$active_state")" \
+	"$(json_string "$sub_state")" \
+	"$(json_string "$unit_file_state")" \
+	"$restart_count"

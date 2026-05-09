@@ -1,0 +1,23 @@
+[Unit]
+Description=Hugin monitoring daemon
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hugin
+Group=hugin
+EnvironmentFile=-/etc/hugin/hugin.env
+ExecStart=/usr/local/bin/hugin -config /etc/hugin/hugin.yaml daemon
+Restart=on-failure
+RestartSec=10s
+StateDirectory=hugin
+WorkingDirectory=/var/lib/hugin
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/var/lib/hugin
+
+[Install]
+WantedBy=multi-user.target

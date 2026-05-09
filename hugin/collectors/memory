@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -u
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+check=$(collector_check_id "memory")
+
+if [ ! -r /proc/meminfo ]; then
+	emit_error "$check" "MEMINFO_UNAVAILABLE" "/proc/meminfo is not readable"
+	exit 0
+fi
+
+read -r total_kb available_kb used_kb used_pct swap_total_kb swap_used_kb swap_used_pct <<EOF
+$(awk '
+	/^MemTotal:/ { total = $2 }
+	/^MemAvailable:/ { available = $2 }
+	/^SwapTotal:/ { swap_total = $2 }
+	/^SwapFree:/ { swap_free = $2 }
+	END {
+		if (total <= 0 || available < 0) {
+			exit 1
+		}
+		used = total - available
+		used_pct = used * 100 / total
+		swap_used = swap_total - swap_free
+		swap_used_pct = 0
+		if (swap_total > 0) {
+			swap_used_pct = swap_used * 100 / swap_total
+		}
+		printf "%d %d %d %.2f %d %d %.2f\n", total, available, used, used_pct, swap_total, swap_used, swap_used_pct
+	}
+' /proc/meminfo)
+EOF
+
+if [ -z "${total_kb:-}" ]; then
+	emit_error "$check" "MEMINFO_PARSE_FAILED" "could not parse required memory fields"
+	exit 0
+fi
+
+printf '{"check":%s,"status":"ok","metrics":{"total_kb":%s,"available_kb":%s,"used_kb":%s,"used_pct":%s,"swap_total_kb":%s,"swap_used_kb":%s,"swap_used_pct":%s}}\n' \
+	"$(json_string "$check")" \
+	"$total_kb" \
+	"$available_kb" \
+	"$used_kb" \
+	"$used_pct" \
+	"$swap_total_kb" \
+	"$swap_used_kb" \
+	"$swap_used_pct"

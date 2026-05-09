@@ -38,7 +38,8 @@ If the LLM is unavailable, Hugin treats that as an operational problem of its ow
 
 - **Flexible Execution**
   - Hugin keeps schedule state in SQLite. You can run `hugin run-due` via a standard system cron job or systemd timer.
-  - A daemon mode can be added later on the same execution path.
+  - `hugin daemon` uses the same durable scheduler path when you want Hugin to stay resident.
+  - Removed checks are discarded when their old scheduled task is next claimed.
 - **Fast & Efficient**
   - Checks are executed concurrently.
   - SSH connections are pooled and multiplexed. Multiple checks on the same server share a single connection, making execution extremely fast and reducing audit log noise.
@@ -93,6 +94,17 @@ An ongoing abnormal condition. Hugin groups repeated abnormal runs into one inci
 
 Collectors return structured JSON to stdout.
 
+Bundled baseline collectors live in `hugin/collectors` and are intended to be
+installed on monitored Linux hosts at:
+
+```text
+/opt/hugin/collectors
+```
+
+They are small Bash scripts for disk, memory, load, systemd service state, and
+TCP reachability. Each script uses `HUGIN_CHECK_ID` so its JSON `check` field can
+match the configured Hugin check ID.
+
 Minimal example:
 ```json
 {
@@ -129,6 +141,19 @@ errors        optional list of structured error objects (code, message)
 window        optional collection window, such as 15m or 1h
 ```
 
+Example using a bundled collector:
+
+```yaml
+checks:
+  - id: root_disk_web1
+    target: web1
+    command: HUGIN_CHECK_ID=root_disk_web1 HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
+    schedule: "*/15 * * * *"
+    timeout: 10s
+```
+
+See `hugin/collectors/README.md` for the bundled script parameters and examples.
+
 ---
 
 ## AI-First Analysis
@@ -153,6 +178,9 @@ hugin run disk_web1
 # Run all scheduled checks that are currently due (ideal for cron / systemd timers)
 hugin run-due
 
+# Run scheduled checks continuously
+hugin daemon
+
 # Add an operator note (stored in SQLite)
 hugin note disk_web1 "80-86% disk usage is normal if stable."
 
@@ -168,6 +196,9 @@ hugin validate
 # Clean up old runs (14-day retention)
 hugin cleanup
 ```
+
+A sample systemd service unit is available at
+`hugin/contrib/systemd/hugin.service`.
 
 ---
 

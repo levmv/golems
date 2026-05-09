@@ -292,9 +292,26 @@ func (q *Queue) runOne(ctx context.Context, task Task) error {
 		if ctx.Err() != nil && errors.Is(runErr, ctx.Err()) {
 			return ctx.Err()
 		}
+		if errors.Is(runErr, ErrDiscard) {
+			return q.discardClaimed(ctx, task)
+		}
 		return q.finishFailed(ctx, task, runErr)
 	}
 	return q.finishSucceeded(ctx, task)
+}
+
+func (q *Queue) discardClaimed(ctx context.Context, task Task) error {
+	finishCtx, cancel := q.finishContext(ctx)
+	defer cancel()
+
+	ok, err := q.store.DeleteClaimed(finishCtx, task.ID, task.LockToken)
+	if err != nil {
+		return fmt.Errorf("delete discarded task %q: %w", task.ID, err)
+	}
+	if ok {
+		q.signalWake()
+	}
+	return nil
 }
 
 func (q *Queue) finishSucceeded(ctx context.Context, task Task) error {

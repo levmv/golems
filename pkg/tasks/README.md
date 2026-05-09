@@ -45,6 +45,10 @@ through `Options.OnError`, sleeps for `PollInterval`, and keeps going until its
 context is cancelled. Handler failures are recorded on the task row, retried
 according to policy, and can be observed with `Options.OnFailure`.
 
+Handlers can return `tasks.Discard` or `tasks.Discardf` when a claimed task is
+obsolete. The queue deletes the claimed row without treating it as a failure and
+without retrying it.
+
 ## Schedules
 
 Supported persisted schedules:

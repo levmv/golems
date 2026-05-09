@@ -11,6 +11,8 @@ import (
 var (
 	ErrNotFound = errors.New("tasks: not found")
 	ErrInvalid  = errors.New("tasks: invalid")
+	// ErrDiscard marks claimed work that should be deleted without retrying.
+	ErrDiscard = errors.New("tasks: discard")
 )
 
 // Task is one durable, scheduler-owned task definition and queue cursor.
@@ -75,6 +77,32 @@ type Failure struct {
 	Task      Task
 	Err       error
 	Exhausted bool
+}
+
+// Discard returns an error that tells Queue to delete the claimed task without
+// recording a handler failure.
+func Discard(reason string) error {
+	return discardError{reason: reason}
+}
+
+// Discardf formats a discard reason and wraps ErrDiscard.
+func Discardf(format string, args ...any) error {
+	return Discard(fmt.Sprintf(format, args...))
+}
+
+type discardError struct {
+	reason string
+}
+
+func (e discardError) Error() string {
+	if e.reason == "" {
+		return ErrDiscard.Error()
+	}
+	return ErrDiscard.Error() + ": " + e.reason
+}
+
+func (e discardError) Unwrap() error {
+	return ErrDiscard
 }
 
 func JSONPayload(v any) ([]byte, error) {

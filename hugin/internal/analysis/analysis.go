@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/levmv/golems/hugin/internal/models"
 	"github.com/levmv/golems/hugin/internal/storage"
@@ -219,7 +220,10 @@ func computeHistorySummary(runs []storage.RunRecord) map[string]metricSummary {
 	metrics := make(map[string][]float64)
 	for _, r := range runs {
 		for k, v := range r.Metrics {
-			f := toFloat(v)
+			f, ok := toFloat(v)
+			if !ok {
+				continue
+			}
 			metrics[k] = append(metrics[k], f)
 		}
 	}
@@ -250,25 +254,27 @@ func computeHistorySummary(runs []storage.RunRecord) map[string]metricSummary {
 	return result
 }
 
-func toFloat(v any) float64 {
+func toFloat(v any) (float64, bool) {
 	switch val := v.(type) {
 	case float64:
-		return val
-	case int:
-		return float64(val)
-	case int64:
-		return float64(val)
+		return val, true
 	case json.Number:
-		f, _ := val.Float64()
-		return f
+		f, err := val.Float64()
+		return f, err == nil
 	default:
-		return 0
+		return 0, false
 	}
 }
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	if n <= 0 {
+		return "..."
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "..."
 }

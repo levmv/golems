@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -58,43 +59,37 @@ func TestTaskStoreIsInitializedInHuginDB(t *testing.T) {
 	}
 }
 
-func TestCheckTaskRefs(t *testing.T) {
+func TestSQLiteBusyTimeoutAppliesToEveryConnection(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 
-	ref := CheckTaskRef{CheckID: "disk", TaskID: "hugin.check:disk", Fingerprint: "first"}
-	if err := db.UpsertCheckTaskRef(ctx, ref); err != nil {
-		t.Fatalf("UpsertCheckTaskRef returned error: %v", err)
-	}
-	refs, err := db.CheckTaskRefs(ctx)
+	first, err := db.sql.Conn(ctx)
 	if err != nil {
-		t.Fatalf("CheckTaskRefs returned error: %v", err)
+		t.Fatalf("first Conn returned error: %v", err)
 	}
-	if len(refs) != 1 || refs[0] != ref {
-		t.Fatalf("unexpected refs: %+v", refs)
-	}
+	defer first.Close()
 
-	ref.Fingerprint = "second"
-	if err := db.UpsertCheckTaskRef(ctx, ref); err != nil {
-		t.Fatalf("second UpsertCheckTaskRef returned error: %v", err)
-	}
-	refs, err = db.CheckTaskRefs(ctx)
+	second, err := db.sql.Conn(ctx)
 	if err != nil {
-		t.Fatalf("second CheckTaskRefs returned error: %v", err)
+		t.Fatalf("second Conn returned error: %v", err)
 	}
-	if len(refs) != 1 || refs[0] != ref {
-		t.Fatalf("unexpected refs after upsert: %+v", refs)
-	}
+	defer second.Close()
 
-	if err := db.DeleteCheckTaskRef(ctx, ref.CheckID); err != nil {
-		t.Fatalf("DeleteCheckTaskRef returned error: %v", err)
-	}
-	refs, err = db.CheckTaskRefs(ctx)
-	if err != nil {
-		t.Fatalf("final CheckTaskRefs returned error: %v", err)
-	}
-	if len(refs) != 0 {
-		t.Fatalf("expected refs to be deleted, got %+v", refs)
+	want := int(sqliteBusyTimeout.Milliseconds())
+	for _, tc := range []struct {
+		name string
+		conn *sql.Conn
+	}{
+		{name: "first", conn: first},
+		{name: "second", conn: second},
+	} {
+		var got int
+		if err := tc.conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&got); err != nil {
+			t.Fatalf("%s busy_timeout query returned error: %v", tc.name, err)
+		}
+		if got != want {
+			t.Fatalf("%s connection busy_timeout = %d, want %d", tc.name, got, want)
+		}
 	}
 }
 
@@ -140,6 +135,36 @@ func TestRunAnalysisPersistence(t *testing.T) {
 	}
 }
 
+func TestRunsSinceExcludingOmitsCurrentRun(t *testing.T) {
+	db := newTestDB(t)
+	since := time.Now().Add(-time.Hour)
+
+	previousID, err := db.InsertRun("disk", &models.CollectorOutput{
+		Check:   "disk",
+		Status:  models.StatusOK,
+		Metrics: map[string]any{"used_pct": 70.0},
+	}, 100)
+	if err != nil {
+		t.Fatalf("InsertRun previous returned error: %v", err)
+	}
+	currentID, err := db.InsertRun("disk", &models.CollectorOutput{
+		Check:   "disk",
+		Status:  models.StatusOK,
+		Metrics: map[string]any{"used_pct": 80.0},
+	}, 100)
+	if err != nil {
+		t.Fatalf("InsertRun current returned error: %v", err)
+	}
+
+	runs, err := db.RunsSinceExcluding("disk", since, currentID, 10)
+	if err != nil {
+		t.Fatalf("RunsSinceExcluding returned error: %v", err)
+	}
+	if len(runs) != 1 || runs[0].ID != previousID {
+		t.Fatalf("expected only previous run %d, got %+v", previousID, runs)
+	}
+}
+
 func TestIncidentNotificationState(t *testing.T) {
 	db := newTestDB(t)
 	notifiedAt := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
@@ -164,6 +189,63 @@ func TestIncidentNotificationState(t *testing.T) {
 	if inc.LastNotifiedAt == nil || !inc.LastNotifiedAt.Equal(notifiedAt) {
 		t.Fatalf("expected last_notified_at %s, got %+v", notifiedAt, inc.LastNotifiedAt)
 	}
+}
+
+func TestDeleteOldRunsIgnoresNullIncidentRunReferences(t *testing.T) {
+	db := newTestDB(t)
+	oldRunID, err := db.InsertRun("disk", &models.CollectorOutput{
+		Check:  "disk",
+		Status: models.StatusOK,
+	}, 10)
+	if err != nil {
+		t.Fatalf("InsertRun old returned error: %v", err)
+	}
+	protectedRunID, err := db.InsertRun("disk", &models.CollectorOutput{
+		Check:  "disk",
+		Status: models.StatusOK,
+	}, 10)
+	if err != nil {
+		t.Fatalf("InsertRun protected returned error: %v", err)
+	}
+
+	oldTime := time.Now().Add(-48 * time.Hour).UTC()
+	if _, err := db.sql.Exec(`UPDATE runs SET created_at = ? WHERE id IN (?, ?)`, oldTime, oldRunID, protectedRunID); err != nil {
+		t.Fatalf("update run times returned error: %v", err)
+	}
+	if _, err := db.sql.Exec(
+		`INSERT INTO incidents (id, check_id, status, severity, summary, created_at)
+		 VALUES (?, ?, 'active', ?, ?, ?)`,
+		"inc-null", "disk", "urgent", "incident with null run refs", oldTime,
+	); err != nil {
+		t.Fatalf("insert null incident returned error: %v", err)
+	}
+	if err := db.CreateIncident("inc-protected", "disk", "urgent", "protected", "evidence", protectedRunID, protectedRunID); err != nil {
+		t.Fatalf("CreateIncident protected returned error: %v", err)
+	}
+
+	deleted, err := db.DeleteOldRuns(time.Now().Add(-24 * time.Hour))
+	if err != nil {
+		t.Fatalf("DeleteOldRuns returned error: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected one deleted run, got %d", deleted)
+	}
+	if runExists(t, db, oldRunID) {
+		t.Fatalf("expected old unreferenced run %d to be deleted", oldRunID)
+	}
+	if !runExists(t, db, protectedRunID) {
+		t.Fatalf("expected active incident run %d to be preserved", protectedRunID)
+	}
+}
+
+func runExists(t *testing.T, db *DB, id int64) bool {
+	t.Helper()
+
+	var count int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM runs WHERE id = ?`, id).Scan(&count); err != nil {
+		t.Fatalf("count run %d returned error: %v", id, err)
+	}
+	return count > 0
 }
 
 func newTestDB(t *testing.T) *DB {

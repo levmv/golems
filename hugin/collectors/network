@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -u
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=lib.sh
+. "$SCRIPT_DIR/lib.sh"
+
+check=$(collector_check_id "network")
+host=${HUGIN_HOST:-${1:-}}
+port=${HUGIN_PORT:-${2:-443}}
+timeout_sec=${HUGIN_TIMEOUT_SEC:-5}
+
+if [ -z "$host" ]; then
+	emit_error "$check" "HOST_REQUIRED" "set HUGIN_HOST or pass a host as the first argument"
+	exit 0
+fi
+if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+	emit_error "$check" "INVALID_PORT" "port must be a number"
+	exit 0
+fi
+if [[ ! "$timeout_sec" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+	emit_error "$check" "INVALID_TIMEOUT" "timeout must be a number of seconds"
+	exit 0
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+	emit_error "$check" "TIMEOUT_MISSING" "timeout command is required"
+	exit 0
+fi
+
+now_ms() {
+	date +%s%3N 2>/dev/null || printf '0'
+}
+
+start_ms=$(now_ms)
+if timeout "${timeout_sec}s" bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$host" "$port" 2>/dev/null; then
+	end_ms=$(now_ms)
+	connect_time_ms=$((end_ms - start_ms))
+	printf '{"check":%s,"status":"ok","metrics":{"host":%s,"port":%s,"reachable":true,"connect_time_ms":%s,"timeout_sec":%s}}\n' \
+		"$(json_string "$check")" \
+		"$(json_string "$host")" \
+		"$port" \
+		"$connect_time_ms" \
+		"$timeout_sec"
+else
+	printf '{"check":%s,"status":"ok","metrics":{"host":%s,"port":%s,"reachable":false,"connect_time_ms":0,"timeout_sec":%s}}\n' \
+		"$(json_string "$check")" \
+		"$(json_string "$host")" \
+		"$port" \
+		"$timeout_sec"
+fi
