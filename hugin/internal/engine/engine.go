@@ -174,6 +174,24 @@ func (e *Engine) RunDaemon(ctx context.Context) error {
 	return nil
 }
 
+func (e *Engine) SyncSchedule(ctx context.Context) error {
+	scheduled, err := e.newScheduledCheckQueue(scheduledCheckQueueOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := scheduled.Close(); err != nil {
+			e.log.Warn("Failed to close scheduled runner: %v", err)
+		}
+	}()
+
+	return e.syncCheckTasks(ctx, scheduled.queue)
+}
+
+func CheckTaskID(checkID string) string {
+	return checkTaskID(checkID)
+}
+
 type scheduledCheckQueueOptions struct {
 	collectFailures bool
 	onError         func(error)

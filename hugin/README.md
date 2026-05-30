@@ -181,6 +181,9 @@ hugin run-due
 # Run scheduled checks continuously
 hugin daemon
 
+# One-command overview: active incidents, latest runs, and next scheduled runs
+hugin status
+
 # Add an operator note (stored in SQLite)
 hugin note disk_web1 "80-86% disk usage is normal if stable."
 
@@ -199,6 +202,10 @@ hugin cleanup
 
 A sample systemd service unit is available at
 `hugin/contrib/systemd/hugin.service`.
+
+SSH targets validate host keys with `known_hosts` by default. If you need a
+temporary escape hatch, set `insecure_ignore_host_key: true` on that target
+explicitly.
 
 ---
 
@@ -222,6 +229,7 @@ targets:
     host: web1.example.com
     user: hugin
     key: ~/.ssh/hugin_web1
+    known_hosts: ~/.ssh/known_hosts
     context: |
       Small VPS. Nightly backups run around 03:00.
   local:

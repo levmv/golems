@@ -358,6 +358,29 @@ func (d *DB) ActiveIncident(checkID string) (*IncidentRecord, error) {
 	return &inc, nil
 }
 
+func (d *DB) ActiveIncidents() ([]IncidentRecord, error) {
+	rows, err := d.sql.Query(
+		`SELECT id, check_id, status, severity, summary, evidence, first_run_id, last_run_id, last_notified_at, created_at, resolved_at, resolution_note
+		 FROM incidents
+		 WHERE status = 'active'
+		 ORDER BY created_at ASC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var incidents []IncidentRecord
+	for rows.Next() {
+		var inc IncidentRecord
+		if err := scanIncident(rows, &inc); err != nil {
+			return nil, err
+		}
+		incidents = append(incidents, inc)
+	}
+	return incidents, rows.Err()
+}
+
 // Incident returns an incident by ID.
 func (d *DB) Incident(incidentID string) (*IncidentRecord, error) {
 	row := d.sql.QueryRow(
@@ -517,7 +540,7 @@ func scanRuns(rows *sql.Rows) ([]RunRecord, error) {
 	return runs, rows.Err()
 }
 
-func scanIncident(row *sql.Row, inc *IncidentRecord) error {
+func scanIncident(row interface{ Scan(dest ...any) error }, inc *IncidentRecord) error {
 	var evidence sql.NullString
 	var resolutionNote sql.NullString
 	var resolvedAt sql.NullTime

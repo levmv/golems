@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -129,6 +130,29 @@ func TestExecuteLocalRejectsWrongCheckID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("expected check mismatch error, got %v", err)
+	}
+}
+
+func TestHostKeyCallbackRequiresKnownHostsByDefault(t *testing.T) {
+	_, err := hostKeyCallback(config.Target{
+		Host:       "example.test",
+		KnownHosts: filepath.Join(t.TempDir(), "missing_known_hosts"),
+	})
+	if err == nil {
+		t.Fatal("expected missing known_hosts file to fail")
+	}
+	if !strings.Contains(err.Error(), "known_hosts") {
+		t.Fatalf("expected known_hosts error, got %v", err)
+	}
+}
+
+func TestHostKeyCallbackCanBeExplicitlyInsecure(t *testing.T) {
+	callback, err := hostKeyCallback(config.Target{InsecureIgnoreHostKey: true})
+	if err != nil {
+		t.Fatalf("hostKeyCallback returned error: %v", err)
+	}
+	if callback == nil {
+		t.Fatal("expected insecure host key callback")
 	}
 }
 

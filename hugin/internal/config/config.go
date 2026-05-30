@@ -28,11 +28,13 @@ type LLMConfig struct {
 }
 
 type Target struct {
-	Type    string `yaml:"type,omitempty"` // "local" or "ssh"
-	Host    string `yaml:"host,omitempty"`
-	User    string `yaml:"user,omitempty"`
-	Key     string `yaml:"key,omitempty"` // Path to SSH key
-	Context string `yaml:"context,omitempty"`
+	Type                  string `yaml:"type,omitempty"` // "local" or "ssh"
+	Host                  string `yaml:"host,omitempty"`
+	User                  string `yaml:"user,omitempty"`
+	Key                   string `yaml:"key,omitempty"` // Path to SSH key
+	KnownHosts            string `yaml:"known_hosts,omitempty"`
+	InsecureIgnoreHostKey bool   `yaml:"insecure_ignore_host_key,omitempty"`
+	Context               string `yaml:"context,omitempty"`
 }
 
 type Check struct {

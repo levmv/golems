@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/levmv/golems/hugin/internal/config"
@@ -279,6 +280,22 @@ func (r *Runner) evictSSHClient(target config.Target, client *ssh.Client) {
 	_ = client.Close()
 }
 
+func hostKeyCallback(target config.Target) (ssh.HostKeyCallback, error) {
+	if target.InsecureIgnoreHostKey {
+		return ssh.InsecureIgnoreHostKey(), nil
+	}
+
+	path := target.KnownHosts
+	if path == "" {
+		path = "~/.ssh/known_hosts"
+	}
+	callback, err := knownhosts.New(expandTilde(path))
+	if err != nil {
+		return nil, fmt.Errorf("failed to load known_hosts %q: %w", path, err)
+	}
+	return callback, nil
+}
+
 func dialSSH(ctx context.Context, target config.Target) (*ssh.Client, error) {
 	key, err := os.ReadFile(expandTilde(target.Key))
 	if err != nil {
@@ -290,12 +307,17 @@ func dialSSH(ctx context.Context, target config.Target) (*ssh.Client, error) {
 		return nil, fmt.Errorf("unable to parse private key: %w", err)
 	}
 
+	hostCallback, err := hostKeyCallback(target)
+	if err != nil {
+		return nil, err
+	}
+
 	sshConfig := &ssh.ClientConfig{
 		User: target.User,
 		Auth: []ssh.AuthMethod{
 			ssh.PublicKeys(signer),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: hostCallback,
 	}
 
 	address := target.Host

@@ -191,6 +191,32 @@ func TestIncidentNotificationState(t *testing.T) {
 	}
 }
 
+func TestActiveIncidentsReturnsOpenIncidentsOldestFirst(t *testing.T) {
+	db := newTestDB(t)
+
+	if err := db.CreateIncident("inc-second", "memory", "suspicious", "Memory high", "evidence", 2, 2); err != nil {
+		t.Fatalf("CreateIncident second returned error: %v", err)
+	}
+	if err := db.CreateIncident("inc-first", "disk", "urgent", "Disk full", "evidence", 1, 1); err != nil {
+		t.Fatalf("CreateIncident first returned error: %v", err)
+	}
+	oldTime := time.Now().Add(-time.Hour).UTC()
+	if _, err := db.sql.Exec(`UPDATE incidents SET created_at = ? WHERE id = ?`, oldTime, "inc-first"); err != nil {
+		t.Fatalf("update incident time returned error: %v", err)
+	}
+	if err := db.ResolveIncident("inc-second", "done"); err != nil {
+		t.Fatalf("ResolveIncident returned error: %v", err)
+	}
+
+	incidents, err := db.ActiveIncidents()
+	if err != nil {
+		t.Fatalf("ActiveIncidents returned error: %v", err)
+	}
+	if len(incidents) != 1 || incidents[0].ID != "inc-first" {
+		t.Fatalf("expected only inc-first active, got %+v", incidents)
+	}
+}
+
 func TestDeleteOldRunsIgnoresNullIncidentRunReferences(t *testing.T) {
 	db := newTestDB(t)
 	oldRunID, err := db.InsertRun("disk", &models.CollectorOutput{

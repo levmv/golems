@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/levmv/golems/hugin/internal/notifier"
 	"github.com/levmv/golems/hugin/internal/storage"
 	"github.com/levmv/golems/pkg/logger"
+	"github.com/levmv/golems/pkg/tasks"
 )
 
 func main() {
@@ -72,23 +75,25 @@ func main() {
 			log.Error("Usage: hugin note <check_id> <content>")
 			os.Exit(1)
 		}
-		handleNote(db, args[1], args[2], log)
+		handleNote(db, args[1], strings.Join(args[2:], " "), log)
 
 	case "runs":
-		if len(args) < 2 {
-			log.Error("Usage: hugin runs <check_id> [--last N]")
+		checkID, limit, err := parseRunsArgs(args[1:])
+		if err != nil {
+			log.Error("Usage: hugin runs <check_id> [--last N]: %v", err)
 			os.Exit(1)
 		}
-		handleRuns(db, args[1], log)
+		handleRuns(db, checkID, limit, log)
 
 	case "resolve":
 		if len(args) < 2 {
 			log.Error("Usage: hugin resolve <incident_id> [--note <msg>]")
 			os.Exit(1)
 		}
-		note := ""
-		if len(args) > 2 {
-			note = strings.Join(args[2:], " ")
+		note, err := parseResolveNote(args[2:])
+		if err != nil {
+			log.Error("Usage: hugin resolve <incident_id> [--note <msg>]: %v", err)
+			os.Exit(1)
 		}
 		handleResolve(cfg, db, args[1], note, log)
 
@@ -97,6 +102,9 @@ func main() {
 
 	case "daemon":
 		handleDaemon(eng, log)
+
+	case "status":
+		handleStatus(cfg, db, eng, log)
 
 	case "validate":
 		handleValidate(cfg, log)
@@ -118,6 +126,79 @@ func handleRun(eng *engine.Engine, checkID string, log logger.Logger) {
 	}
 }
 
+func parseRunsArgs(args []string) (string, int, error) {
+	limit := 20
+	checkID := ""
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--last":
+			if i+1 >= len(args) {
+				return "", 0, fmt.Errorf("--last requires a number")
+			}
+			i++
+			n, err := parsePositiveInt(args[i])
+			if err != nil {
+				return "", 0, fmt.Errorf("--last: %w", err)
+			}
+			limit = n
+		case strings.HasPrefix(arg, "--last="):
+			n, err := parsePositiveInt(strings.TrimPrefix(arg, "--last="))
+			if err != nil {
+				return "", 0, fmt.Errorf("--last: %w", err)
+			}
+			limit = n
+		case strings.HasPrefix(arg, "-"):
+			return "", 0, fmt.Errorf("unknown flag %q", arg)
+		default:
+			if checkID != "" {
+				return "", 0, fmt.Errorf("unexpected argument %q", arg)
+			}
+			checkID = arg
+		}
+	}
+
+	if checkID == "" {
+		return "", 0, fmt.Errorf("check_id is required")
+	}
+	return checkID, limit, nil
+}
+
+func parsePositiveInt(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("must be positive")
+	}
+	return n, nil
+}
+
+func parseResolveNote(args []string) (string, error) {
+	if len(args) == 0 {
+		return "", nil
+	}
+	if args[0] == "--note" {
+		if len(args) == 1 {
+			return "", fmt.Errorf("--note requires a message")
+		}
+		return strings.Join(args[1:], " "), nil
+	}
+	if strings.HasPrefix(args[0], "--note=") {
+		note := strings.TrimPrefix(args[0], "--note=")
+		if note == "" {
+			return "", fmt.Errorf("--note requires a message")
+		}
+		if len(args) > 1 {
+			note += " " + strings.Join(args[1:], " ")
+		}
+		return note, nil
+	}
+	return strings.Join(args, " "), nil
+}
+
 func handleNote(db *storage.DB, checkID, content string, log logger.Logger) {
 	if err := db.AddNote(checkID, content); err != nil {
 		log.Error("Failed to add note: %v", err)
@@ -126,8 +207,8 @@ func handleNote(db *storage.DB, checkID, content string, log logger.Logger) {
 	log.Info("Note added for check '%s'", checkID)
 }
 
-func handleRuns(db *storage.DB, checkID string, log logger.Logger) {
-	runs, err := db.RecentRuns(checkID, 20)
+func handleRuns(db *storage.DB, checkID string, limit int, log logger.Logger) {
+	runs, err := db.RecentRuns(checkID, limit)
 	if err != nil {
 		log.Error("Failed to fetch runs: %v", err)
 		os.Exit(1)
@@ -145,6 +226,136 @@ func handleRuns(db *storage.DB, checkID string, log logger.Logger) {
 			r.ID, r.Status, dur.String(), r.Window,
 			r.CreatedAt.Format(time.RFC3339))
 	}
+}
+
+func handleStatus(cfg *config.Config, db *storage.DB, eng *engine.Engine, log logger.Logger) {
+	ctx := context.Background()
+	if err := eng.SyncSchedule(ctx); err != nil {
+		log.Warn("Failed to sync scheduled checks: %v", err)
+	}
+
+	incidents, err := db.ActiveIncidents()
+	if err != nil {
+		log.Error("Failed to fetch incidents: %v", err)
+		os.Exit(1)
+	}
+
+	var store tasks.Store
+	if s, err := db.TaskStore(); err != nil {
+		log.Warn("Failed to load scheduled task state: %v", err)
+	} else {
+		store = s
+	}
+
+	loc, err := time.LoadLocation(cfg.App.Timezone)
+	if err != nil {
+		loc = time.UTC
+	}
+
+	fmt.Println("Hugin status")
+	fmt.Printf("Data: %s\n", filepath.Join(cfg.App.DataDir, "hugin.db"))
+	fmt.Printf("Checks: %d  Targets: %d  Active incidents: %d\n\n", len(cfg.Checks), len(cfg.Targets), len(incidents))
+
+	if len(incidents) == 0 {
+		fmt.Println("Active incidents: none")
+	} else {
+		fmt.Println("Active incidents:")
+		for _, inc := range incidents {
+			fmt.Printf("- %s  %s  %s  since %s  %s\n",
+				ellipsize(inc.ID, 36),
+				ellipsize(inc.CheckID, 24),
+				inc.Severity,
+				formatStatusTime(inc.CreatedAt, loc),
+				ellipsize(inc.Summary, 80),
+			)
+		}
+	}
+
+	fmt.Println("\nChecks:")
+	fmt.Printf("%-24s %-12s %-18s %-10s %-10s %-18s %s\n", "CHECK", "TARGET", "LAST RUN", "STATUS", "AI", "NEXT RUN", "SUMMARY")
+	for _, check := range cfg.Checks {
+		lastRun := "never"
+		collectorStatus := "-"
+		analysisSeverity := "-"
+		summary := "-"
+
+		runs, err := db.RecentRuns(check.ID, 1)
+		if err != nil {
+			summary = "runs error: " + err.Error()
+		} else if len(runs) > 0 {
+			run := runs[0]
+			lastRun = formatStatusTime(run.CreatedAt, loc)
+			collectorStatus = run.Status
+			analysis, err := db.RunAnalysis(run.ID)
+			if err != nil {
+				summary = "analysis error: " + err.Error()
+			} else if analysis != nil {
+				analysisSeverity = analysis.Severity
+				summary = analysis.Summary
+				if analysis.Error != "" {
+					summary = "analysis failed: " + analysis.Error
+				}
+			}
+		}
+
+		fmt.Printf("%-24s %-12s %-18s %-10s %-10s %-18s %s\n",
+			ellipsize(check.ID, 24),
+			ellipsize(check.Target, 12),
+			lastRun,
+			collectorStatus,
+			analysisSeverity,
+			statusTaskNext(ctx, store, check.ID, loc),
+			ellipsize(summary, 80),
+		)
+	}
+}
+
+func statusTaskNext(ctx context.Context, store tasks.Store, checkID string, loc *time.Location) string {
+	if store == nil {
+		return "-"
+	}
+	task, err := store.Get(ctx, engine.CheckTaskID(checkID))
+	if err != nil {
+		if errors.Is(err, tasks.ErrNotFound) {
+			return "not synced"
+		}
+		return "task error"
+	}
+	if task.Exhausted() {
+		return "exhausted"
+	}
+	if task.LockedAt != nil && task.LockToken != "" {
+		return "running"
+	}
+	return formatStatusTimePtr(task.NextRunAt, loc)
+}
+
+func formatStatusTimePtr(t *time.Time, loc *time.Location) string {
+	if t == nil {
+		return "-"
+	}
+	return formatStatusTime(*t, loc)
+}
+
+func formatStatusTime(t time.Time, loc *time.Location) string {
+	if t.IsZero() {
+		return "-"
+	}
+	return t.In(loc).Format("2006-01-02 15:04")
+}
+
+func ellipsize(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	runes := []rune(strings.TrimSpace(s))
+	if len(runes) <= maxRunes {
+		return string(runes)
+	}
+	if maxRunes <= 3 {
+		return string(runes[:maxRunes])
+	}
+	return string(runes[:maxRunes-3]) + "..."
 }
 
 func handleRunDue(eng *engine.Engine, log logger.Logger) {
@@ -219,6 +430,7 @@ func printUsage() {
 	fmt.Println("  hugin run <check_id>            Execute a check and analyze results")
 	fmt.Println("  hugin run-due                   Run all checks that are due")
 	fmt.Println("  hugin daemon                    Run scheduled checks continuously")
+	fmt.Println("  hugin status                    Show checks, incidents, and next runs")
 	fmt.Println("  hugin note <check_id> <msg>     Add an operator note for a check")
 	fmt.Println("  hugin runs <check_id>           Show recent runs for a check")
 	fmt.Println("  hugin resolve <incident_id>     Manually resolve an incident")
