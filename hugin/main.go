@@ -16,6 +16,7 @@ import (
 
 	"github.com/levmv/golems/hugin/internal/config"
 	"github.com/levmv/golems/hugin/internal/deploy"
+	"github.com/levmv/golems/hugin/internal/doctor"
 	"github.com/levmv/golems/hugin/internal/engine"
 	"github.com/levmv/golems/hugin/internal/notifier"
 	"github.com/levmv/golems/hugin/internal/storage"
@@ -114,6 +115,14 @@ func main() {
 			os.Exit(1)
 		}
 		handleDeploy(cfg, targetName, opts, log)
+
+	case "doctor":
+		opts, err := parseDoctorArgs(args[1:])
+		if err != nil {
+			log.Error("Usage: hugin doctor [--no-ssh] [--ssh-timeout DURATION]: %v", err)
+			os.Exit(1)
+		}
+		handleDoctor(cfg, opts)
 
 	case "validate":
 		handleValidate(cfg, log)
@@ -250,6 +259,36 @@ func parseDeployArgs(args []string) (string, deploy.CollectorsOptions, error) {
 		return "", opts, fmt.Errorf("target is required")
 	}
 	return targetName, opts, nil
+}
+
+func parseDoctorArgs(args []string) (doctor.Options, error) {
+	opts := doctor.Options{CheckSSH: true, SSHTimeout: 5 * time.Second}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--no-ssh":
+			opts.CheckSSH = false
+		case arg == "--ssh-timeout":
+			if i+1 >= len(args) {
+				return opts, fmt.Errorf("--ssh-timeout requires a duration")
+			}
+			i++
+			timeout, err := time.ParseDuration(args[i])
+			if err != nil || timeout <= 0 {
+				return opts, fmt.Errorf("--ssh-timeout must be a positive duration")
+			}
+			opts.SSHTimeout = timeout
+		case strings.HasPrefix(arg, "--ssh-timeout="):
+			timeout, err := time.ParseDuration(strings.TrimPrefix(arg, "--ssh-timeout="))
+			if err != nil || timeout <= 0 {
+				return opts, fmt.Errorf("--ssh-timeout must be a positive duration")
+			}
+			opts.SSHTimeout = timeout
+		default:
+			return opts, fmt.Errorf("unknown argument %q", arg)
+		}
+	}
+	return opts, nil
 }
 
 func handleNote(db *storage.DB, checkID, content string, log logger.Logger) {
@@ -430,6 +469,17 @@ func handleDeploy(cfg *config.Config, targetName string, opts deploy.CollectorsO
 	log.Info("Deployed %d collector file(s) from %s to %s:%s", result.Files, result.Source, targetName, result.Dest)
 }
 
+func handleDoctor(cfg *config.Config, opts doctor.Options) {
+	report := doctor.Check(context.Background(), cfg, opts)
+	fmt.Println("Hugin doctor")
+	for _, item := range report.Items {
+		fmt.Printf("%-4s %-12s %s\n", item.Status, item.Area, item.Message)
+	}
+	if report.HasFailures() {
+		os.Exit(1)
+	}
+}
+
 func handleRunDue(eng *engine.Engine, log logger.Logger) {
 	if err := eng.RunDue(context.Background()); err != nil {
 		log.Error("%v", err)
@@ -503,7 +553,8 @@ func printUsage() {
 	fmt.Println("  hugin run-due                   Run all checks that are due")
 	fmt.Println("  hugin daemon                    Run scheduled checks continuously")
 	fmt.Println("  hugin status                    Show checks, incidents, and next runs")
-	fmt.Println("  hugin deploy <target> Install bundled collectors on an SSH target")
+	fmt.Println("  hugin deploy <target>          Install bundled collectors on an SSH target")
+	fmt.Println("  hugin doctor                   Check config, env, and SSH readiness")
 	fmt.Println("  hugin note <check_id> <msg>     Add an operator note for a check")
 	fmt.Println("  hugin runs <check_id>           Show recent runs for a check")
 	fmt.Println("  hugin resolve <incident_id>     Manually resolve an incident")

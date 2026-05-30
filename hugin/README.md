@@ -187,6 +187,9 @@ hugin status
 # Install bundled collectors on an SSH target
 hugin deploy web1 --dest /opt/hugin/collectors
 
+# Check local config, env vars, and SSH readiness
+hugin doctor
+
 # Add an operator note (stored in SQLite)
 hugin note disk_web1 "80-86% disk usage is normal if stable."
 

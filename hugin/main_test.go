@@ -42,6 +42,19 @@ func TestParseResolveNote(t *testing.T) {
 	}
 }
 
+func TestParseDoctorArgs(t *testing.T) {
+	opts, err := parseDoctorArgs([]string{"--no-ssh", "--ssh-timeout=2s"})
+	if err != nil {
+		t.Fatalf("parseDoctorArgs returned error: %v", err)
+	}
+	if opts.CheckSSH {
+		t.Fatal("expected --no-ssh to disable SSH checks")
+	}
+	if opts.SSHTimeout.String() != "2s" {
+		t.Fatalf("expected timeout 2s, got %s", opts.SSHTimeout)
+	}
+}
+
 func TestParseDeployArgs(t *testing.T) {
 	target, opts, err := parseDeployArgs([]string{"web1", "--source", "hugin/collectors", "--dest=/tmp/hugin"})
 	if err != nil {
