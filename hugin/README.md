@@ -209,8 +209,10 @@ A sample systemd service unit is available at
 SSH targets validate host keys with `known_hosts` by default. If you need a
 temporary escape hatch, set `insecure_ignore_host_key: true` on that target
 explicitly. `deploy` uses the same SSH target config and installs the
-bundled scripts to `/opt/hugin/collectors` by default; make sure the SSH user can
-write there, or pass `--dest ~/hugin/collectors` and point checks at that path.
+bundled scripts embedded in the Hugin binary to `/opt/hugin/collectors` by
+default; make sure the SSH user can write there, or pass
+`--dest ~/hugin/collectors` and point checks at that path. Use `--source` only
+when deploying local collector edits.
 
 ---
 

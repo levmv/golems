@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	bundled "github.com/levmv/golems/hugin/collectors"
 	"github.com/levmv/golems/hugin/internal/config"
 	"github.com/levmv/golems/hugin/internal/runner"
 )
@@ -35,18 +36,26 @@ func Collectors(ctx context.Context, target config.Target, opts CollectorsOption
 		return CollectorsResult{}, fmt.Errorf("deploy requires an ssh target")
 	}
 
-	source, err := ResolveCollectorsSource(opts.Source)
+	source := "embedded collectors"
+	var archive *bytes.Buffer
+	var files int
+	var err error
+	if opts.Source != "" {
+		source, err = validateCollectorsSource(opts.Source)
+		if err != nil {
+			return CollectorsResult{}, err
+		}
+		archive, files, err = archiveCollectors(source)
+	} else {
+		archive, files, err = archiveBundledCollectors()
+	}
 	if err != nil {
 		return CollectorsResult{}, err
 	}
+
 	dest := opts.Dest
 	if dest == "" {
 		dest = DefaultCollectorsDest
-	}
-
-	archive, files, err := archiveCollectors(source)
-	if err != nil {
-		return CollectorsResult{}, err
 	}
 
 	client, err := runner.DialSSH(ctx, target)
@@ -108,6 +117,47 @@ func validateCollectorsSource(source string) (string, error) {
 		return "", err
 	}
 	return abs, nil
+}
+
+func archiveBundledCollectors() (*bytes.Buffer, int, error) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+
+	if err := tw.WriteHeader(&tar.Header{Name: "collectors", Mode: 0755, Typeflag: tar.TypeDir}); err != nil {
+		_ = gz.Close()
+		return nil, 0, err
+	}
+
+	for _, file := range bundled.Files {
+		data, err := bundled.FS.ReadFile(file.Name)
+		if err != nil {
+			_ = tw.Close()
+			_ = gz.Close()
+			return nil, 0, err
+		}
+		header := &tar.Header{
+			Name: path.Join("collectors", file.Name),
+			Mode: file.Mode,
+			Size: int64(len(data)),
+		}
+		if err := tw.WriteHeader(header); err != nil {
+			_ = gz.Close()
+			return nil, 0, err
+		}
+		if _, err := tw.Write(data); err != nil {
+			_ = gz.Close()
+			return nil, 0, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		_ = gz.Close()
+		return nil, 0, err
+	}
+	if err := gz.Close(); err != nil {
+		return nil, 0, err
+	}
+	return &buf, len(bundled.Files), nil
 }
 
 func archiveCollectors(source string) (*bytes.Buffer, int, error) {
