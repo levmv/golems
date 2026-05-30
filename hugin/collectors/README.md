@@ -22,7 +22,8 @@ for restricting the SSH key to Hugin collectors only. A minimal
 restrict,command="/opt/hugin/collectors/hugin-collector-wrapper" ssh-ed25519 AAAA... hugin
 ```
 
-The wrapper accepts plain commands of the form:
+Replace any existing unrestricted `authorized_keys` entry for the same public key,
+or use a dedicated Hugin key. The wrapper accepts plain commands of the form:
 
 ```bash
 HUGIN_CHECK_ID=disk_web1 HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk

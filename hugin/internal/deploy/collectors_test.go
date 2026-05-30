@@ -3,12 +3,18 @@ package deploy
 import (
 	"archive/tar"
 	"compress/gzip"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	bundled "github.com/levmv/golems/hugin/collectors"
+	"github.com/levmv/golems/hugin/internal/config"
 )
 
 func TestResolveCollectorsSourceUsesExplicitDirectory(t *testing.T) {
@@ -118,4 +124,90 @@ func TestShellQuote(t *testing.T) {
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
 	}
+}
+
+func TestAuthorizedKeyLineUsesDefaultWrapperCommand(t *testing.T) {
+	keyPath := writeTestPrivateKey(t)
+	line, err := AuthorizedKeyLine(config.Target{Key: keyPath}, DefaultCollectorsDest, "hugin-web1")
+	if err != nil {
+		t.Fatalf("AuthorizedKeyLine returned error: %v", err)
+	}
+	if !strings.HasPrefix(line, `restrict,command="/opt/hugin/collectors/hugin-collector-wrapper" ssh-rsa `) {
+		t.Fatalf("unexpected authorized_keys line: %s", line)
+	}
+	if !strings.HasSuffix(line, " hugin-web1") {
+		t.Fatalf("expected sanitized comment suffix, got %s", line)
+	}
+}
+
+func TestAuthorizedKeyLineUsesCollectorDirForCustomDest(t *testing.T) {
+	keyPath := writeTestPrivateKey(t)
+	line, err := AuthorizedKeyLine(config.Target{Key: keyPath}, "/home/hugin/collectors/", "hugin web1")
+	if err != nil {
+		t.Fatalf("AuthorizedKeyLine returned error: %v", err)
+	}
+	want := `restrict,command="HUGIN_COLLECTOR_DIR=/home/hugin/collectors /home/hugin/collectors/hugin-collector-wrapper" ssh-rsa `
+	if !strings.HasPrefix(line, want) {
+		t.Fatalf("expected prefix %q, got %s", want, line)
+	}
+	if !strings.HasSuffix(line, " hugin-web1") {
+		t.Fatalf("expected whitespace in comment to be sanitized, got %s", line)
+	}
+}
+
+func TestAuthorizedKeyLineRejectsNonAbsoluteDest(t *testing.T) {
+	keyPath := writeTestPrivateKey(t)
+	_, err := AuthorizedKeyLine(config.Target{Key: keyPath}, "~/hugin/collectors", "hugin")
+	if err == nil {
+		t.Fatal("expected AuthorizedKeyLine to reject non-absolute dest")
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("expected absolute dest error, got %v", err)
+	}
+}
+
+func TestAuthorizedKeyLineRejectsDestWithShellSpecials(t *testing.T) {
+	keyPath := writeTestPrivateKey(t)
+	_, err := AuthorizedKeyLine(config.Target{Key: keyPath}, "/tmp/hugin collectors", "hugin")
+	if err == nil {
+		t.Fatal("expected AuthorizedKeyLine to reject shell-special dest")
+	}
+	if !strings.Contains(err.Error(), "shell-special") {
+		t.Fatalf("expected shell-special dest error, got %v", err)
+	}
+}
+
+func TestSourceIncludesWrapperRequiresExecutableWrapper(t *testing.T) {
+	dir := t.TempDir()
+	if sourceIncludesWrapper(dir) {
+		t.Fatal("expected empty source to not include wrapper")
+	}
+	path := filepath.Join(dir, "hugin-collector-wrapper")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	if sourceIncludesWrapper(dir) {
+		t.Fatal("expected non-executable wrapper to not count as usable")
+	}
+	if err := os.Chmod(path, 0755); err != nil {
+		t.Fatalf("Chmod returned error: %v", err)
+	}
+	if !sourceIncludesWrapper(dir) {
+		t.Fatal("expected executable wrapper to count as usable")
+	}
+}
+
+func writeTestPrivateKey(t *testing.T) string {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatalf("GenerateKey returned error: %v", err)
+	}
+	data := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	path := filepath.Join(t.TempDir(), "id_rsa")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("WriteFile key returned error: %v", err)
+	}
+	return path
 }

@@ -467,6 +467,20 @@ func handleDeploy(cfg *config.Config, targetName string, opts deploy.CollectorsO
 		os.Exit(1)
 	}
 	log.Info("Deployed %d collector file(s) from %s to %s:%s", result.Files, result.Source, targetName, result.Dest)
+	if !result.IncludesWrapper {
+		log.Info("Skipping forced-command authorized_keys hint because deployed source does not include hugin-collector-wrapper")
+		return
+	}
+
+	line, err := deploy.AuthorizedKeyLine(target, result.Dest, "hugin-"+targetName)
+	if err != nil {
+		log.Info("Forced-command authorized_keys hint unavailable: %v", err)
+		return
+	}
+	fmt.Println()
+	fmt.Println("Collector-only SSH authorized_keys entry:")
+	fmt.Println("Replace any unrestricted authorized_keys entry for this public key, or use a dedicated Hugin key.")
+	fmt.Println(line)
 }
 
 func handleDoctor(cfg *config.Config, opts doctor.Options) {

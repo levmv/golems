@@ -16,6 +16,7 @@ import (
 	bundled "github.com/levmv/golems/hugin/collectors"
 	"github.com/levmv/golems/hugin/internal/config"
 	"github.com/levmv/golems/hugin/internal/runner"
+	"golang.org/x/crypto/ssh"
 )
 
 const DefaultCollectorsDest = "/opt/hugin/collectors"
@@ -26,9 +27,10 @@ type CollectorsOptions struct {
 }
 
 type CollectorsResult struct {
-	Source string
-	Dest   string
-	Files  int
+	Source          string
+	Dest            string
+	Files           int
+	IncludesWrapper bool
 }
 
 func Collectors(ctx context.Context, target config.Target, opts CollectorsOptions) (CollectorsResult, error) {
@@ -37,6 +39,7 @@ func Collectors(ctx context.Context, target config.Target, opts CollectorsOption
 	}
 
 	source := "embedded collectors"
+	includesWrapper := true
 	var archive *bytes.Buffer
 	var files int
 	var err error
@@ -45,6 +48,7 @@ func Collectors(ctx context.Context, target config.Target, opts CollectorsOption
 		if err != nil {
 			return CollectorsResult{}, err
 		}
+		includesWrapper = sourceIncludesWrapper(source)
 		archive, files, err = archiveCollectors(source)
 	} else {
 		archive, files, err = archiveBundledCollectors()
@@ -79,7 +83,7 @@ func Collectors(ctx context.Context, target config.Target, opts CollectorsOption
 		return CollectorsResult{}, fmt.Errorf("install collectors on remote host: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
-	return CollectorsResult{Source: source, Dest: dest, Files: files}, nil
+	return CollectorsResult{Source: source, Dest: dest, Files: files, IncludesWrapper: includesWrapper}, nil
 }
 
 func ResolveCollectorsSource(explicit string) (string, error) {
@@ -231,6 +235,94 @@ func archiveCollectors(source string) (*bytes.Buffer, int, error) {
 		return nil, 0, err
 	}
 	return &buf, files, nil
+}
+
+func AuthorizedKeyLine(target config.Target, collectorsDest, comment string) (string, error) {
+	dest, err := normalizeAuthorizedKeyDest(collectorsDest)
+	if err != nil {
+		return "", err
+	}
+
+	key, err := os.ReadFile(expandLocalTilde(target.Key))
+	if err != nil {
+		return "", fmt.Errorf("read private key for authorized_keys hint: %w", err)
+	}
+	signer, err := ssh.ParsePrivateKey(key)
+	if err != nil {
+		return "", fmt.Errorf("parse private key for authorized_keys hint: %w", err)
+	}
+
+	forcedCommand := path.Join(dest, "hugin-collector-wrapper")
+	if dest != DefaultCollectorsDest {
+		forcedCommand = "HUGIN_COLLECTOR_DIR=" + dest + " " + forcedCommand
+	}
+
+	line := "restrict,command=" + authorizedKeysQuote(forcedCommand) + " " + strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))
+	if comment = sanitizeAuthorizedKeyComment(comment); comment != "" {
+		line += " " + comment
+	}
+	return line, nil
+}
+
+func normalizeAuthorizedKeyDest(dest string) (string, error) {
+	if dest == "" {
+		dest = DefaultCollectorsDest
+	}
+	dest = strings.TrimRight(dest, "/")
+	if dest == "" {
+		return "", fmt.Errorf("authorized_keys hint requires a non-empty collectors destination")
+	}
+	if !strings.HasPrefix(dest, "/") {
+		return "", fmt.Errorf("authorized_keys hint requires an absolute collectors destination, got %q", dest)
+	}
+	for _, r := range dest {
+		if !isCollectorCommandChar(r) {
+			return "", fmt.Errorf("authorized_keys hint requires a collectors destination without shell-special characters, got %q", dest)
+		}
+	}
+	return dest, nil
+}
+
+func sourceIncludesWrapper(source string) bool {
+	info, err := os.Stat(filepath.Join(source, "hugin-collector-wrapper"))
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0
+}
+
+func authorizedKeysQuote(s string) string {
+	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+}
+
+func sanitizeAuthorizedKeyComment(comment string) string {
+	comment = strings.TrimSpace(comment)
+	if comment == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, r := range comment {
+		if r <= ' ' || r == '"' || r == '\'' || r == '\\' {
+			b.WriteByte('-')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func isCollectorCommandChar(r rune) bool {
+	return (r >= 'A' && r <= 'Z') ||
+		(r >= 'a' && r <= 'z') ||
+		(r >= '0' && r <= '9') ||
+		strings.ContainsRune("_./:=@%+,-", r)
+}
+
+func expandLocalTilde(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return strings.Replace(path, "~", home, 1)
+		}
+	}
+	return path
 }
 
 func shellQuote(s string) string {

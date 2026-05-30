@@ -217,7 +217,10 @@ default; make sure the SSH user can write there, or pass
 `--dest ~/hugin/collectors` and point checks at that path. Use `--source` only
 when deploying local collector edits. Deployed collectors include
 `hugin-collector-wrapper`, which can be used as an SSH forced command to restrict
-the monitoring key to bundled collectors.
+the monitoring key to bundled collectors; after a successful deploy, Hugin prints
+a ready-to-copy `authorized_keys` line when the destination is an absolute path.
+Replace any existing unrestricted `authorized_keys` entry for that public key, or
+use a dedicated Hugin key.
 
 ---
 
