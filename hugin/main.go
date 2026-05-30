@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/levmv/golems/hugin/internal/config"
+	"github.com/levmv/golems/hugin/internal/deploy"
 	"github.com/levmv/golems/hugin/internal/engine"
 	"github.com/levmv/golems/hugin/internal/notifier"
 	"github.com/levmv/golems/hugin/internal/storage"
@@ -105,6 +106,14 @@ func main() {
 
 	case "status":
 		handleStatus(cfg, db, eng, log)
+
+	case "deploy":
+		targetName, opts, err := parseDeployArgs(args[1:])
+		if err != nil {
+			log.Error("Usage: hugin deploy <target> [--source PATH] [--dest PATH]: %v", err)
+			os.Exit(1)
+		}
+		handleDeploy(cfg, targetName, opts, log)
 
 	case "validate":
 		handleValidate(cfg, log)
@@ -197,6 +206,50 @@ func parseResolveNote(args []string) (string, error) {
 		return note, nil
 	}
 	return strings.Join(args, " "), nil
+}
+
+func parseDeployArgs(args []string) (string, deploy.CollectorsOptions, error) {
+	opts := deploy.CollectorsOptions{Dest: deploy.DefaultCollectorsDest}
+	targetName := ""
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--source":
+			if i+1 >= len(args) {
+				return "", opts, fmt.Errorf("--source requires a path")
+			}
+			i++
+			opts.Source = args[i]
+		case strings.HasPrefix(arg, "--source="):
+			opts.Source = strings.TrimPrefix(arg, "--source=")
+			if opts.Source == "" {
+				return "", opts, fmt.Errorf("--source requires a path")
+			}
+		case arg == "--dest":
+			if i+1 >= len(args) {
+				return "", opts, fmt.Errorf("--dest requires a path")
+			}
+			i++
+			opts.Dest = args[i]
+		case strings.HasPrefix(arg, "--dest="):
+			opts.Dest = strings.TrimPrefix(arg, "--dest=")
+			if opts.Dest == "" {
+				return "", opts, fmt.Errorf("--dest requires a path")
+			}
+		case strings.HasPrefix(arg, "-"):
+			return "", opts, fmt.Errorf("unknown flag %q", arg)
+		default:
+			if targetName != "" {
+				return "", opts, fmt.Errorf("unexpected argument %q", arg)
+			}
+			targetName = arg
+		}
+	}
+	if targetName == "" {
+		return "", opts, fmt.Errorf("target is required")
+	}
+	return targetName, opts, nil
 }
 
 func handleNote(db *storage.DB, checkID, content string, log logger.Logger) {
@@ -358,6 +411,25 @@ func ellipsize(s string, maxRunes int) string {
 	return string(runes[:maxRunes-3]) + "..."
 }
 
+func handleDeploy(cfg *config.Config, targetName string, opts deploy.CollectorsOptions, log logger.Logger) {
+	target, ok := cfg.Targets[targetName]
+	if !ok {
+		log.Error("Target %q not found", targetName)
+		os.Exit(1)
+	}
+	if target.Type != "ssh" {
+		log.Error("Target %q is %q, deploy requires an ssh target", targetName, target.Type)
+		os.Exit(1)
+	}
+
+	result, err := deploy.Collectors(context.Background(), target, opts)
+	if err != nil {
+		log.Error("Deploy collectors failed: %v", err)
+		os.Exit(1)
+	}
+	log.Info("Deployed %d collector file(s) from %s to %s:%s", result.Files, result.Source, targetName, result.Dest)
+}
+
 func handleRunDue(eng *engine.Engine, log logger.Logger) {
 	if err := eng.RunDue(context.Background()); err != nil {
 		log.Error("%v", err)
@@ -431,6 +503,7 @@ func printUsage() {
 	fmt.Println("  hugin run-due                   Run all checks that are due")
 	fmt.Println("  hugin daemon                    Run scheduled checks continuously")
 	fmt.Println("  hugin status                    Show checks, incidents, and next runs")
+	fmt.Println("  hugin deploy <target> Install bundled collectors on an SSH target")
 	fmt.Println("  hugin note <check_id> <msg>     Add an operator note for a check")
 	fmt.Println("  hugin runs <check_id>           Show recent runs for a check")
 	fmt.Println("  hugin resolve <incident_id>     Manually resolve an incident")

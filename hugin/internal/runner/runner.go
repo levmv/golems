@@ -296,6 +296,11 @@ func hostKeyCallback(target config.Target) (ssh.HostKeyCallback, error) {
 	return callback, nil
 }
 
+// DialSSH opens an SSH client using Hugin target configuration.
+func DialSSH(ctx context.Context, target config.Target) (*ssh.Client, error) {
+	return dialSSH(ctx, target)
+}
+
 func dialSSH(ctx context.Context, target config.Target) (*ssh.Client, error) {
 	key, err := os.ReadFile(expandTilde(target.Key))
 	if err != nil {
