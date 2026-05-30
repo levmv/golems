@@ -45,6 +45,9 @@ func TestArchiveBundledCollectorsIncludesExecutableScripts(t *testing.T) {
 	if got := entries["collectors/lib.sh"].Mode; got != 0644 {
 		t.Fatalf("expected lib.sh mode 0644, got %#o", got)
 	}
+	if got := entries["collectors/hugin-collector-wrapper"].Mode; got != 0755 {
+		t.Fatalf("expected wrapper mode 0755, got %#o", got)
+	}
 }
 
 func TestArchiveCollectorsPreservesTopLevelDirectory(t *testing.T) {

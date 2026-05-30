@@ -13,6 +13,30 @@ Recommended remote install path:
 Copy this whole directory to the monitored host and run scripts from there so
 the shared `lib.sh` helper is available.
 
+`hugin deploy <target>` installs this bundled directory for an SSH target. The
+install also includes `hugin-collector-wrapper`, a small forced-command helper
+for restricting the SSH key to Hugin collectors only. A minimal
+`authorized_keys` entry looks like this:
+
+```text
+restrict,command="/opt/hugin/collectors/hugin-collector-wrapper" ssh-ed25519 AAAA... hugin
+```
+
+The wrapper accepts plain commands of the form:
+
+```bash
+HUGIN_CHECK_ID=disk_web1 HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
+```
+
+It only allows `HUGIN_*` environment assignments and bundled collector names,
+and expects absolute collector paths in check commands. If you install
+collectors somewhere else, set `HUGIN_COLLECTOR_DIR` before the wrapper in the
+forced command:
+
+```text
+restrict,command="HUGIN_COLLECTOR_DIR=/home/hugin/collectors /home/hugin/collectors/hugin-collector-wrapper" ssh-ed25519 AAAA... hugin
+```
+
 ## Contract
 
 - stdout must be a single JSON object.

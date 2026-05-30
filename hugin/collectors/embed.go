@@ -17,9 +17,10 @@ var Files = []File{
 	{Name: "memory", Mode: 0755},
 	{Name: "network", Mode: 0755},
 	{Name: "systemd-service", Mode: 0755},
+	{Name: "hugin-collector-wrapper", Mode: 0755},
 }
 
 // FS contains the bundled Linux collector scripts shipped with Hugin.
 //
-//go:embed README.md disk lib.sh load memory network systemd-service
+//go:embed README.md disk hugin-collector-wrapper lib.sh load memory network systemd-service
 var FS embed.FS

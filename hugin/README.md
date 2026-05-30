@@ -215,7 +215,9 @@ explicitly. `deploy` uses the same SSH target config and installs the
 bundled scripts embedded in the Hugin binary to `/opt/hugin/collectors` by
 default; make sure the SSH user can write there, or pass
 `--dest ~/hugin/collectors` and point checks at that path. Use `--source` only
-when deploying local collector edits.
+when deploying local collector edits. Deployed collectors include
+`hugin-collector-wrapper`, which can be used as an SSH forced command to restrict
+the monitoring key to bundled collectors.
 
 ---
 

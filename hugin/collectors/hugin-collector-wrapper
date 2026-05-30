@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -u
+
+collector_dir=${HUGIN_COLLECTOR_DIR:-/opt/hugin/collectors}
+while [[ "$collector_dir" == */ && "$collector_dir" != "/" ]]; do
+	collector_dir=${collector_dir%/}
+done
+original_command=${SSH_ORIGINAL_COMMAND:-}
+
+fail() {
+	printf 'hugin-collector-wrapper: %s\n' "$1" >&2
+	exit 126
+}
+
+if [ -z "$collector_dir" ] || [ "$collector_dir" = "/" ]; then
+	fail "HUGIN_COLLECTOR_DIR must not be empty or root"
+fi
+
+if [ -z "$original_command" ]; then
+	fail "SSH_ORIGINAL_COMMAND is empty"
+fi
+
+# Keep parsing intentionally simple and non-evaluating. Hugin collector commands
+# should be one-line HUGIN_* assignments followed by a collector path and optional
+# simple arguments. Shell metacharacters, quotes, and substitutions are rejected.
+if [[ "$original_command" == *$'\n'* ]] || [[ "$original_command" == *$'\r'* ]]; then
+	fail "command must be a single line"
+fi
+if [[ ! "$original_command" =~ ^[A-Za-z0-9_./:=@%+,-]+([[:blank:]]+[A-Za-z0-9_./:=@%+,-]+)*$ ]]; then
+	fail "command contains unsupported characters"
+fi
+
+read -r -a words <<< "$original_command"
+if [ "${#words[@]}" -eq 0 ]; then
+	fail "command is empty"
+fi
+
+idx=0
+while [ "$idx" -lt "${#words[@]}" ]; do
+	word=${words[$idx]}
+	if [[ "$word" =~ ^HUGIN_[A-Za-z0-9_]+=.*$ ]]; then
+		export "$word"
+		idx=$((idx + 1))
+		continue
+	fi
+	if [[ "$word" == *=* ]]; then
+		fail "only HUGIN_* environment assignments are allowed"
+	fi
+	break
+done
+
+if [ "$idx" -ge "${#words[@]}" ]; then
+	fail "collector command is missing"
+fi
+
+collector=${words[$idx]}
+idx=$((idx + 1))
+collector_name=${collector##*/}
+
+case "$collector_name" in
+	disk|load|memory|network|systemd-service)
+		;;
+	*)
+		fail "collector '$collector_name' is not allowlisted"
+		;;
+esac
+
+if [[ "$collector_name" == *..* ]] || [[ "$collector_name" == */* ]]; then
+	fail "invalid collector name"
+fi
+
+collector_path="$collector_dir/$collector_name"
+if [ "$collector" != "$collector_path" ]; then
+	fail "collector path must be $collector_path"
+fi
+if [ ! -x "$collector_path" ]; then
+	fail "collector '$collector_name' is not executable at $collector_path"
+fi
+
+args=("${words[@]:$idx}")
+exec "$collector_path" "${args[@]}"
