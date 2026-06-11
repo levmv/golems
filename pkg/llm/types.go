@@ -1,6 +1,10 @@
 package llm
 
-import "context"
+import (
+	"context"
+
+	"github.com/levmv/golems/pkg/jsonschema"
+)
 
 type Role string
 
@@ -12,19 +16,24 @@ const (
 )
 
 type Message struct {
-	Role      Role       `json:"role"`
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	ToolID    string     `json:"tool_id,omitempty"`
-	Meta      any        `json:"meta,omitempty"`
+	Role       Role       `json:"role"`
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+	Meta       any        `json:"meta,omitempty"`
 }
 
 type Request struct {
-	Model              string    `json:"model"`
-	Messages           []Message `json:"messages"`
-	Temperature        *float32  `json:"temperature,omitempty"`
-	MaxTokens          *int      `json:"max_tokens,omitempty"`
-	ProviderExtensions any       `json:"provider_extensions,omitempty"` // Escape hatch
+	// Model is set by Model.Chat and Model.Stream from the bound model handle.
+	// Callers using Model directly can leave this empty; any value is ignored.
+	Model              string      `json:"model"`
+	Messages           []Message   `json:"messages"`
+	Temperature        *float32    `json:"temperature,omitempty"`
+	MaxTokens          *int        `json:"max_tokens,omitempty"`
+	Tools              []Tool      `json:"tools,omitempty"`
+	ToolChoice         *ToolChoice `json:"tool_choice,omitempty"`
+	ParallelToolCalls  *bool       `json:"parallel_tool_calls,omitempty"`
+	ProviderExtensions any         `json:"provider_extensions,omitempty"` // Escape hatch
 }
 
 type Usage struct {
@@ -46,12 +55,16 @@ type Response struct {
 type StreamChunk struct {
 	Text             string
 	ReasoningContent string
-	FinishReason     FinishReason
+	// ToolCalls is emitted as a complete snapshot when FinishReason is FinishReasonToolUse.
+	// Consumers should keep the latest non-empty snapshot rather than append chunks.
+	ToolCalls    []ToolCall
+	FinishReason FinishReason
 }
 
 type Stream interface {
 	Recv() (StreamChunk, error)
-	Usage() Usage // Returns the total usage (valid after EOF)
+	// Usage returns the total usage after Recv returns io.EOF. Before EOF, it may be zero.
+	Usage() Usage
 	Close() error
 }
 
@@ -64,6 +77,38 @@ type ToolCall struct {
 type ToolFunction struct {
 	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
+}
+
+type ToolType string
+
+const (
+	ToolTypeFunction ToolType = "function"
+)
+
+type Tool struct {
+	Type     ToolType       `json:"type"`
+	Function ToolDefinition `json:"function"`
+}
+
+type ToolDefinition struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description,omitempty"`
+	Parameters  jsonschema.Schema `json:"parameters"`
+	Strict      bool              `json:"strict,omitempty"`
+}
+
+type ToolChoiceMode string
+
+const (
+	ToolChoiceAuto     ToolChoiceMode = "auto"
+	ToolChoiceNone     ToolChoiceMode = "none"
+	ToolChoiceRequired ToolChoiceMode = "required"
+	ToolChoiceFunction ToolChoiceMode = "function"
+)
+
+type ToolChoice struct {
+	Mode ToolChoiceMode `json:"mode"`
+	Name string         `json:"name,omitempty"`
 }
 
 type FinishReason string

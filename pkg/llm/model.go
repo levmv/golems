@@ -8,6 +8,11 @@ import (
 )
 
 // Model represents a bound provider, model ID, and default execution parameters.
+//
+// Decorator order is significant. Calls such as
+// model.WithRetries(...).WithUsageTracking(...).WithLogging(...) log and track one
+// logical call, while placing logging or tracking before retries observes each
+// attempt.
 type Model struct {
 	client      Client
 	modelID     string
@@ -84,28 +89,14 @@ func (m Model) WithUsageTracking(tracker UsageTracker) Model {
 
 // Chat executes the request using the Model's defaults, allowing Request overrides.
 func (m Model) Chat(ctx context.Context, req Request) (*Response, error) {
-
-	temp := m.temperature
-	if req.Temperature != nil {
-		temp = req.Temperature
-	}
-
-	maxTokens := m.maxTokens
-	if req.MaxTokens != nil {
-		maxTokens = req.MaxTokens
-	}
-
-	internalReq := &Request{
-		Model:       m.modelID,
-		Messages:    req.Messages,
-		Temperature: temp,
-		MaxTokens:   maxTokens,
-	}
-
-	return m.client.Chat(ctx, internalReq)
+	return m.client.Chat(ctx, m.buildRequest(req))
 }
 
 func (m Model) Stream(ctx context.Context, req Request) (Stream, error) {
+	return m.client.Stream(ctx, m.buildRequest(req))
+}
+
+func (m Model) buildRequest(req Request) *Request {
 	temp := m.temperature
 	if req.Temperature != nil {
 		temp = req.Temperature
@@ -116,12 +107,14 @@ func (m Model) Stream(ctx context.Context, req Request) (Stream, error) {
 		maxTokens = req.MaxTokens
 	}
 
-	internalReq := &Request{
-		Model:       m.modelID,
-		Messages:    req.Messages,
-		Temperature: temp,
-		MaxTokens:   maxTokens,
+	return &Request{
+		Model:              m.modelID,
+		Messages:           req.Messages,
+		Temperature:        temp,
+		MaxTokens:          maxTokens,
+		Tools:              req.Tools,
+		ToolChoice:         req.ToolChoice,
+		ParallelToolCalls:  req.ParallelToolCalls,
+		ProviderExtensions: req.ProviderExtensions,
 	}
-
-	return m.client.Stream(ctx, internalReq)
 }

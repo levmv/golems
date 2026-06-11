@@ -38,7 +38,7 @@ type ChatMessagePart struct {
 }
 
 type ChatCompletionMessage struct {
-	Role         string `json:"role"`
+	Role         Role   `json:"role"`
 	Content      string `json:"content,omitempty"`
 	Refusal      string `json:"refusal,omitempty"`
 	MultiContent []ChatMessagePart
@@ -49,7 +49,7 @@ type ChatCompletionMessage struct {
 	// - https://github.com/openai/openai-cookbook/blob/main/examples/How_to_count_tokens_with_tiktoken.ipynb
 	Name string `json:"name,omitempty"`
 
-	// This property is used for the "reasoning" feature supported by deepseek-reasoner
+	// This property is used for reasoning-capable models.
 	// which is not in the official documentation.
 	// the doc from deepseek:
 	// - https://api-docs.deepseek.com/api/create-chat-completion#responses
@@ -251,8 +251,8 @@ type Tool struct {
 }
 
 type ToolChoice struct {
-	Type     ToolType     `json:"type"`
-	Function ToolFunction `json:"function,omitempty"`
+	Type     ToolType      `json:"type"`
+	Function *ToolFunction `json:"function,omitempty"`
 }
 
 type ToolFunction struct {

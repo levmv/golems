@@ -3,11 +3,11 @@ package openai
 type Role string
 
 const (
-	RoleSystem    = "system"
-	RoleUser      = "user"
-	RoleAssistant = "assistant"
-	RoleTool      = "tool"
-	RoleDeveloper = "developer"
+	RoleSystem    Role = "system"
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
+	RoleDeveloper Role = "developer"
 )
 
 type FinishReason string

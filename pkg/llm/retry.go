@@ -44,7 +44,8 @@ func (r *retryClient) Chat(ctx context.Context, req *Request) (*Response, error)
 func (r *retryClient) Stream(ctx context.Context, req *Request) (Stream, error) {
 	var err error
 	for i := 0; i <= r.maxRetries; i++ {
-		stream, err := r.client.Stream(ctx, req)
+		var stream Stream
+		stream, err = r.client.Stream(ctx, req)
 		if err == nil {
 			return stream, nil
 		}
@@ -89,7 +90,23 @@ func isRetryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	// TODO: handle 400 Bad Request, 401 Unauthorized, maybe something else
+	if errors.Is(err, ErrInvalidRequest) {
+		return false
+	}
+
+	var llmErr *Error
+	if errors.As(err, &llmErr) {
+		switch {
+		case llmErr.StatusCode == 0:
+			return true
+		case llmErr.StatusCode == 408 || llmErr.StatusCode == 429:
+			return true
+		case llmErr.StatusCode >= 500:
+			return true
+		default:
+			return false
+		}
+	}
 
 	return true
 }

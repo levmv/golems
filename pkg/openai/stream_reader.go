@@ -92,6 +92,9 @@ func (stream *streamReader) processLines() ([]byte, error) {
 
 			if string(value) == "[DONE]" {
 				stream.isFinished = true
+				if respErr := stream.unmarshalError(); respErr != nil {
+					return nil, fmt.Errorf("api error: %w", respErr)
+				}
 				return nil, io.EOF
 			}
 

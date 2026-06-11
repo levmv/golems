@@ -11,6 +11,8 @@ import (
 	"strings"
 )
 
+const maxErrorResponseBodyBytes = 1 << 20
+
 // Client is an OpenAI API client.
 type Client struct {
 	config ClientConfig
@@ -24,7 +26,7 @@ func NewClient(authToken string) *Client {
 // NewClientWithConfig creates new OpenAI API client for specified config.
 func NewClientWithConfig(config ClientConfig) *Client {
 	if config.HTTPClient == nil {
-		config.HTTPClient = http.DefaultClient
+		config.HTTPClient = DefaultHTTPClient()
 	}
 	if config.Header == nil {
 		config.Header = make(http.Header)
@@ -123,7 +125,7 @@ func isFailureStatusCode(resp *http.Response) bool {
 }
 
 func (c *Client) handleErrorResp(resp *http.Response) error {
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxErrorResponseBodyBytes))
 	if err != nil {
 		return fmt.Errorf("error, reading response body: %w", err)
 	}
