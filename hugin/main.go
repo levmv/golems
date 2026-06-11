@@ -73,11 +73,31 @@ func main() {
 		handleRun(eng, args[1], log)
 
 	case "note":
+		if len(args) >= 2 && args[1] == "rm" {
+			if len(args) != 3 {
+				log.Error("Usage: hugin note rm <note_id>")
+				os.Exit(1)
+			}
+			noteID, err := parsePositiveInt64(args[2])
+			if err != nil {
+				log.Error("Usage: hugin note rm <note_id>: %v", err)
+				os.Exit(1)
+			}
+			handleNoteRemove(db, noteID, log)
+			break
+		}
 		if len(args) < 3 {
-			log.Error("Usage: hugin note <check_id> <content>")
+			log.Error("Usage: hugin note <check_id> <content> OR hugin note rm <note_id>")
 			os.Exit(1)
 		}
 		handleNote(db, args[1], strings.Join(args[2:], " "), log)
+
+	case "notes":
+		if len(args) != 2 {
+			log.Error("Usage: hugin notes <check_id>")
+			os.Exit(1)
+		}
+		handleNotes(db, args[1], log)
 
 	case "runs":
 		checkID, limit, err := parseRunsArgs(args[1:])
@@ -106,7 +126,7 @@ func main() {
 		handleDaemon(eng, log)
 
 	case "status":
-		handleStatus(cfg, db, eng, log)
+		handleStatus(cfg, db, log)
 
 	case "deploy":
 		targetName, opts, err := parseDeployArgs(args[1:])
@@ -185,6 +205,17 @@ func parseRunsArgs(args []string) (string, int, error) {
 
 func parsePositiveInt(s string) (int, error) {
 	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("must be positive")
+	}
+	return n, nil
+}
+
+func parsePositiveInt64(s string) (int64, error) {
+	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return 0, err
 	}
@@ -299,6 +330,40 @@ func handleNote(db *storage.DB, checkID, content string, log logger.Logger) {
 	log.Info("Note added for check '%s'", checkID)
 }
 
+func handleNotes(db *storage.DB, checkID string, log logger.Logger) {
+	notes, err := db.NoteRecords(checkID)
+	if err != nil {
+		log.Error("Failed to fetch notes: %v", err)
+		os.Exit(1)
+	}
+	if len(notes) == 0 {
+		log.Info("No notes found for check '%s'", checkID)
+		return
+	}
+
+	fmt.Printf("Notes for %s:\n", checkID)
+	fmt.Printf("%-6s %-20s %s\n", "ID", "CREATED", "CONTENT")
+	for _, note := range notes {
+		fmt.Printf("%-6d %-20s %s\n",
+			note.ID,
+			note.CreatedAt.Format("2006-01-02 15:04"),
+			note.Content,
+		)
+	}
+}
+
+func handleNoteRemove(db *storage.DB, noteID int64, log logger.Logger) {
+	if err := db.DeleteNote(noteID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			log.Error("Note %d not found", noteID)
+			os.Exit(1)
+		}
+		log.Error("Failed to delete note: %v", err)
+		os.Exit(1)
+	}
+	log.Info("Note %d deleted", noteID)
+}
+
 func handleRuns(db *storage.DB, checkID string, limit int, log logger.Logger) {
 	runs, err := db.RecentRuns(checkID, limit)
 	if err != nil {
@@ -320,12 +385,8 @@ func handleRuns(db *storage.DB, checkID string, limit int, log logger.Logger) {
 	}
 }
 
-func handleStatus(cfg *config.Config, db *storage.DB, eng *engine.Engine, log logger.Logger) {
+func handleStatus(cfg *config.Config, db *storage.DB, log logger.Logger) {
 	ctx := context.Background()
-	if err := eng.SyncSchedule(ctx); err != nil {
-		log.Warn("Failed to sync scheduled checks: %v", err)
-	}
-
 	incidents, err := db.ActiveIncidents()
 	if err != nil {
 		log.Error("Failed to fetch incidents: %v", err)
@@ -570,6 +631,8 @@ func printUsage() {
 	fmt.Println("  hugin deploy <target>          Install bundled collectors on an SSH target")
 	fmt.Println("  hugin doctor                   Check config, env, and SSH readiness")
 	fmt.Println("  hugin note <check_id> <msg>     Add an operator note for a check")
+	fmt.Println("  hugin notes <check_id>          List operator notes for a check")
+	fmt.Println("  hugin note rm <note_id>         Delete an operator note")
 	fmt.Println("  hugin runs <check_id>           Show recent runs for a check")
 	fmt.Println("  hugin resolve <incident_id>     Manually resolve an incident")
 	fmt.Println("  hugin validate                  Validate configuration")

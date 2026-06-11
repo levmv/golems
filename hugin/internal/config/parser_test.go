@@ -66,6 +66,13 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 			wantErr: "defined more than once",
 		},
 		{
+			name: "invalid check id",
+			mutate: func(cfg *Config) {
+				cfg.Checks[0].ID = "disk web'1"
+			},
+			wantErr: "invalid ID",
+		},
+		{
 			name: "unknown target",
 			mutate: func(cfg *Config) {
 				cfg.Checks[0].Target = "missing"

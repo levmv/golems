@@ -37,6 +37,39 @@ func TestCheckReportsReadyMinimalConfig(t *testing.T) {
 	assertItem(t, report, StatusWarn, "notify", "no notifier configured")
 }
 
+func TestCheckUsesProviderAwareLLMTokenFallback(t *testing.T) {
+	clearLLMEnv(t)
+	t.Setenv("OPENAI_API_KEY", "token")
+	cfg := testConfig(t)
+	cfg.LLM.Provider = "deepseek"
+	cfg.LLM.Model = "deepseek-test"
+
+	report := Check(context.Background(), cfg, Options{CheckSSH: false})
+
+	assertItem(t, report, StatusFail, "llm", "DEEPSEEK_API_KEY")
+	if hasItem(report, StatusOK, "llm", "OPENAI_API_KEY") {
+		t.Fatalf("doctor accepted OPENAI_API_KEY for deepseek: %+v", report.Items)
+	}
+
+	t.Setenv("DEEPSEEK_API_KEY", "token")
+	report = Check(context.Background(), cfg, Options{CheckSSH: false})
+	assertItem(t, report, StatusOK, "llm", "DEEPSEEK_API_KEY")
+}
+
+func TestCheckAllowsOllamaWithoutToken(t *testing.T) {
+	clearLLMEnv(t)
+	cfg := testConfig(t)
+	cfg.LLM.Provider = "ollama"
+	cfg.LLM.Model = "llama-test"
+
+	report := Check(context.Background(), cfg, Options{CheckSSH: false})
+
+	if report.HasFailures() {
+		t.Fatalf("expected no failures, got %+v", report.Items)
+	}
+	assertItem(t, report, StatusOK, "llm", "no token required")
+}
+
 func TestCheckReportsSSHPrerequisites(t *testing.T) {
 	clearLLMEnv(t)
 	t.Setenv("OPENAI_API_KEY", "token")
@@ -68,12 +101,14 @@ func TestCheckReportsInvalidCheckDetails(t *testing.T) {
 
 	assertItem(t, report, StatusFail, "check disk", "analysis.history")
 	assertItem(t, report, StatusFail, "check disk", "alert.cooldown")
-	assertItem(t, report, StatusWarn, "check disk", "HUGIN_CHECK_ID=disk")
+	if hasItem(report, StatusWarn, "check disk", "HUGIN_CHECK_ID") {
+		t.Fatalf("doctor should not warn about runner-managed HUGIN_CHECK_ID: %+v", report.Items)
+	}
 }
 
 func clearLLMEnv(t *testing.T) {
 	t.Helper()
-	for _, env := range []string{"OPENAI_API_KEY", "HUGIN_LLM_TOKEN", "DEEPSEEK_API_KEY"} {
+	for _, env := range []string{"OPENAI_API_KEY", "HUGIN_LLM_TOKEN", "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY"} {
 		t.Setenv(env, "")
 	}
 }
@@ -106,6 +141,15 @@ func assertItem(t *testing.T, report Report, status Status, area string, contain
 		}
 	}
 	t.Fatalf("missing item status=%s area=%s contains=%q in %+v", status, area, contains, report.Items)
+}
+
+func hasItem(report Report, status Status, area string, contains string) bool {
+	for _, item := range report.Items {
+		if item.Status == status && item.Area == area && containsIn(item.Message, contains) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsIn(s, substr string) bool {

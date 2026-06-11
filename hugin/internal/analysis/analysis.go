@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -72,7 +73,8 @@ func (a *Analyzer) Analyze(ctx context.Context, in Input) (*Result, error) {
 	a.logger.Debug("Analysis response for %s: %s", in.CheckID, truncate(resp.Content, 500))
 
 	var result Result
-	if err := json.Unmarshal([]byte(resp.Content), &result); err != nil {
+	payload := extractJSONObject(resp.Content)
+	if err := json.Unmarshal([]byte(payload), &result); err != nil {
 		return nil, fmt.Errorf("failed to parse LLM response as JSON: %w (raw: %s)", err, truncate(resp.Content, 200))
 	}
 	if err := result.Validate(); err != nil {
@@ -138,7 +140,8 @@ func buildPrompt(in Input) string {
 	}
 	if len(in.Current.Metrics) > 0 {
 		b.WriteString("Metrics:\n")
-		for k, v := range in.Current.Metrics {
+		for _, k := range sortedAnyMapKeys(in.Current.Metrics) {
+			v := in.Current.Metrics[k]
 			b.WriteString(fmt.Sprintf("  %s: %v\n", k, v))
 		}
 	}
@@ -157,7 +160,8 @@ func buildPrompt(in Input) string {
 		historySummary := computeHistorySummary(in.History)
 		if len(historySummary) > 0 {
 			b.WriteString("Metric ranges (min / avg / max):\n")
-			for k, s := range historySummary {
+			for _, k := range sortedSummaryKeys(historySummary) {
+				s := historySummary[k]
 				b.WriteString(fmt.Sprintf("  %s: %.2f / %.2f / %.2f\n", k, s.Min, s.Avg, s.Max))
 			}
 		}
@@ -167,7 +171,8 @@ func buildPrompt(in Input) string {
 			statusCounts[r.Status]++
 		}
 		b.WriteString("Status distribution:\n")
-		for status, count := range statusCounts {
+		for _, status := range sortedIntMapKeys(statusCounts) {
+			count := statusCounts[status]
 			b.WriteString(fmt.Sprintf("  %s: %d\n", status, count))
 		}
 		b.WriteString("\n")
@@ -209,6 +214,56 @@ func buildPrompt(in Input) string {
 	}
 
 	return b.String()
+}
+
+func extractJSONObject(text string) string {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "```") {
+		lines := strings.Split(text, "\n")
+		if len(lines) >= 2 {
+			if strings.HasPrefix(strings.TrimSpace(lines[0]), "```") {
+				lines = lines[1:]
+			}
+			if len(lines) > 0 && strings.HasPrefix(strings.TrimSpace(lines[len(lines)-1]), "```") {
+				lines = lines[:len(lines)-1]
+			}
+			text = strings.TrimSpace(strings.Join(lines, "\n"))
+		}
+	}
+
+	start := strings.IndexByte(text, '{')
+	end := strings.LastIndexByte(text, '}')
+	if start >= 0 && end >= start {
+		return text[start : end+1]
+	}
+	return text
+}
+
+func sortedAnyMapKeys(values map[string]any) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedSummaryKeys(values map[string]metricSummary) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func sortedIntMapKeys(values map[string]int) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 type metricSummary struct {

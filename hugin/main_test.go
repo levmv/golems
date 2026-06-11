@@ -42,6 +42,19 @@ func TestParseResolveNote(t *testing.T) {
 	}
 }
 
+func TestParsePositiveInt64(t *testing.T) {
+	got, err := parsePositiveInt64("42")
+	if err != nil {
+		t.Fatalf("parsePositiveInt64 returned error: %v", err)
+	}
+	if got != 42 {
+		t.Fatalf("got %d, want 42", got)
+	}
+	if _, err := parsePositiveInt64("0"); err == nil {
+		t.Fatal("parsePositiveInt64(0) error = nil, want error")
+	}
+}
+
 func TestParseDoctorArgs(t *testing.T) {
 	opts, err := parseDoctorArgs([]string{"--no-ssh", "--ssh-timeout=2s"})
 	if err != nil {

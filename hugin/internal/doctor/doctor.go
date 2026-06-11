@@ -89,35 +89,17 @@ func checkDataDir(report *Report, dataDir string) {
 }
 
 func checkLLM(report *Report, llm config.LLMConfig) {
-	for _, env := range llmTokenEnvCandidates(llm) {
+	if !config.LLMProviderNeedsToken(llm.Provider) {
+		report.add(StatusOK, "llm", "no token required for %s/%s", llm.Provider, llm.Model)
+		return
+	}
+	for _, env := range config.LLMTokenEnvCandidates(llm) {
 		if os.Getenv(env) != "" {
 			report.add(StatusOK, "llm", "token found in %s for %s/%s", env, llm.Provider, llm.Model)
 			return
 		}
 	}
-	report.add(StatusFail, "llm", "no LLM token found; set one of: %s", strings.Join(llmTokenEnvCandidates(llm), ", "))
-}
-
-func llmTokenEnvCandidates(llm config.LLMConfig) []string {
-	seen := make(map[string]struct{})
-	var out []string
-	add := func(env string) {
-		if env == "" {
-			return
-		}
-		if _, ok := seen[env]; ok {
-			return
-		}
-		seen[env] = struct{}{}
-		out = append(out, env)
-	}
-	add(llm.APIKeyEnv)
-	add("HUGIN_LLM_TOKEN")
-	if llm.Provider == "deepseek" {
-		add("DEEPSEEK_API_KEY")
-	}
-	add("OPENAI_API_KEY")
-	return out
+	report.add(StatusFail, "llm", "no LLM token found; set one of: %s", strings.Join(config.LLMTokenEnvCandidates(llm), ", "))
 }
 
 func checkNotifiers(report *Report, notifiers map[string]config.Notifier) {
@@ -252,18 +234,7 @@ func checkChecks(report *Report, checks []config.Check) {
 		if check.Alert.RepeatAfter < 0 {
 			report.add(StatusFail, area, "alert.repeat_after must not be negative")
 		}
-		if looksLikeBundledCollector(check.Command) && !strings.Contains(check.Command, "HUGIN_CHECK_ID") {
-			report.add(StatusWarn, area, "bundled collector command should set HUGIN_CHECK_ID=%s", check.ID)
-		}
 	}
-}
-
-func looksLikeBundledCollector(command string) bool {
-	return strings.Contains(command, "/collectors/disk") ||
-		strings.Contains(command, "/collectors/load") ||
-		strings.Contains(command, "/collectors/memory") ||
-		strings.Contains(command, "/collectors/network") ||
-		strings.Contains(command, "/collectors/systemd-service")
 }
 
 func parseHistoryWindow(s string) time.Duration {

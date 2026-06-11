@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -21,6 +22,8 @@ import (
 	"github.com/levmv/golems/hugin/internal/config"
 	"github.com/levmv/golems/hugin/internal/models"
 )
+
+const diagnosticOutputLimit = 4096
 
 type Runner struct {
 	mu         sync.Mutex
@@ -62,9 +65,9 @@ func (r *Runner) Execute(ctx context.Context, check config.Check, target config.
 
 	var err error
 	if isLocalTarget(target) {
-		err = executeLocal(ctx, check.Command, &stdout, &stderr)
+		err = executeLocal(ctx, check.ID, check.Command, &stdout, &stderr)
 	} else {
-		err = r.executeSSH(ctx, check.Command, target, &stdout, &stderr)
+		err = r.executeSSH(ctx, check.ID, check.Command, target, &stdout, &stderr)
 	}
 
 	// Even if the command failed (e.g., non-zero exit code), we still want to try
@@ -72,13 +75,13 @@ func (r *Runner) Execute(ctx context.Context, check config.Check, target config.
 	var output models.CollectorOutput
 	if parseErr := parseCollectorOutput(stdout.Bytes(), &output); parseErr != nil {
 		// If it's not valid JSON, preserve the failure as structured collector output.
-		return collectorErrorOutput(check.ID, "EXECUTION_FAILED", fmt.Sprintf("Command failed or returned invalid JSON. Err: %v, Stderr: %s, Stdout: %s", err, stderr.String(), stdout.String())), fmt.Errorf("failed to parse collector output: %w", parseErr)
+		return collectorErrorOutput(check.ID, "EXECUTION_FAILED", fmt.Sprintf("Command failed or returned invalid JSON. Err: %v, Stderr: %s, Stdout: %s", err, truncateDiagnostic(stderr.String()), truncateDiagnostic(stdout.String()))), fmt.Errorf("failed to parse collector output: %w", parseErr)
 	}
 
 	if err != nil {
 		output.Errors = append(output.Errors, models.ErrorDetail{
 			Code:    "EXECUTION_NON_ZERO",
-			Message: fmt.Sprintf("Collector exited with an error: %v. Stderr: %s", err, stderr.String()),
+			Message: fmt.Sprintf("Collector exited with an error: %v. Stderr: %s", err, truncateDiagnostic(stderr.String())),
 		})
 		if output.Status == models.StatusOK {
 			output.Status = models.StatusError
@@ -99,7 +102,18 @@ func (r *Runner) Execute(ctx context.Context, check config.Check, target config.
 }
 
 func isLocalTarget(target config.Target) bool {
-	return target.Type == "local" || target.Host == "" || target.Host == "localhost" || target.Host == "127.0.0.1"
+	return target.Type == "local"
+}
+
+func truncateDiagnostic(s string) string {
+	if len(s) <= diagnosticOutputLimit {
+		return s
+	}
+	n := diagnosticOutputLimit
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "...(truncated)"
 }
 
 func collectorErrorOutput(checkID, code, message string) *models.CollectorOutput {
@@ -165,19 +179,21 @@ func isScalarMetric(value any) bool {
 	}
 }
 
-func executeLocal(ctx context.Context, command string, stdout, stderr *bytes.Buffer) error {
+func executeLocal(ctx context.Context, checkID, command string, stdout, stderr *bytes.Buffer) error {
 	// Execute via bash to allow for simple shell pipelines in the command string
 	cmd := exec.CommandContext(ctx, "bash", "-c", command)
+	cmd.Env = append(os.Environ(), "HUGIN_CHECK_ID="+checkID)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
 }
 
-func (r *Runner) executeSSH(ctx context.Context, command string, target config.Target, stdout, stderr *bytes.Buffer) error {
+func (r *Runner) executeSSH(ctx context.Context, checkID, command string, target config.Target, stdout, stderr *bytes.Buffer) error {
 	client, reused, err := r.sshClient(ctx, target)
 	if err != nil {
 		return err
 	}
+	command = withCheckIDEnv(checkID, command)
 	err = runSSHSession(ctx, client, command, stdout, stderr)
 	if reused && isDeadCachedClientSessionError(err) {
 		r.evictSSHClient(target, client)
@@ -188,6 +204,10 @@ func (r *Runner) executeSSH(ctx context.Context, command string, target config.T
 		return runSSHSession(ctx, client, command, stdout, stderr)
 	}
 	return err
+}
+
+func withCheckIDEnv(checkID, command string) string {
+	return "HUGIN_CHECK_ID=" + checkID + " " + command
 }
 
 func (r *Runner) sshClient(ctx context.Context, target config.Target) (*ssh.Client, bool, error) {

@@ -102,8 +102,8 @@ installed on monitored Linux hosts at:
 ```
 
 They are small Bash scripts for disk, memory, load, systemd service state, and
-TCP reachability. Each script uses `HUGIN_CHECK_ID` so its JSON `check` field can
-match the configured Hugin check ID.
+TCP reachability. Hugin sets `HUGIN_CHECK_ID` automatically before running each
+check so bundled collectors can emit a matching JSON `check` field.
 
 Minimal example:
 ```json
@@ -147,7 +147,7 @@ Example using a bundled collector:
 checks:
   - id: root_disk_web1
     target: web1
-    command: HUGIN_CHECK_ID=root_disk_web1 HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
+    command: HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
     schedule: "*/15 * * * *"
     timeout: 10s
 ```
@@ -192,6 +192,8 @@ hugin doctor
 
 # Add an operator note (stored in SQLite)
 hugin note disk_web1 "80-86% disk usage is normal if stable."
+hugin notes disk_web1
+hugin note rm 12
 
 # Show recent runs
 hugin runs disk_web1

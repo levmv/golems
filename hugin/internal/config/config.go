@@ -27,6 +27,37 @@ type LLMConfig struct {
 	MaxInputRuns int     `yaml:"max_input_runs"`
 }
 
+func LLMTokenEnvCandidates(llm LLMConfig) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(env string) {
+		if env == "" {
+			return
+		}
+		if _, ok := seen[env]; ok {
+			return
+		}
+		seen[env] = struct{}{}
+		out = append(out, env)
+	}
+
+	add(llm.APIKeyEnv)
+	add("HUGIN_LLM_TOKEN")
+	switch llm.Provider {
+	case "deepseek":
+		add("DEEPSEEK_API_KEY")
+	case "openai":
+		add("OPENAI_API_KEY")
+	case "openrouter":
+		add("OPENROUTER_API_KEY")
+	}
+	return out
+}
+
+func LLMProviderNeedsToken(provider string) bool {
+	return provider != "ollama"
+}
+
 type Target struct {
 	Type                  string `yaml:"type,omitempty"` // "local" or "ssh"
 	Host                  string `yaml:"host,omitempty"`

@@ -208,6 +208,13 @@ type IncidentRecord struct {
 	ResolutionNote string
 }
 
+type NoteRecord struct {
+	ID        int64
+	CheckID   string
+	Content   string
+	CreatedAt time.Time
+}
+
 // InsertRun saves a completed execution into the database and returns the new row ID.
 func (d *DB) InsertRun(checkID string, output *models.CollectorOutput, durationMs int64) (int64, error) {
 	metricsJSON, _ := json.Marshal(output.Metrics)
@@ -477,8 +484,24 @@ func (d *DB) ResolveIncident(incidentID, note string) error {
 
 // Notes returns all notes for a check.
 func (d *DB) Notes(checkID string) ([]string, error) {
+	records, err := d.NoteRecords(checkID)
+	if err != nil {
+		return nil, err
+	}
+	notes := make([]string, len(records))
+	for i, note := range records {
+		notes[i] = note.Content
+	}
+	return notes, nil
+}
+
+// NoteRecords returns all notes for a check with IDs and timestamps.
+func (d *DB) NoteRecords(checkID string) ([]NoteRecord, error) {
 	rows, err := d.sql.Query(
-		`SELECT content FROM notes WHERE check_id = ? ORDER BY created_at ASC`,
+		`SELECT id, check_id, content, created_at
+		   FROM notes
+		  WHERE check_id = ?
+		  ORDER BY created_at ASC, id ASC`,
 		checkID,
 	)
 	if err != nil {
@@ -486,13 +509,13 @@ func (d *DB) Notes(checkID string) ([]string, error) {
 	}
 	defer rows.Close()
 
-	var notes []string
+	var notes []NoteRecord
 	for rows.Next() {
-		var content string
-		if err := rows.Scan(&content); err != nil {
+		var note NoteRecord
+		if err := rows.Scan(&note.ID, &note.CheckID, &note.Content, &note.CreatedAt); err != nil {
 			return nil, err
 		}
-		notes = append(notes, content)
+		notes = append(notes, note)
 	}
 	return notes, rows.Err()
 }
@@ -504,6 +527,22 @@ func (d *DB) AddNote(checkID, content string) error {
 		checkID, content, time.Now().UTC(),
 	)
 	return err
+}
+
+// DeleteNote removes a note by ID.
+func (d *DB) DeleteNote(noteID int64) error {
+	res, err := d.sql.Exec(`DELETE FROM notes WHERE id = ?`, noteID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // DeleteOldRuns removes runs older than the cutoff, except those tied to active incidents.
@@ -533,8 +572,12 @@ func scanRuns(rows *sql.Rows) ([]RunRecord, error) {
 		if err := rows.Scan(&r.ID, &r.CheckID, &r.Status, &metricsJSON, &errorsJSON, &r.DurationMs, &r.Window, &r.CreatedAt); err != nil {
 			return nil, err
 		}
-		json.Unmarshal([]byte(metricsJSON), &r.Metrics)
-		json.Unmarshal([]byte(errorsJSON), &r.Errors)
+		if err := json.Unmarshal([]byte(metricsJSON), &r.Metrics); err != nil {
+			return nil, fmt.Errorf("decode run %d metrics: %w", r.ID, err)
+		}
+		if err := json.Unmarshal([]byte(errorsJSON), &r.Errors); err != nil {
+			return nil, fmt.Errorf("decode run %d errors: %w", r.ID, err)
+		}
 		runs = append(runs, r)
 	}
 	return runs, rows.Err()

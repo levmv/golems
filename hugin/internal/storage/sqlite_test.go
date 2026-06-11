@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,6 +166,29 @@ func TestRunsSinceExcludingOmitsCurrentRun(t *testing.T) {
 	}
 }
 
+func TestRecentRunsReturnsCorruptJSONError(t *testing.T) {
+	db := newTestDB(t)
+	runID, err := db.InsertRun("disk", &models.CollectorOutput{
+		Check:   "disk",
+		Status:  models.StatusOK,
+		Metrics: map[string]any{"used_pct": 70.0},
+	}, 100)
+	if err != nil {
+		t.Fatalf("InsertRun returned error: %v", err)
+	}
+	if _, err := db.sql.Exec(`UPDATE runs SET metrics = ? WHERE id = ?`, "{bad json", runID); err != nil {
+		t.Fatalf("corrupt metrics update returned error: %v", err)
+	}
+
+	_, err = db.RecentRuns("disk", 1)
+	if err == nil {
+		t.Fatal("RecentRuns error = nil, want corrupt JSON error")
+	}
+	if !strings.Contains(err.Error(), "decode run") || !strings.Contains(err.Error(), "metrics") {
+		t.Fatalf("RecentRuns error = %v", err)
+	}
+}
+
 func TestIncidentNotificationState(t *testing.T) {
 	db := newTestDB(t)
 	notifiedAt := time.Date(2026, 5, 9, 12, 0, 0, 0, time.UTC)
@@ -214,6 +238,53 @@ func TestActiveIncidentsReturnsOpenIncidentsOldestFirst(t *testing.T) {
 	}
 	if len(incidents) != 1 || incidents[0].ID != "inc-first" {
 		t.Fatalf("expected only inc-first active, got %+v", incidents)
+	}
+}
+
+func TestNotesCanBeListedAndDeleted(t *testing.T) {
+	db := newTestDB(t)
+
+	if err := db.AddNote("disk", "first"); err != nil {
+		t.Fatalf("AddNote first returned error: %v", err)
+	}
+	if err := db.AddNote("disk", "second"); err != nil {
+		t.Fatalf("AddNote second returned error: %v", err)
+	}
+	if err := db.AddNote("memory", "other"); err != nil {
+		t.Fatalf("AddNote other returned error: %v", err)
+	}
+
+	records, err := db.NoteRecords("disk")
+	if err != nil {
+		t.Fatalf("NoteRecords returned error: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("records len = %d, want 2: %+v", len(records), records)
+	}
+	if records[0].Content != "first" || records[1].Content != "second" {
+		t.Fatalf("records = %+v", records)
+	}
+
+	contents, err := db.Notes("disk")
+	if err != nil {
+		t.Fatalf("Notes returned error: %v", err)
+	}
+	if len(contents) != 2 || contents[0] != "first" || contents[1] != "second" {
+		t.Fatalf("contents = %+v", contents)
+	}
+
+	if err := db.DeleteNote(records[0].ID); err != nil {
+		t.Fatalf("DeleteNote returned error: %v", err)
+	}
+	records, err = db.NoteRecords("disk")
+	if err != nil {
+		t.Fatalf("second NoteRecords returned error: %v", err)
+	}
+	if len(records) != 1 || records[0].Content != "second" {
+		t.Fatalf("records after delete = %+v", records)
+	}
+	if err := db.DeleteNote(records[0].ID + 1000); err != sql.ErrNoRows {
+		t.Fatalf("DeleteNote missing error = %v, want sql.ErrNoRows", err)
 	}
 }
 

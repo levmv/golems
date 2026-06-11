@@ -1,9 +1,11 @@
 package analysis
 
 import (
+	"strings"
 	"testing"
 	"unicode/utf8"
 
+	"github.com/levmv/golems/hugin/internal/models"
 	"github.com/levmv/golems/hugin/internal/storage"
 )
 
@@ -39,6 +41,48 @@ func TestComputeHistorySummarySkipsNonNumericMetrics(t *testing.T) {
 	}
 }
 
+func TestExtractJSONObjectToleratesFencesAndProse(t *testing.T) {
+	got := extractJSONObject("Here is the result:\n```json\n{\"severity\":\"normal\",\"summary\":\"ok\"}\n```\nThanks")
+	want := `{"severity":"normal","summary":"ok"}`
+	if got != want {
+		t.Fatalf("extractJSONObject() = %q, want %q", got, want)
+	}
+}
+
+func TestBuildPromptSortsMapBackedSections(t *testing.T) {
+	prompt := buildPrompt(Input{
+		CheckID: "disk",
+		Current: &models.CollectorOutput{
+			Check:  "disk",
+			Status: models.StatusOK,
+			Metrics: map[string]any{
+				"z_metric": 1.0,
+				"a_metric": 2.0,
+			},
+		},
+		History: []storage.RunRecord{
+			{
+				Status: "warning",
+				Metrics: map[string]any{
+					"z_metric": 3.0,
+					"a_metric": 4.0,
+				},
+			},
+			{
+				Status: "ok",
+				Metrics: map[string]any{
+					"z_metric": 5.0,
+					"a_metric": 6.0,
+				},
+			},
+		},
+	})
+
+	assertBefore(t, prompt, "  a_metric: 2", "  z_metric: 1")
+	assertBefore(t, prompt, "  a_metric: 4.00", "  z_metric: 3.00")
+	assertBefore(t, prompt, "  ok: 1", "  warning: 1")
+}
+
 func TestTruncatePreservesUTF8(t *testing.T) {
 	got := truncate("абвгд", 5)
 	if !utf8.ValidString(got) {
@@ -46,5 +90,17 @@ func TestTruncatePreservesUTF8(t *testing.T) {
 	}
 	if got != "аб..." {
 		t.Fatalf("expected truncate to cut at rune boundary, got %q", got)
+	}
+}
+
+func assertBefore(t *testing.T, text, first, second string) {
+	t.Helper()
+	firstIdx := strings.Index(text, first)
+	secondIdx := strings.Index(text, second)
+	if firstIdx < 0 || secondIdx < 0 {
+		t.Fatalf("prompt missing %q or %q:\n%s", first, second, text)
+	}
+	if firstIdx > secondIdx {
+		t.Fatalf("%q appears after %q:\n%s", first, second, text)
 	}
 }

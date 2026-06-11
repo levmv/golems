@@ -26,7 +26,7 @@ Replace any existing unrestricted `authorized_keys` entry for the same public ke
 or use a dedicated Hugin key. The wrapper accepts plain commands of the form:
 
 ```bash
-HUGIN_CHECK_ID=disk_web1 HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
+HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
 ```
 
 It only allows `HUGIN_*` environment assignments and bundled collector names,
@@ -47,13 +47,13 @@ restrict,command="HUGIN_COLLECTOR_DIR=/home/hugin/collectors /home/hugin/collect
 - collector failures should use `status: "error"` with an `errors` array.
 - stderr is for diagnostics only; Hugin reads JSON from stdout.
 
-The bundled scripts use `HUGIN_CHECK_ID` so one script can back many checks:
+Hugin sets `HUGIN_CHECK_ID` automatically, so one script can back many checks:
 
 ```yaml
 checks:
   - id: root_disk_web1
     target: web1
-    command: HUGIN_CHECK_ID=root_disk_web1 HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
+    command: HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
     schedule: "*/15 * * * *"
     timeout: 10s
 ```
@@ -65,7 +65,7 @@ checks:
 Reports usage for one filesystem path. Set `HUGIN_DISK_PATH`; default is `/`.
 
 ```bash
-HUGIN_CHECK_ID=root_disk HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
+HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
 ```
 
 `memory`
@@ -73,7 +73,7 @@ HUGIN_CHECK_ID=root_disk HUGIN_DISK_PATH=/ /opt/hugin/collectors/disk
 Reports memory and swap facts from `/proc/meminfo`.
 
 ```bash
-HUGIN_CHECK_ID=memory /opt/hugin/collectors/memory
+/opt/hugin/collectors/memory
 ```
 
 `load`
@@ -81,7 +81,7 @@ HUGIN_CHECK_ID=memory /opt/hugin/collectors/memory
 Reports Linux load average, process counts, and CPU count.
 
 ```bash
-HUGIN_CHECK_ID=load /opt/hugin/collectors/load
+/opt/hugin/collectors/load
 ```
 
 `systemd-service`
@@ -90,7 +90,7 @@ Reports systemd unit state. Set `HUGIN_SYSTEMD_UNIT` or pass the unit as the
 first argument.
 
 ```bash
-HUGIN_CHECK_ID=nginx_service HUGIN_SYSTEMD_UNIT=nginx.service /opt/hugin/collectors/systemd-service
+HUGIN_SYSTEMD_UNIT=nginx.service /opt/hugin/collectors/systemd-service
 ```
 
 `network`
@@ -99,5 +99,5 @@ Checks whether a TCP host and port are reachable using Bash `/dev/tcp`. Set
 `HUGIN_HOST`, `HUGIN_PORT`, and optionally `HUGIN_TIMEOUT_SEC`.
 
 ```bash
-HUGIN_CHECK_ID=site_https HUGIN_HOST=example.com HUGIN_PORT=443 /opt/hugin/collectors/network
+HUGIN_HOST=example.com HUGIN_PORT=443 /opt/hugin/collectors/network
 ```

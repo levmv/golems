@@ -97,20 +97,24 @@ func TestSyncCheckTasksReconcilesConfigWithTaskQueue(t *testing.T) {
 		t.Fatalf("expected updated schedule, got %+v", task.Schedule)
 	}
 
+	if task.Timeout != 0 {
+		t.Fatalf("scheduled task timeout = %s, want no task-level timeout", task.Timeout)
+	}
+
 	countingStore.resetDeleteCounts()
 	cfg.Checks[0].Timeout = 2 * time.Second
 	if err := eng.syncCheckTasks(ctx, q); err != nil {
 		t.Fatalf("timeout syncCheckTasks returned error: %v", err)
 	}
-	if got := countingStore.deleteCount(taskID); got != 1 {
-		t.Fatalf("timeout change should delete deterministic task ID once, got %d deletes", got)
+	if got := countingStore.deleteCount(taskID); got != 0 {
+		t.Fatalf("timeout change should not replace scheduled task, got %d deletes", got)
 	}
 	task, err = store.Get(ctx, taskID)
 	if err != nil {
 		t.Fatalf("timeout Get returned error: %v", err)
 	}
-	if task.Timeout != 2*time.Second {
-		t.Fatalf("expected updated timeout, got %s", task.Timeout)
+	if task.Timeout != 0 {
+		t.Fatalf("scheduled task timeout = %s, want no task-level timeout", task.Timeout)
 	}
 
 	countingStore.resetDeleteCounts()
@@ -186,6 +190,38 @@ func TestNewCachesAnalysisModelConfiguration(t *testing.T) {
 	}
 	if _, err := eng.model(); err != nil {
 		t.Fatalf("expected cached model after env was unset, got %v", err)
+	}
+}
+
+func TestBuildModelUsesProviderAwareTokenFallback(t *testing.T) {
+	clearEngineLLMEnv(t)
+	t.Setenv("OPENAI_API_KEY", "openai-token")
+
+	cfg := testConfig()
+	cfg.LLM = config.LLMConfig{
+		Provider: "deepseek",
+		Model:    "deepseek-test",
+	}
+	if _, err := buildModel(cfg); err == nil {
+		t.Fatal("buildModel() error = nil, want missing deepseek token error")
+	}
+
+	t.Setenv("DEEPSEEK_API_KEY", "deepseek-token")
+	if _, err := buildModel(cfg); err != nil {
+		t.Fatalf("buildModel() with DEEPSEEK_API_KEY error = %v", err)
+	}
+}
+
+func TestBuildModelAllowsOllamaWithoutToken(t *testing.T) {
+	clearEngineLLMEnv(t)
+
+	cfg := testConfig()
+	cfg.LLM = config.LLMConfig{
+		Provider: "ollama",
+		Model:    "llama-test",
+	}
+	if _, err := buildModel(cfg); err != nil {
+		t.Fatalf("buildModel() with ollama error = %v", err)
 	}
 }
 
@@ -331,6 +367,13 @@ func testConfig() *config.Config {
 				Timeout:  time.Second,
 			},
 		},
+	}
+}
+
+func clearEngineLLMEnv(t *testing.T) {
+	t.Helper()
+	for _, env := range []string{"HUGIN_LLM_TOKEN", "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"} {
+		t.Setenv(env, "")
 	}
 }
 

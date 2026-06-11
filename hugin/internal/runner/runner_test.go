@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/levmv/golems/hugin/internal/config"
 	"github.com/levmv/golems/hugin/internal/models"
@@ -24,6 +25,16 @@ func TestExecuteLocalValidCollectorOutput(t *testing.T) {
 	}
 	if output.Metrics["used_pct"] != 72.5 {
 		t.Fatalf("expected used_pct metric, got %#v", output.Metrics["used_pct"])
+	}
+}
+
+func TestExecuteLocalInjectsCheckID(t *testing.T) {
+	output, err := Execute(context.Background(), checkWithCommand(`printf '{"check":"%s","status":"ok"}\n' "$HUGIN_CHECK_ID"`), localTarget())
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if output.Check != "disk" {
+		t.Fatalf("output check = %q, want disk", output.Check)
 	}
 }
 
@@ -117,6 +128,23 @@ func TestExecuteLocalInvalidJSONReturnsStructuredError(t *testing.T) {
 	}
 }
 
+func TestExecuteLocalInvalidJSONTruncatesDiagnostics(t *testing.T) {
+	output, err := Execute(context.Background(), checkWithCommand(`printf '%05000d' 1; printf '%05000d' 2 >&2`), localTarget())
+	if err == nil {
+		t.Fatalf("Execute returned nil error")
+	}
+	if len(output.Errors) != 1 {
+		t.Fatalf("errors = %#v", output.Errors)
+	}
+	message := output.Errors[0].Message
+	if len(message) > diagnosticOutputLimit*2+512 {
+		t.Fatalf("diagnostic message too long: %d bytes", len(message))
+	}
+	if !strings.Contains(message, "...(truncated)") {
+		t.Fatalf("diagnostic message did not mention truncation: %q", message)
+	}
+}
+
 func TestExecuteLocalRejectsWrongCheckID(t *testing.T) {
 	output, err := Execute(context.Background(), checkWithCommand(`printf '%s\n' '{"check":"other","status":"ok"}'`), localTarget())
 	if err == nil {
@@ -156,6 +184,33 @@ func TestHostKeyCallbackCanBeExplicitlyInsecure(t *testing.T) {
 	}
 }
 
+func TestIsLocalTargetTrustsExplicitType(t *testing.T) {
+	if !isLocalTarget(config.Target{Type: "local", Host: "localhost"}) {
+		t.Fatal("local target was not treated as local")
+	}
+	if isLocalTarget(config.Target{Type: "ssh", Host: "localhost"}) {
+		t.Fatal("ssh localhost target was treated as local")
+	}
+}
+
+func TestWithCheckIDEnvPrefixesSSHCommand(t *testing.T) {
+	got := withCheckIDEnv("disk-web1", "/opt/hugin/collectors/disk")
+	want := "HUGIN_CHECK_ID=disk-web1 /opt/hugin/collectors/disk"
+	if got != want {
+		t.Fatalf("command = %q, want %q", got, want)
+	}
+}
+
+func TestTruncateDiagnosticPreservesUTF8(t *testing.T) {
+	got := truncateDiagnostic(strings.Repeat("я", diagnosticOutputLimit))
+	if !strings.Contains(got, "...(truncated)") {
+		t.Fatalf("expected truncation marker, got %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateDiagnostic returned invalid UTF-8")
+	}
+}
+
 func checkWithCommand(command string) config.Check {
 	return config.Check{
 		ID:      "disk",
@@ -165,7 +220,7 @@ func checkWithCommand(command string) config.Check {
 }
 
 func localTarget() config.Target {
-	return config.Target{Host: "localhost"}
+	return config.Target{Type: "local", Host: "localhost"}
 }
 
 func hasErrorCode(errors []models.ErrorDetail, code string) bool {

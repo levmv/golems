@@ -3,11 +3,14 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/levmv/golems/pkg/tasks"
 	"gopkg.in/yaml.v3"
 )
+
+var checkIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 
 // Load reads a YAML configuration file from the given path and parses it.
 func Load(path string) (*Config, error) {
@@ -87,6 +90,9 @@ func (c *Config) Validate() error {
 	for i, check := range c.Checks {
 		if check.ID == "" {
 			return fmt.Errorf("check at index %d is missing an ID", i)
+		}
+		if !checkIDPattern.MatchString(check.ID) {
+			return fmt.Errorf("check %q has invalid ID: only letters, digits, underscore, dot, and dash are allowed", check.ID)
 		}
 		if _, exists := seenChecks[check.ID]; exists {
 			return fmt.Errorf("check '%s' is defined more than once", check.ID)

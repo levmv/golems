@@ -24,6 +24,7 @@ import (
 
 const checkJobKind = "hugin.check"
 const analysisIssueSuffix = ":analysis"
+const defaultAnalysisTimeout = 2 * time.Minute
 
 type Engine struct {
 	cfg               *config.Config
@@ -351,13 +352,11 @@ func checkTasks(cfg *config.Config, seedAt time.Time) map[string]desiredCheckTas
 				Payload:  payload,
 				Group:    check.Target,
 				Schedule: tasks.CronFrom(check.Schedule, cfg.App.Timezone, seedAt),
-				Timeout:  check.Timeout,
 				Metadata: map[string]string{
-					"check_id":   check.ID,
-					"target":     check.Target,
-					"schedule":   check.Schedule,
-					"timezone":   cfg.App.Timezone,
-					"timeout_ns": strconv.FormatInt(int64(check.Timeout), 10),
+					"check_id": check.ID,
+					"target":   check.Target,
+					"schedule": check.Schedule,
+					"timezone": cfg.App.Timezone,
 				},
 			},
 		}
@@ -404,7 +403,10 @@ func (e *Engine) runAnalysis(ctx context.Context, check *config.Check, checkID s
 
 	analyzer := analysis.New(model, e.log)
 	target := e.cfg.Targets[check.Target]
-	result, err := analyzer.Analyze(ctx, analysis.Input{
+	analysisCtx, cancel := context.WithTimeout(ctx, defaultAnalysisTimeout)
+	defer cancel()
+
+	result, err := analyzer.Analyze(analysisCtx, analysis.Input{
 		CheckID:        checkID,
 		Current:        output,
 		History:        history,
@@ -527,20 +529,14 @@ func (e *Engine) model() (llm.Model, error) {
 func buildModel(cfg *config.Config) (llm.Model, error) {
 	provider := cfg.LLM.Provider
 	token := ""
-	if cfg.LLM.APIKeyEnv != "" {
-		token = os.Getenv(cfg.LLM.APIKeyEnv)
+	for _, env := range config.LLMTokenEnvCandidates(cfg.LLM) {
+		if value := os.Getenv(env); value != "" {
+			token = value
+			break
+		}
 	}
-	if token == "" {
-		token = os.Getenv("HUGIN_LLM_TOKEN")
-	}
-	if token == "" && provider == "deepseek" {
-		token = os.Getenv("DEEPSEEK_API_KEY")
-	}
-	if token == "" {
-		token = os.Getenv("OPENAI_API_KEY")
-	}
-	if token == "" {
-		return llm.Model{}, fmt.Errorf("no LLM API token found. Set HUGIN_LLM_TOKEN, DEEPSEEK_API_KEY, or OPENAI_API_KEY")
+	if token == "" && config.LLMProviderNeedsToken(provider) {
+		return llm.Model{}, fmt.Errorf("no LLM API token found for provider %q. Set one of: %s", provider, strings.Join(config.LLMTokenEnvCandidates(cfg.LLM), ", "))
 	}
 
 	reg := llm.NewRegistry().WithProvider(provider, token)
