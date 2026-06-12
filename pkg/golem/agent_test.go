@@ -415,6 +415,89 @@ func TestNegativeMaxToolIterationsAllowsUnlimitedToolLoops(t *testing.T) {
 	}
 }
 
+func TestReplyToolLoopLimitForcesFinalReplyAndCommitsTurn(t *testing.T) {
+	firstCall := llm.ToolCall{
+		ID: "call_1",
+		Function: llm.ToolFunction{
+			Name:      "echo",
+			Arguments: `{"n":1}`,
+		},
+	}
+	secondCall := llm.ToolCall{
+		ID: "call_2",
+		Function: llm.ToolFunction{
+			Name:      "echo",
+			Arguments: `{"n":2}`,
+		},
+	}
+	model := &fakeModel{
+		chatResponses: []*llm.Response{
+			{ToolCalls: []llm.ToolCall{firstCall}, FinishReason: llm.FinishReasonToolUse, Usage: llm.Usage{TotalTokens: 2}},
+			{ToolCalls: []llm.ToolCall{secondCall}, FinishReason: llm.FinishReasonToolUse, Usage: llm.Usage{TotalTokens: 3}},
+			{Content: "final without tools", FinishReason: llm.FinishReasonStop, Usage: llm.Usage{TotalTokens: 5}},
+		},
+	}
+	tool := FunctionTool("echo", "Echo", jsonschema.Object(nil), func(_ context.Context, call llm.ToolCall) (ToolResult, error) {
+		return ToolResult{Content: call.Function.Arguments}, nil
+	})
+
+	agent, err := New(Config{
+		Model:             model,
+		Tools:             []Tool{tool},
+		MaxToolIterations: 1,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	turn, err := agent.Reply(context.Background(), "loop")
+	if err != nil {
+		t.Fatalf("Reply() error = %v", err)
+	}
+	if turn.Reply != "final without tools" {
+		t.Fatalf("reply = %q, want final without tools", turn.Reply)
+	}
+	if turn.Usage.TotalTokens != 10 {
+		t.Fatalf("usage = %d, want 10", turn.Usage.TotalTokens)
+	}
+	if len(turn.Steps) != 3 {
+		t.Fatalf("steps len = %d, want 3", len(turn.Steps))
+	}
+	if turn.Steps[2].Kind != StepToolError || turn.Steps[2].ToolName != "echo" || turn.Steps[2].ToolCallID != "call_2" {
+		t.Fatalf("limit step = %#v", turn.Steps[2])
+	}
+	if !strings.Contains(turn.Steps[2].Error, "tool iteration limit reached") {
+		t.Fatalf("limit step error = %q", turn.Steps[2].Error)
+	}
+	if len(model.requests) != 3 {
+		t.Fatalf("requests len = %d, want 3", len(model.requests))
+	}
+	finalReq := model.requests[2]
+	if finalReq.ToolChoice == nil || finalReq.ToolChoice.Mode != llm.ToolChoiceNone {
+		t.Fatalf("final request tool choice = %#v, want none", finalReq.ToolChoice)
+	}
+	if got := finalReq.Messages[len(finalReq.Messages)-2]; got.Role != llm.RoleTool || got.ToolCallID != "call_1" {
+		t.Fatalf("final request penultimate message = %#v, want first tool result", got)
+	}
+	if got := finalReq.Messages[len(finalReq.Messages)-1]; got.Role != llm.RoleUser || !strings.Contains(got.Content, "Tool call limit reached") {
+		t.Fatalf("final request last message = %#v, want tool limit prompt", got)
+	}
+
+	history := agent.History()
+	if len(history) != 4 {
+		t.Fatalf("history len = %d, want 4: %#v", len(history), history)
+	}
+	if history[1].Role != llm.RoleAI || len(history[1].ToolCalls) != 1 {
+		t.Fatalf("history first assistant tool call = %#v", history[1])
+	}
+	if history[2].Role != llm.RoleTool || history[2].ToolCallID != "call_1" {
+		t.Fatalf("history first tool result = %#v", history[2])
+	}
+	if history[3].Role != llm.RoleAI || history[3].Content != "final without tools" {
+		t.Fatalf("history final reply = %#v", history[3])
+	}
+}
+
 func TestEmptyInput(t *testing.T) {
 	agent, err := New(Config{Model: &fakeModel{}})
 	if err != nil {
@@ -619,6 +702,104 @@ func TestStreamExecutesToolLoopAndEmitsToolEvents(t *testing.T) {
 	}
 	if events[4].Kind != EventDone || events[4].Usage.TotalTokens != 7 {
 		t.Fatalf("done event = %#v", events[4])
+	}
+}
+
+func TestStreamToolLoopLimitForcesFinalReplyAndCommitsTurn(t *testing.T) {
+	firstCall := llm.ToolCall{
+		ID: "call_1",
+		Function: llm.ToolFunction{
+			Name:      "echo",
+			Arguments: `{"n":1}`,
+		},
+	}
+	secondCall := llm.ToolCall{
+		ID: "call_2",
+		Function: llm.ToolFunction{
+			Name:      "echo",
+			Arguments: `{"n":2}`,
+		},
+	}
+	firstStream := &fakeStream{
+		chunks: []llm.StreamChunk{{ToolCalls: []llm.ToolCall{firstCall}, FinishReason: llm.FinishReasonToolUse}},
+		usage:  llm.Usage{TotalTokens: 2},
+	}
+	secondStream := &fakeStream{
+		chunks: []llm.StreamChunk{{ToolCalls: []llm.ToolCall{secondCall}, FinishReason: llm.FinishReasonToolUse}},
+		usage:  llm.Usage{TotalTokens: 3},
+	}
+	model := &fakeModel{
+		streams: []*fakeStream{firstStream, secondStream},
+		chatResponses: []*llm.Response{{
+			Content:      "final without tools",
+			FinishReason: llm.FinishReasonStop,
+			Usage:        llm.Usage{TotalTokens: 5},
+		}},
+	}
+	tool := FunctionTool("echo", "Echo", jsonschema.Object(nil), func(_ context.Context, call llm.ToolCall) (ToolResult, error) {
+		return ToolResult{Content: call.Function.Arguments}, nil
+	})
+
+	agent, err := New(Config{
+		Model:             model,
+		Tools:             []Tool{tool},
+		MaxToolIterations: 1,
+	})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	var events []StreamEvent
+	turn, err := agent.Stream(context.Background(), "loop", func(ev StreamEvent) {
+		events = append(events, ev)
+	})
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if turn.Reply != "final without tools" {
+		t.Fatalf("reply = %q, want final without tools", turn.Reply)
+	}
+	if turn.Usage.TotalTokens != 10 {
+		t.Fatalf("usage = %d, want 10", turn.Usage.TotalTokens)
+	}
+	if len(model.requests) != 3 {
+		t.Fatalf("requests len = %d, want 3", len(model.requests))
+	}
+	finalReq := model.requests[2]
+	if finalReq.ToolChoice == nil || finalReq.ToolChoice.Mode != llm.ToolChoiceNone {
+		t.Fatalf("final request tool choice = %#v, want none", finalReq.ToolChoice)
+	}
+	if got := finalReq.Messages[len(finalReq.Messages)-1]; got.Role != llm.RoleUser || !strings.Contains(got.Content, "Tool call limit reached") {
+		t.Fatalf("final request last message = %#v, want tool limit prompt", got)
+	}
+	if !firstStream.closed || !secondStream.closed {
+		t.Fatalf("streams were not closed: first=%v second=%v", firstStream.closed, secondStream.closed)
+	}
+	if len(turn.Steps) != 3 {
+		t.Fatalf("steps len = %d, want 3", len(turn.Steps))
+	}
+	if turn.Steps[2].Kind != StepToolError || turn.Steps[2].ToolCallID != "call_2" {
+		t.Fatalf("limit step = %#v", turn.Steps[2])
+	}
+	if len(events) != 5 {
+		t.Fatalf("events len = %d, want 5: %#v", len(events), events)
+	}
+	if events[2].Kind != EventToolError || events[2].Step.ToolCallID != "call_2" {
+		t.Fatalf("limit event = %#v", events[2])
+	}
+	if events[3].Kind != EventTextDelta || events[3].Text != "final without tools" {
+		t.Fatalf("final text event = %#v", events[3])
+	}
+	if events[4].Kind != EventDone || events[4].Usage.TotalTokens != 10 {
+		t.Fatalf("done event = %#v", events[4])
+	}
+
+	history := agent.History()
+	if len(history) != 4 {
+		t.Fatalf("history len = %d, want 4: %#v", len(history), history)
+	}
+	if history[3].Role != llm.RoleAI || history[3].Content != "final without tools" {
+		t.Fatalf("history final reply = %#v", history[3])
 	}
 }
 

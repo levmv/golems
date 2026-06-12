@@ -19,6 +19,7 @@ const (
 	UnlimitedHistoryMessages  = -1
 	UnlimitedToolIterations   = -1
 	DefaultSystemPrompt       = `You are Golem, a compact CLI agent. Be direct, practical, and curious. Help the user think and act, keep enough context from the conversation, and ask for clarification only when it is needed.`
+	toolLimitFinalPrompt      = "Tool call limit reached. Do not call any more tools; answer with what you have, and be explicit about anything you could not verify."
 )
 
 var ErrEmptyInput = errors.New("empty input")
@@ -369,10 +370,10 @@ func (a *Agent) replyLoop(ctx context.Context, input string, state turnState) (*
 			Content:   strings.TrimSpace(resp.Content),
 			ToolCalls: resp.ToolCalls,
 		}
-		messages = append(messages, assistantMsg)
-		turnMessages = append(turnMessages, assistantMsg)
 
 		if len(resp.ToolCalls) == 0 {
+			messages = append(messages, assistantMsg)
+			turnMessages = append(turnMessages, assistantMsg)
 			return &Turn{
 				Input:        input,
 				Reply:        strings.TrimSpace(resp.Content),
@@ -385,9 +386,38 @@ func (a *Agent) replyLoop(ctx context.Context, input string, state turnState) (*
 		}
 
 		if state.maxToolIterations >= 0 && toolIterations >= state.maxToolIterations {
-			return nil, fmt.Errorf("golem: tool loop limit reached after %d iterations", state.maxToolIterations)
+			steps = append(steps, toolLimitSteps(resp.ToolCalls, state.maxToolIterations)...)
+
+			resp, err := a.finalReply(ctx, messages, state)
+			if err != nil {
+				return nil, err
+			}
+
+			usage = addUsage(usage, resp.Usage)
+			appendReasoning(&reasoning, resp.ReasoningContent)
+			finishReason = resp.FinishReason
+
+			assistantMsg := llm.Message{
+				Role:    llm.RoleAI,
+				Content: strings.TrimSpace(resp.Content),
+			}
+			messages = append(messages, assistantMsg)
+			turnMessages = append(turnMessages, assistantMsg)
+
+			return &Turn{
+				Input:        input,
+				Reply:        strings.TrimSpace(resp.Content),
+				Reasoning:    strings.TrimSpace(reasoning.String()),
+				Steps:        steps,
+				Usage:        usage,
+				FinishReason: finishReason,
+				messages:     turnMessages,
+			}, nil
 		}
 		toolIterations++
+
+		messages = append(messages, assistantMsg)
+		turnMessages = append(turnMessages, assistantMsg)
 
 		toolMessages, toolSteps, err := executeToolCalls(ctx, resp.ToolCalls, state.toolExecutors, nil)
 		if err != nil {
@@ -437,18 +467,49 @@ func (a *Agent) streamLoop(ctx context.Context, input string, state turnState, e
 			Content:   strings.TrimSpace(streamReply),
 			ToolCalls: toolCalls,
 		}
-		messages = append(messages, assistantMsg)
-		turnMessages = append(turnMessages, assistantMsg)
 
 		if len(toolCalls) == 0 {
+			messages = append(messages, assistantMsg)
+			turnMessages = append(turnMessages, assistantMsg)
 			finalReply = streamReply
 			break
 		}
 
 		if state.maxToolIterations >= 0 && toolIterations >= state.maxToolIterations {
-			return nil, fmt.Errorf("golem: tool loop limit reached after %d iterations", state.maxToolIterations)
+			limitSteps := toolLimitSteps(toolCalls, state.maxToolIterations)
+			steps = append(steps, limitSteps...)
+			if emit != nil {
+				for _, step := range limitSteps {
+					emit(StreamEvent{Kind: EventToolError, Step: step})
+				}
+			}
+
+			resp, err := a.finalReply(ctx, messages, state)
+			if err != nil {
+				return nil, err
+			}
+
+			reply := strings.TrimSpace(resp.Content)
+			if emit != nil && resp.Content != "" {
+				emit(StreamEvent{Kind: EventTextDelta, Text: resp.Content})
+			}
+			usage = addUsage(usage, resp.Usage)
+			appendReasoning(&reasoning, resp.ReasoningContent)
+			finishReason = resp.FinishReason
+
+			assistantMsg := llm.Message{
+				Role:    llm.RoleAI,
+				Content: reply,
+			}
+			messages = append(messages, assistantMsg)
+			turnMessages = append(turnMessages, assistantMsg)
+			finalReply = reply
+			break
 		}
 		toolIterations++
+
+		messages = append(messages, assistantMsg)
+		turnMessages = append(turnMessages, assistantMsg)
 
 		toolMessages, toolSteps, err := executeToolCalls(ctx, toolCalls, state.toolExecutors, emit)
 		if err != nil {
@@ -468,6 +529,38 @@ func (a *Agent) streamLoop(ctx context.Context, input string, state turnState, e
 		FinishReason: finishReason,
 		messages:     turnMessages,
 	}, nil
+}
+
+func (a *Agent) finalReply(ctx context.Context, messages []llm.Message, state turnState) (*llm.Response, error) {
+	toolChoice := llm.ToolChoice{Mode: llm.ToolChoiceNone}
+	finalMessages := make([]llm.Message, 0, len(messages)+1)
+	finalMessages = append(finalMessages, messages...)
+	finalMessages = append(finalMessages, llm.Message{
+		Role:    llm.RoleUser,
+		Content: toolLimitFinalPrompt,
+	})
+
+	return a.model.Chat(ctx, llm.Request{
+		Messages:          finalMessages,
+		Tools:             state.tools,
+		ToolChoice:        &toolChoice,
+		ParallelToolCalls: state.parallelToolCalls,
+	})
+}
+
+func toolLimitSteps(calls []llm.ToolCall, maxIterations int) []Step {
+	steps := make([]Step, 0, len(calls))
+	err := fmt.Sprintf("tool iteration limit reached after %d iterations", maxIterations)
+	for _, call := range calls {
+		steps = append(steps, Step{
+			Kind:       StepToolError,
+			ToolName:   call.Function.Name,
+			ToolCallID: call.ID,
+			Arguments:  call.Function.Arguments,
+			Error:      err,
+		})
+	}
+	return steps
 }
 
 func consumeStream(stream llm.Stream, emit StreamFunc) (string, string, []llm.ToolCall, llm.FinishReason, error) {
