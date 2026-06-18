@@ -46,13 +46,16 @@ type SendMessageParams struct {
 }
 
 type EditMessageTextParams struct {
-	ChatID          int64                 `json:"chat_id"`
-	MessageID       int                   `json:"message_id,omitempty"`
-	InlineMessageID string                `json:"inline_message_id,omitempty"`
-	Text            string                `json:"text"`
-	ParseMode       string                `json:"parse_mode,omitempty"`
-	Entities        []MessageEntity       `json:"entities,omitempty"`
-	ReplyMarkup     *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	ChatID          int64  `json:"chat_id"`
+	MessageID       int    `json:"message_id,omitempty"`
+	InlineMessageID string `json:"inline_message_id,omitempty"`
+	// Text is the new plain text (1-4096 chars). Required unless RichMessage is set.
+	Text      string          `json:"text,omitempty"`
+	ParseMode string          `json:"parse_mode,omitempty"`
+	Entities  []MessageEntity `json:"entities,omitempty"`
+	// RichMessage is the new rich content. Mutually exclusive with Text.
+	RichMessage *InputRichMessage     `json:"rich_message,omitempty"`
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 }
 
 type AnswerCallbackQueryParams struct {

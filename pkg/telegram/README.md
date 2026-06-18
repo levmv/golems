@@ -4,7 +4,7 @@ Simple Telegram Bot API wrapper for Go.
 
 **Key Features:**
 - **Per-Chat Concurrency:** Updates are processed concurrently across different chats, but *sequentially* within a single chat.
-- **LLM Ready:** Built-in standard-Markdown to Telegram-HTML conversion, automatic message chunking for large outputs (>4000 chars), and live message streaming.
+- **LLM Ready:** **Rich Messages** (Bot API 10.1) — send raw LLM Markdown verbatim (headings, lists, tables, blockquotes, code, math), plus legacy standard-Markdown→HTML conversion, automatic chunking, and live streaming.
 - **Robust:** Built-in panic recovery per handler, automatic fallback for malformed markdown, and automated typing indicators.
 
 ---
@@ -89,24 +89,49 @@ Wraps `context.Context` and the incoming update.
 - `c.Reply(text string) error`: Sends standard text back to `c.ChatID`.
 - `c.ReplyChunked(text string) ([]*telegram.Message, error)`: Safely parses standard LLM Markdown, converts to HTML, and splits into multiple messages if length > 4000 chars.
 
-### 4. LLM Streaming & Long Responses
+### 4. Rich Messages (Bot API 10.1) — preferred for LLM output
 
-**Message Chunking:**
-LLMs output standard Markdown and long texts. Telegram requires HTML or MarkdownV2 and limits to 4096 characters.
+Telegram now accepts **Rich Markdown** (GitHub Flavored Markdown, up to 32768 chars)
+directly via `sendRichMessage`. LLM output can be passed through **verbatim** — no
+conversion, no `can't parse entities` fallback — and headings, lists, task lists,
+tables, blockquotes (incl. expandable), spoilers, code blocks and math all render.
+
 ```go
-// Safely converts Markdown -> HTML, avoids breaking code blocks, and splits >4000 chars.
-messages, err := c.ReplyChunked("... very long LLM output ...") 
+// Sends raw LLM markdown untouched; splits only if it exceeds 32768 chars.
+messages, err := c.ReplyRich("# Report\n\n- item\n- item\n\n> quote\n\n| a | b |\n|---|---|\n| 1 | 2 |")
+
+// Lower-level:
+bot.SendRichMessage(ctx, &telegram.SendRichMessageParams{
+    ChatID:      chatID,
+    RichMessage: telegram.InputRichMessage{Markdown: md},
+})
 ```
 
-**Live Message Streaming:**
-For token-by-token streaming. *Note: Uses `sendMessageDraft` API extension. Throttles network requests to max 1 per 500ms automatically.*
+**Live Rich Streaming:** `sendRichMessageDraft` is purpose-built for streaming
+AI replies — updates with the same `draftID` are animated. The draft is an
+ephemeral ~30s preview; `Close` persists the final message. Throttled to 1
+network update / 500ms.
 ```go
-draft := bot.StartMessageStream(c, c.ChatID, 12345) // 12345 = arbitrary draft ID
-defer draft.Close(c) // Closes draft, finalizes markdown, and converts to regular message
+stream := bot.StartRichStream(c.ChatID, 12345) // 12345 = arbitrary non-zero draft ID
+defer stream.Close(c)                          // persists final message, draft expires
+for tok := range tokens {
+    stream.Write(c, tok)                       // raw markdown; mid-token breakage is harmless
+}
+```
 
-draft.Write(c, "Tokens ")
-draft.Write(c, "arriving ")
-draft.Write(c, "live...")
+### 4b. Legacy: Markdown→HTML chunking
+
+For older clients / non-rich sends. Converts standard Markdown to HTML, keeps
+code blocks intact, and splits at the 4096-char limit.
+```go
+messages, err := c.ReplyChunked("... very long LLM output ...")
+```
+
+**Plain draft streaming** (non-rich, `sendMessageDraft`):
+```go
+draft := bot.StartMessageStream(c, c.ChatID, 12345)
+defer draft.Close(c) // finalizes markdown and converts to a regular HTML message
+draft.Write(c, "Tokens arriving live...")
 ```
 
 **Typing Indicators:**

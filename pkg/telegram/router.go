@@ -28,7 +28,7 @@ func (r *route) match(c *Context) bool {
 		return c.Command == r.pattern
 
 	case RouteText:
-		if upd.Message == nil || upd.Message.Text == "" {
+		if upd.Message == nil || upd.Message.PlainText() == "" {
 			return false
 		}
 		// If command, don't trigger normal text handlers

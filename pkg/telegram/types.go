@@ -19,11 +19,27 @@ type Message struct {
 	Date            int             `json:"date"`
 	Text            string          `json:"text,omitempty"`
 	Entities        []MessageEntity `json:"entities,omitempty"`
+	RichMessage     *RichMessage    `json:"rich_message,omitempty"`
 	Photo           []PhotoSize     `json:"photo,omitempty"`
 	Document        *Document       `json:"document,omitempty"`
 	Caption         string          `json:"caption,omitempty"`
 	CaptionEntities []MessageEntity `json:"caption_entities,omitempty"`
 	ReplyToMessage  *Message        `json:"reply_to_message,omitempty"`
+}
+
+// PlainText returns the text-like content of the message. For rich messages it
+// returns a readable plain-text projection of the rich block tree.
+func (m *Message) PlainText() string {
+	if m == nil {
+		return ""
+	}
+	if m.Text != "" {
+		return m.Text
+	}
+	if m.RichMessage != nil {
+		return m.RichMessage.PlainText()
+	}
+	return m.Caption
 }
 
 type User struct {
