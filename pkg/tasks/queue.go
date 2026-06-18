@@ -145,6 +145,12 @@ func (q *Queue) Get(ctx context.Context, id string) (Task, error) {
 	return q.store.Get(ctx, id)
 }
 
+// List returns tasks matching filter, ordered by next_run_at ascending with
+// exhausted tasks last.
+func (q *Queue) List(ctx context.Context, filter ListFilter) ([]Task, error) {
+	return q.store.List(ctx, filter)
+}
+
 func (q *Queue) Delete(ctx context.Context, id string) (bool, error) {
 	if id == "" {
 		return false, fmt.Errorf("%w: task ID is required", ErrInvalid)

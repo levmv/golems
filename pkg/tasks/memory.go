@@ -44,6 +44,24 @@ func (s *MemoryStore) Get(ctx context.Context, id string) (Task, error) {
 	return task.clone(), nil
 }
 
+func (s *MemoryStore) List(ctx context.Context, filter ListFilter) ([]Task, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]Task, 0)
+	for _, task := range s.tasks {
+		if filter.Kind != "" && task.Kind != filter.Kind {
+			continue
+		}
+		if filter.Group != "" && task.Group != filter.Group {
+			continue
+		}
+		out = append(out, task.clone())
+	}
+	sortTasksByNextRun(out)
+	return out, nil
+}
+
 func (s *MemoryStore) Delete(ctx context.Context, id string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

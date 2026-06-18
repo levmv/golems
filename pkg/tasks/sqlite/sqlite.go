@@ -145,6 +145,44 @@ func (s *Store) Get(ctx context.Context, id string) (tasks.Task, error) {
 	return task, nil
 }
 
+func (s *Store) List(ctx context.Context, filter tasks.ListFilter) ([]tasks.Task, error) {
+	var conds []string
+	var args []any
+	if filter.Kind != "" {
+		conds = append(conds, "kind = ?")
+		args = append(args, filter.Kind)
+	}
+	if filter.Group != "" {
+		conds = append(conds, "task_group = ?")
+		args = append(args, filter.Group)
+	}
+	where := ""
+	if len(conds) > 0 {
+		where = "WHERE " + strings.Join(conds, " AND ")
+	}
+
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`SELECT %s FROM %s %s`,
+		taskColumns(), quoteIdentifier(s.table), where), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]tasks.Task, 0)
+	for rows.Next() {
+		task, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, task)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sortTasksByNextRun(out)
+	return out, nil
+}
+
 func (s *Store) Delete(ctx context.Context, id string) (bool, error) {
 	if id == "" {
 		return false, fmt.Errorf("%w: task ID is required", tasks.ErrInvalid)

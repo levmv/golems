@@ -308,6 +308,72 @@ func Run(t *testing.T, newStore NewStore) {
 			t.Fatalf("expected ErrNotFound after delete, got %v", err)
 		}
 	})
+
+	t.Run("list filters and orders by next run", func(t *testing.T) {
+		ctx := context.Background()
+		store := newStore(t)
+		now := testTime()
+
+		mustEnqueue(t, store, listTask("b-early", "reminder", "g1", ptr(now.Add(-2*time.Minute))))
+		mustEnqueue(t, store, listTask("a-late", "reminder", "g1", ptr(now.Add(-time.Minute))))
+		mustEnqueue(t, store, listTask("c-future", "agent", "g2", ptr(now.Add(time.Hour))))
+		mustEnqueue(t, store, listTask("d-exhausted", "reminder", "g1", nil))
+		// Same next_run_at: ordering must fall back to ID ascending.
+		mustEnqueue(t, store, listTask("tie-b", "tie", "g3", ptr(now)))
+		mustEnqueue(t, store, listTask("tie-a", "tie", "g3", ptr(now)))
+
+		all, err := store.List(ctx, tasks.ListFilter{})
+		if err != nil {
+			t.Fatalf("List(empty) returned error: %v", err)
+		}
+		assertTaskIDs(t, all, []string{"b-early", "a-late", "tie-a", "tie-b", "c-future", "d-exhausted"})
+
+		byKind, err := store.List(ctx, tasks.ListFilter{Kind: "reminder"})
+		if err != nil {
+			t.Fatalf("List(kind) returned error: %v", err)
+		}
+		assertTaskIDs(t, byKind, []string{"b-early", "a-late", "d-exhausted"})
+
+		byGroup, err := store.List(ctx, tasks.ListFilter{Group: "g2"})
+		if err != nil {
+			t.Fatalf("List(group) returned error: %v", err)
+		}
+		assertTaskIDs(t, byGroup, []string{"c-future"})
+
+		both, err := store.List(ctx, tasks.ListFilter{Kind: "reminder", Group: "g1"})
+		if err != nil {
+			t.Fatalf("List(kind+group) returned error: %v", err)
+		}
+		assertTaskIDs(t, both, []string{"b-early", "a-late", "d-exhausted"})
+
+		none, err := store.List(ctx, tasks.ListFilter{Kind: "nope"})
+		if err != nil {
+			t.Fatalf("List(no match) returned error: %v", err)
+		}
+		if len(none) != 0 {
+			t.Fatalf("expected no tasks, got %v", none)
+		}
+	})
+}
+
+func listTask(id, kind, group string, nextRunAt *time.Time) tasks.Task {
+	job := task(id, testTime())
+	job.Kind = kind
+	job.Group = group
+	job.NextRunAt = cloneTime(nextRunAt)
+	return job
+}
+
+func ptr(t time.Time) *time.Time {
+	u := t.UTC()
+	return &u
+}
+
+func cloneTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	return ptr(*t)
 }
 
 func task(id string, nextRunAt time.Time) tasks.Task {
