@@ -1,12 +1,55 @@
 package llm
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/levmv/golems/pkg/jsonschema"
 	"github.com/levmv/golems/pkg/openai"
 )
+
+func TestMapMessagesEchoesAssistantReasoning(t *testing.T) {
+	msgs := []Message{
+		{
+			Role:             RoleAI,
+			Content:          "",
+			ReasoningContent: "deciding to call the tool",
+			ToolCalls: []ToolCall{{
+				ID:       "call_1",
+				Type:     string(ToolTypeFunction),
+				Function: ToolFunction{Name: "read_file", Arguments: `{"path":"README.md"}`},
+			}},
+		},
+		{
+			Role:             RoleUser,
+			Content:          "hello",
+			ReasoningContent: "invalid user reasoning",
+		},
+	}
+
+	out := mapMessages(msgs)
+	if len(out) != 2 {
+		t.Fatalf("mapped len = %d, want 2", len(out))
+	}
+	if out[0].ReasoningContent != "deciding to call the tool" {
+		t.Fatalf("reasoning = %q, want it carried to the request", out[0].ReasoningContent)
+	}
+	if out[1].ReasoningContent != "" {
+		t.Fatalf("user reasoning = %q, want stripped", out[1].ReasoningContent)
+	}
+
+	// Must actually reach the wire (providers like DeepSeek reject a tool turn
+	// whose reasoning_content was dropped).
+	raw, err := json.Marshal(out[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"reasoning_content":"deciding to call the tool"`) {
+		t.Fatalf("reasoning_content missing from wire payload: %s", raw)
+	}
+}
 
 func TestBuildBaseRequestMapsTools(t *testing.T) {
 	parallel := false

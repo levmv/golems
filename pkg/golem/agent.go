@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/levmv/golems/pkg/jsonschema"
 	"github.com/levmv/golems/pkg/llm"
@@ -116,6 +117,16 @@ type Turn struct {
 	messages []llm.Message
 }
 
+// Messages returns the turn's messages (the user input followed by the assistant
+// and tool messages it produced). Each carries the time it was produced in
+// llm.Message.CreatedAt: an assistant message when the model finished it, a tool
+// message when the tool returned — so consumers that persist a transcript can
+// record when each step actually happened rather than when the turn was saved.
+// The messages are cloned, so callers may retain or mutate them freely.
+func (t *Turn) Messages() []llm.Message {
+	return cloneMessages(t.messages)
+}
+
 type StreamEventKind string
 
 const (
@@ -124,7 +135,9 @@ const (
 	EventToolCall       StreamEventKind = "tool_call"
 	EventToolResult     StreamEventKind = "tool_result"
 	EventToolError      StreamEventKind = "tool_error"
-	EventDone           StreamEventKind = "done"
+	// EventDone is emitted once when the turn completes; its Text is the final
+	// reply (== Turn.Reply), so consumers need not re-derive it from text deltas.
+	EventDone StreamEventKind = "done"
 )
 
 type StreamEvent struct {
@@ -289,6 +302,7 @@ func (a *Agent) Stream(ctx context.Context, input string, emit StreamFunc) (*Tur
 	if emit != nil {
 		emit(StreamEvent{
 			Kind:         EventDone,
+			Text:         turn.Reply,
 			Usage:        turn.Usage,
 			FinishReason: turn.FinishReason,
 		})
@@ -317,7 +331,16 @@ func (a *Agent) prepareTurn(input string) turnState {
 			Content: a.systemPrompt,
 		})
 	}
-	messages = append(messages, history...)
+	// Seed prior-turn history without reasoning. A turn's chain-of-thought is
+	// echoed back only within its own tool loop (some providers, e.g. DeepSeek
+	// thinking mode, require that for tool-calling turns); replaying it across
+	// turns is unnecessary and costs input tokens. Retained history
+	// (a.messages / History()) keeps reasoning intact for consumers that
+	// persist it — only the model-facing copy is stripped.
+	for _, m := range history {
+		m.ReasoningContent = ""
+		messages = append(messages, m)
+	}
 	messages = append(messages, llm.Message{
 		Role:    llm.RoleUser,
 		Content: input,
@@ -343,7 +366,7 @@ func (a *Agent) prepareTurn(input string) turnState {
 
 func (a *Agent) replyLoop(ctx context.Context, input string, state turnState) (*Turn, error) {
 	messages := state.messages
-	turnMessages := []llm.Message{{Role: llm.RoleUser, Content: input}}
+	turnMessages := []llm.Message{{Role: llm.RoleUser, Content: input, CreatedAt: time.Now()}}
 	var steps []Step
 	var reasoning strings.Builder
 	var usage llm.Usage
@@ -366,9 +389,11 @@ func (a *Agent) replyLoop(ctx context.Context, input string, state turnState) (*
 		finishReason = resp.FinishReason
 
 		assistantMsg := llm.Message{
-			Role:      llm.RoleAI,
-			Content:   strings.TrimSpace(resp.Content),
-			ToolCalls: resp.ToolCalls,
+			Role:             llm.RoleAI,
+			Content:          strings.TrimSpace(resp.Content),
+			ReasoningContent: strings.TrimSpace(resp.ReasoningContent),
+			ToolCalls:        resp.ToolCalls,
+			CreatedAt:        time.Now(),
 		}
 
 		if len(resp.ToolCalls) == 0 {
@@ -398,8 +423,10 @@ func (a *Agent) replyLoop(ctx context.Context, input string, state turnState) (*
 			finishReason = resp.FinishReason
 
 			assistantMsg := llm.Message{
-				Role:    llm.RoleAI,
-				Content: strings.TrimSpace(resp.Content),
+				Role:             llm.RoleAI,
+				Content:          strings.TrimSpace(resp.Content),
+				ReasoningContent: strings.TrimSpace(resp.ReasoningContent),
+				CreatedAt:        time.Now(),
 			}
 			messages = append(messages, assistantMsg)
 			turnMessages = append(turnMessages, assistantMsg)
@@ -431,7 +458,7 @@ func (a *Agent) replyLoop(ctx context.Context, input string, state turnState) (*
 
 func (a *Agent) streamLoop(ctx context.Context, input string, state turnState, emit StreamFunc) (*Turn, error) {
 	messages := state.messages
-	turnMessages := []llm.Message{{Role: llm.RoleUser, Content: input}}
+	turnMessages := []llm.Message{{Role: llm.RoleUser, Content: input, CreatedAt: time.Now()}}
 	var steps []Step
 	var finalReply string
 	var reasoning strings.Builder
@@ -463,9 +490,11 @@ func (a *Agent) streamLoop(ctx context.Context, input string, state turnState, e
 		finishReason = streamFinishReason
 
 		assistantMsg := llm.Message{
-			Role:      llm.RoleAI,
-			Content:   strings.TrimSpace(streamReply),
-			ToolCalls: toolCalls,
+			Role:             llm.RoleAI,
+			Content:          strings.TrimSpace(streamReply),
+			ReasoningContent: strings.TrimSpace(streamReasoning),
+			ToolCalls:        toolCalls,
+			CreatedAt:        time.Now(),
 		}
 
 		if len(toolCalls) == 0 {
@@ -498,8 +527,10 @@ func (a *Agent) streamLoop(ctx context.Context, input string, state turnState, e
 			finishReason = resp.FinishReason
 
 			assistantMsg := llm.Message{
-				Role:    llm.RoleAI,
-				Content: reply,
+				Role:             llm.RoleAI,
+				Content:          reply,
+				ReasoningContent: strings.TrimSpace(resp.ReasoningContent),
+				CreatedAt:        time.Now(),
 			}
 			messages = append(messages, assistantMsg)
 			turnMessages = append(turnMessages, assistantMsg)
@@ -532,7 +563,13 @@ func (a *Agent) streamLoop(ctx context.Context, input string, state turnState, e
 }
 
 func (a *Agent) finalReply(ctx context.Context, messages []llm.Message, state turnState) (*llm.Response, error) {
-	toolChoice := llm.ToolChoice{Mode: llm.ToolChoiceNone}
+	// Auto, not None: under tool_choice=none some providers stop parsing the
+	// model's native tool tokens, so a model that still tries to call a tool
+	// (e.g. DeepSeek) leaks raw tool markup into Content. With auto the provider
+	// parses any call into structural ToolCalls — which the callers ignore — so
+	// Content stays clean. The prompt below is what actually steers toward an
+	// answer; the choice mode only controls whether stray calls leak as text.
+	toolChoice := llm.ToolChoice{Mode: llm.ToolChoiceAuto}
 	finalMessages := make([]llm.Message, 0, len(messages)+1)
 	finalMessages = append(finalMessages, messages...)
 	finalMessages = append(finalMessages, llm.Message{
@@ -608,6 +645,10 @@ func consumeStream(stream llm.Stream, emit StreamFunc) (string, string, []llm.To
 	return reply.String(), reasoning.String(), toolCalls, finishReason, nil
 }
 
+// executeToolCalls runs the model's tool calls in order, returning the tool
+// messages and steps. Each tool message's CreatedAt marks when the tool returned
+// (or when its error was determined) — the real moment of that step, for
+// transcript persistence.
 func executeToolCalls(ctx context.Context, calls []llm.ToolCall, executors map[string]ToolFunc, emit StreamFunc) ([]llm.Message, []Step, error) {
 	messages := make([]llm.Message, 0, len(calls))
 	steps := make([]Step, 0, len(calls)*2)
@@ -634,6 +675,7 @@ func executeToolCalls(ctx context.Context, calls []llm.ToolCall, executors map[s
 		run, ok := executors[name]
 		if !ok {
 			msg, step := toolErrorMessage(call, fmt.Errorf("unknown tool %q", name))
+			msg.CreatedAt = time.Now()
 			messages = append(messages, msg)
 			steps = append(steps, step)
 			if emit != nil {
@@ -648,6 +690,7 @@ func executeToolCalls(ctx context.Context, calls []llm.ToolCall, executors map[s
 				return nil, nil, ctxErr
 			}
 			msg, step := toolErrorMessage(call, err)
+			msg.CreatedAt = time.Now()
 			messages = append(messages, msg)
 			steps = append(steps, step)
 			if emit != nil {
@@ -668,6 +711,7 @@ func executeToolCalls(ctx context.Context, calls []llm.ToolCall, executors map[s
 			Content:    result.Content,
 			ToolCallID: call.ID,
 			Meta:       result.Meta,
+			CreatedAt:  time.Now(),
 		})
 		steps = append(steps, step)
 		if emit != nil {

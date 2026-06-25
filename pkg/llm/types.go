@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"time"
 
 	"github.com/levmv/golems/pkg/jsonschema"
 )
@@ -16,11 +17,17 @@ const (
 )
 
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Meta       any        `json:"meta,omitempty"`
+	Role             Role       `json:"role"`
+	Content          string     `json:"content"`
+	ReasoningContent string     `json:"-"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
+	Meta             any        `json:"meta,omitempty"`
+	// CreatedAt is when the message was produced: for an assistant message when
+	// the model finished it, for a tool message when the tool returned. Set by
+	// the producing layer (the golem agent loop); zero when nothing stamped it.
+	// Never sent to the provider — the adapter maps wire fields explicitly.
+	CreatedAt time.Time `json:"-"`
 }
 
 type Request struct {

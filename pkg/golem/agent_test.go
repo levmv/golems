@@ -434,7 +434,9 @@ func TestReplyToolLoopLimitForcesFinalReplyAndCommitsTurn(t *testing.T) {
 		chatResponses: []*llm.Response{
 			{ToolCalls: []llm.ToolCall{firstCall}, FinishReason: llm.FinishReasonToolUse, Usage: llm.Usage{TotalTokens: 2}},
 			{ToolCalls: []llm.ToolCall{secondCall}, FinishReason: llm.FinishReasonToolUse, Usage: llm.Usage{TotalTokens: 3}},
-			{Content: "final without tools", FinishReason: llm.FinishReasonStop, Usage: llm.Usage{TotalTokens: 5}},
+			// Model still emits a tool call at the limit; golem must ignore it
+			// and use Content as the final reply (not execute or leak it).
+			{Content: "final without tools", ToolCalls: []llm.ToolCall{secondCall}, FinishReason: llm.FinishReasonStop, Usage: llm.Usage{TotalTokens: 5}},
 		},
 	}
 	tool := FunctionTool("echo", "Echo", jsonschema.Object(nil), func(_ context.Context, call llm.ToolCall) (ToolResult, error) {
@@ -473,8 +475,8 @@ func TestReplyToolLoopLimitForcesFinalReplyAndCommitsTurn(t *testing.T) {
 		t.Fatalf("requests len = %d, want 3", len(model.requests))
 	}
 	finalReq := model.requests[2]
-	if finalReq.ToolChoice == nil || finalReq.ToolChoice.Mode != llm.ToolChoiceNone {
-		t.Fatalf("final request tool choice = %#v, want none", finalReq.ToolChoice)
+	if finalReq.ToolChoice == nil || finalReq.ToolChoice.Mode != llm.ToolChoiceAuto {
+		t.Fatalf("final request tool choice = %#v, want auto", finalReq.ToolChoice)
 	}
 	if got := finalReq.Messages[len(finalReq.Messages)-2]; got.Role != llm.RoleTool || got.ToolCallID != "call_1" {
 		t.Fatalf("final request penultimate message = %#v, want first tool result", got)
@@ -509,6 +511,66 @@ func TestEmptyInput(t *testing.T) {
 	}
 }
 
+func TestReasoningEchoedWithinTurnButStrippedAcrossTurns(t *testing.T) {
+	call := llm.ToolCall{
+		ID:       "call_1",
+		Type:     string(llm.ToolTypeFunction),
+		Function: llm.ToolFunction{Name: "read_file", Arguments: `{"path":"README.md"}`},
+	}
+	model := &fakeModel{
+		chatResponses: []*llm.Response{
+			{ReasoningContent: "t1 plan", ToolCalls: []llm.ToolCall{call}, FinishReason: llm.FinishReasonToolUse},
+			{Content: "answer one", FinishReason: llm.FinishReasonStop},
+			{Content: "answer two", FinishReason: llm.FinishReasonStop},
+		},
+	}
+	tool := FunctionTool(
+		"read_file",
+		"Read a file",
+		jsonschema.Object(map[string]jsonschema.Schema{"path": jsonschema.String("Path")}, "path"),
+		func(context.Context, llm.ToolCall) (ToolResult, error) {
+			return ToolResult{Content: "README contents"}, nil
+		},
+	)
+
+	agent, err := New(Config{Model: model, Tools: []Tool{tool}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	if _, err := agent.Reply(context.Background(), "turn one"); err != nil {
+		t.Fatalf("Reply() turn one error = %v", err)
+	}
+	if _, err := agent.Reply(context.Background(), "turn two"); err != nil {
+		t.Fatalf("Reply() turn two error = %v", err)
+	}
+
+	toolCallReasoning := func(msgs []llm.Message) string {
+		for _, m := range msgs {
+			if m.Role == llm.RoleAI && len(m.ToolCalls) > 0 {
+				return m.ReasoningContent
+			}
+		}
+		return "<not found>"
+	}
+
+	if len(model.requests) != 3 {
+		t.Fatalf("requests len = %d, want 3", len(model.requests))
+	}
+	// Within turn one, the follow-up request (after the tool result) echoes the
+	// tool-calling assistant's reasoning back to the model.
+	if got := toolCallReasoning(model.requests[1].Messages); got != "t1 plan" {
+		t.Fatalf("within-turn reasoning = %q, want echoed", got)
+	}
+	// Turn two seeds turn one as history; its reasoning must not be replayed.
+	if got := toolCallReasoning(model.requests[2].Messages); got != "" {
+		t.Fatalf("cross-turn reasoning = %q, want stripped", got)
+	}
+	// Retained history stays faithful so consumers can persist reasoning.
+	if got := toolCallReasoning(agent.History()); got != "t1 plan" {
+		t.Fatalf("history reasoning = %q, want retained", got)
+	}
+}
+
 func TestReplyExecutesToolLoopAndStoresTrace(t *testing.T) {
 	call := llm.ToolCall{
 		ID:   "call_1",
@@ -521,14 +583,16 @@ func TestReplyExecutesToolLoopAndStoresTrace(t *testing.T) {
 	model := &fakeModel{
 		chatResponses: []*llm.Response{
 			{
-				ToolCalls:    []llm.ToolCall{call},
-				FinishReason: llm.FinishReasonToolUse,
-				Usage:        llm.Usage{TotalTokens: 3},
+				ReasoningContent: "tool thought",
+				ToolCalls:        []llm.ToolCall{call},
+				FinishReason:     llm.FinishReasonToolUse,
+				Usage:            llm.Usage{TotalTokens: 3},
 			},
 			{
-				Content:      " done ",
-				FinishReason: llm.FinishReasonStop,
-				Usage:        llm.Usage{TotalTokens: 4},
+				Content:          " done ",
+				ReasoningContent: "final thought",
+				FinishReason:     llm.FinishReasonStop,
+				Usage:            llm.Usage{TotalTokens: 4},
 			},
 		},
 	}
@@ -561,6 +625,9 @@ func TestReplyExecutesToolLoopAndStoresTrace(t *testing.T) {
 	if turn.Usage.TotalTokens != 7 {
 		t.Fatalf("usage = %d, want 7", turn.Usage.TotalTokens)
 	}
+	if turn.Reasoning != "tool thought\nfinal thought" {
+		t.Fatalf("reasoning = %q, want per-response aggregate", turn.Reasoning)
+	}
 	if len(turn.Steps) != 2 {
 		t.Fatalf("steps len = %d, want 2", len(turn.Steps))
 	}
@@ -592,11 +659,14 @@ func TestReplyExecutesToolLoopAndStoresTrace(t *testing.T) {
 	if len(history) != 4 {
 		t.Fatalf("history len = %d, want 4", len(history))
 	}
-	if history[1].Role != llm.RoleAI || len(history[1].ToolCalls) != 1 {
+	if history[1].Role != llm.RoleAI || len(history[1].ToolCalls) != 1 || history[1].ReasoningContent != "tool thought" {
 		t.Fatalf("history assistant tool call = %#v", history[1])
 	}
 	if history[2].Role != llm.RoleTool || history[2].ToolCallID != "call_1" {
 		t.Fatalf("history tool result = %#v", history[2])
+	}
+	if history[3].Role != llm.RoleAI || history[3].Content != "done" || history[3].ReasoningContent != "final thought" {
+		t.Fatalf("history final reply = %#v", history[3])
 	}
 }
 
@@ -636,6 +706,65 @@ func TestReplyFeedsToolErrorBackToModel(t *testing.T) {
 	toolMsg := secondMessages[len(secondMessages)-1]
 	if toolMsg.Role != llm.RoleTool || !strings.Contains(toolMsg.Content, "unknown tool") {
 		t.Fatalf("tool error message = %#v", toolMsg)
+	}
+}
+
+func TestStreamStoresReasoningOnEachAssistantMessage(t *testing.T) {
+	call := llm.ToolCall{
+		ID:   "call_1",
+		Type: string(llm.ToolTypeFunction),
+		Function: llm.ToolFunction{
+			Name:      "read_file",
+			Arguments: `{"path":"README.md"}`,
+		},
+	}
+	firstStream := &fakeStream{
+		chunks: []llm.StreamChunk{
+			{ReasoningContent: "need tool "},
+			{ToolCalls: []llm.ToolCall{call}, FinishReason: llm.FinishReasonToolUse},
+		},
+	}
+	secondStream := &fakeStream{
+		chunks: []llm.StreamChunk{
+			{ReasoningContent: "answer now "},
+			{Text: "done", FinishReason: llm.FinishReasonStop},
+		},
+	}
+	model := &fakeModel{streams: []*fakeStream{firstStream, secondStream}}
+	tool := FunctionTool(
+		"read_file",
+		"Read a file",
+		jsonschema.Object(map[string]jsonschema.Schema{"path": jsonschema.String("Path")}, "path"),
+		func(context.Context, llm.ToolCall) (ToolResult, error) {
+			return ToolResult{Content: "README contents"}, nil
+		},
+	)
+
+	agent, err := New(Config{Model: model, Tools: []Tool{tool}})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	turn, err := agent.Stream(context.Background(), "read", nil)
+	if err != nil {
+		t.Fatalf("Stream() error = %v", err)
+	}
+	if turn.Reasoning != "need tool\nanswer now" {
+		t.Fatalf("reasoning = %q, want per-stream aggregate", turn.Reasoning)
+	}
+	if len(turn.messages) != 4 {
+		t.Fatalf("turn messages len = %d, want 4: %#v", len(turn.messages), turn.messages)
+	}
+	if turn.messages[1].Role != llm.RoleAI || turn.messages[1].ReasoningContent != "need tool" {
+		t.Fatalf("first assistant reasoning = %#v", turn.messages[1])
+	}
+	if turn.messages[3].Role != llm.RoleAI || turn.messages[3].Content != "done" || turn.messages[3].ReasoningContent != "answer now" {
+		t.Fatalf("final assistant reasoning = %#v", turn.messages[3])
+	}
+
+	history := agent.History()
+	if len(history) != 4 || history[1].ReasoningContent != "need tool" || history[3].ReasoningContent != "answer now" {
+		t.Fatalf("history = %#v", history)
 	}
 }
 
@@ -730,8 +859,11 @@ func TestStreamToolLoopLimitForcesFinalReplyAndCommitsTurn(t *testing.T) {
 	}
 	model := &fakeModel{
 		streams: []*fakeStream{firstStream, secondStream},
+		// Model still emits a tool call at the limit; golem must ignore it
+		// and use Content as the final reply (not execute or leak it).
 		chatResponses: []*llm.Response{{
 			Content:      "final without tools",
+			ToolCalls:    []llm.ToolCall{secondCall},
 			FinishReason: llm.FinishReasonStop,
 			Usage:        llm.Usage{TotalTokens: 5},
 		}},
@@ -766,8 +898,8 @@ func TestStreamToolLoopLimitForcesFinalReplyAndCommitsTurn(t *testing.T) {
 		t.Fatalf("requests len = %d, want 3", len(model.requests))
 	}
 	finalReq := model.requests[2]
-	if finalReq.ToolChoice == nil || finalReq.ToolChoice.Mode != llm.ToolChoiceNone {
-		t.Fatalf("final request tool choice = %#v, want none", finalReq.ToolChoice)
+	if finalReq.ToolChoice == nil || finalReq.ToolChoice.Mode != llm.ToolChoiceAuto {
+		t.Fatalf("final request tool choice = %#v, want auto", finalReq.ToolChoice)
 	}
 	if got := finalReq.Messages[len(finalReq.Messages)-1]; got.Role != llm.RoleUser || !strings.Contains(got.Content, "Tool call limit reached") {
 		t.Fatalf("final request last message = %#v, want tool limit prompt", got)

@@ -58,6 +58,29 @@ func TestToolChoiceOmitsEmptyFunction(t *testing.T) {
 	}
 }
 
+func TestChatCompletionMessageIncludesEmptyStringContent(t *testing.T) {
+	data, err := json.Marshal(ChatCompletionMessage{
+		Role: RoleAssistant,
+		ToolCalls: []ToolCall{{
+			ID:   "call_1",
+			Type: ToolTypeFunction,
+			Function: FunctionCall{
+				Name:      "shell",
+				Arguments: `{"command":"pwd"}`,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if !strings.Contains(string(data), `"content":""`) {
+		t.Fatalf("json missing empty content field: %s", data)
+	}
+	if strings.Contains(string(data), "MultiContent") {
+		t.Fatalf("json leaked internal MultiContent field: %s", data)
+	}
+}
+
 type ioNopCloser struct {
 	*strings.Reader
 }

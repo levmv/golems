@@ -21,11 +21,21 @@ func newOpenAIAdapter(client *openai.Client) *openAIAdapter {
 func mapMessages(msgs []Message) []openai.ChatCompletionMessage {
 	res := make([]openai.ChatCompletionMessage, len(msgs))
 	for i, m := range msgs {
+		reasoningContent := ""
+		if m.Role == RoleAI {
+			reasoningContent = m.ReasoningContent
+		}
 		res[i] = openai.ChatCompletionMessage{
-			Role:       openai.Role(m.Role),
-			Content:    m.Content,
-			ToolCalls:  mapToolCallsToOpenAI(m.ToolCalls),
-			ToolCallID: m.ToolCallID,
+			Role:    openai.Role(m.Role),
+			Content: m.Content,
+			// Faithfully forward reasoning. Providers such as DeepSeek's
+			// thinking mode require the reasoning_content of a tool-calling turn
+			// to be passed back within that turn. The adapter is a dumb mapper;
+			// the turn-vs-cross-turn replay policy lives in the agent layer,
+			// which strips reasoning from prior-turn history before it gets here.
+			ReasoningContent: reasoningContent,
+			ToolCalls:        mapToolCallsToOpenAI(m.ToolCalls),
+			ToolCallID:       m.ToolCallID,
 		}
 	}
 	return res

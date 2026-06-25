@@ -66,26 +66,29 @@ func (m ChatCompletionMessage) MarshalJSON() ([]byte, error) {
 	if m.Content != "" && m.MultiContent != nil {
 		return nil, errors.New("can't use both Content and MultiContent simultaneously")
 	}
-	// Create an alias to avoid infinite recursion
-	type Alias ChatCompletionMessage
-
-	if len(m.MultiContent) > 0 {
-		return json.Marshal(struct {
-			Alias                     //nolint:musttag
-			Content []ChatMessagePart `json:"content"`
-		}{
-			Alias:   (Alias)(m),
-			Content: m.MultiContent,
-		})
+	type wire struct {
+		Role             Role       `json:"role"`
+		Content          any        `json:"content"`
+		Refusal          string     `json:"refusal,omitempty"`
+		Name             string     `json:"name,omitempty"`
+		ReasoningContent string     `json:"reasoning_content,omitempty"`
+		ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID       string     `json:"tool_call_id,omitempty"`
 	}
 
-	return json.Marshal(struct {
-		Alias          //nolint:musttag
-		Content string `json:"content,omitempty"`
-	}{
-		Alias:   (Alias)(m),
-		Content: m.Content,
-	})
+	w := wire{
+		Role:             m.Role,
+		Content:          m.Content, // string, "" included — always on the wire
+		Refusal:          m.Refusal,
+		Name:             m.Name,
+		ReasoningContent: m.ReasoningContent,
+		ToolCalls:        m.ToolCalls,
+		ToolCallID:       m.ToolCallID,
+	}
+	if len(m.MultiContent) > 0 {
+		w.Content = m.MultiContent
+	}
+	return json.Marshal(w)
 }
 
 func (m *ChatCompletionMessage) UnmarshalJSON(data []byte) error {
