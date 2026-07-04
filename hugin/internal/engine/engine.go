@@ -33,10 +33,12 @@ type Engine struct {
 	analysisModel     llm.Model
 	analysisModelErr  error
 	analysisModelName string
+	ntf               notifier.Notifier
 }
 
 func New(cfg *config.Config, db *storage.DB, log logger.Logger) *Engine {
 	model, modelErr := buildModel(cfg)
+	ntf := notifier.FromConfig(cfg, log)
 	return &Engine{
 		cfg:               cfg,
 		db:                db,
@@ -44,6 +46,7 @@ func New(cfg *config.Config, db *storage.DB, log logger.Logger) *Engine {
 		analysisModel:     model,
 		analysisModelErr:  modelErr,
 		analysisModelName: analysisModelName(cfg),
+		ntf:               ntf,
 	}
 }
 
@@ -189,10 +192,6 @@ func (e *Engine) SyncSchedule(ctx context.Context) error {
 	return e.syncCheckTasks(ctx, scheduled.queue)
 }
 
-func CheckTaskID(checkID string) string {
-	return checkTaskID(checkID)
-}
-
 type scheduledCheckQueueOptions struct {
 	collectFailures bool
 	onError         func(error)
@@ -277,16 +276,12 @@ type checkTaskPayload struct {
 	CheckID string `json:"check_id"`
 }
 
-type desiredCheckTask struct {
-	enqueue tasks.Enqueue
-}
-
 func (e *Engine) syncCheckTasks(ctx context.Context, q *tasks.Queue) error {
 	desired := checkTasks(e.cfg, time.Now().UTC())
 	for checkID, task := range desired {
-		current, err := q.Get(ctx, task.enqueue.ID)
+		current, err := q.Get(ctx, task.ID)
 		if err == nil {
-			if scheduledCheckTaskMatches(current, task.enqueue) {
+			if scheduledCheckTaskMatches(current, task) {
 				continue
 			}
 			if _, err := q.Delete(ctx, current.ID); err != nil {
@@ -295,7 +290,7 @@ func (e *Engine) syncCheckTasks(ctx context.Context, q *tasks.Queue) error {
 		} else if !errors.Is(err, tasks.ErrNotFound) {
 			return fmt.Errorf("load existing task for check %q: %w", checkID, err)
 		}
-		if _, err := q.Enqueue(ctx, task.enqueue); err != nil {
+		if _, err := q.Enqueue(ctx, task); err != nil {
 			return fmt.Errorf("enqueue task for check %q: %w", checkID, err)
 		}
 	}
@@ -340,31 +335,29 @@ func sameScheduledCheckSchedule(current tasks.Schedule, desired tasks.Schedule) 
 	}
 }
 
-func checkTasks(cfg *config.Config, seedAt time.Time) map[string]desiredCheckTask {
-	out := make(map[string]desiredCheckTask, len(cfg.Checks))
+func checkTasks(cfg *config.Config, seedAt time.Time) map[string]tasks.Enqueue {
+	out := make(map[string]tasks.Enqueue, len(cfg.Checks))
 	for _, check := range cfg.Checks {
-		taskID := checkTaskID(check.ID)
+		taskID := CheckTaskID(check.ID)
 		payload, _ := tasks.JSONPayload(checkTaskPayload{CheckID: check.ID})
-		out[check.ID] = desiredCheckTask{
-			enqueue: tasks.Enqueue{
-				ID:       taskID,
-				Kind:     checkJobKind,
-				Payload:  payload,
-				Group:    check.Target,
-				Schedule: tasks.CronFrom(check.Schedule, cfg.App.Timezone, seedAt),
-				Metadata: map[string]string{
-					"check_id": check.ID,
-					"target":   check.Target,
-					"schedule": check.Schedule,
-					"timezone": cfg.App.Timezone,
-				},
+		out[check.ID] = tasks.Enqueue{
+			ID:       taskID,
+			Kind:     checkJobKind,
+			Payload:  payload,
+			Group:    check.Target,
+			Schedule: tasks.CronFrom(check.Schedule, cfg.App.Timezone, seedAt),
+			Metadata: map[string]string{
+				"check_id": check.ID,
+				"target":   check.Target,
+				"schedule": check.Schedule,
+				"timezone": cfg.App.Timezone,
 			},
 		}
 	}
 	return out
 }
 
-func checkTaskID(checkID string) string {
+func CheckTaskID(checkID string) string {
 	return "hugin.check:" + checkID
 }
 
@@ -398,7 +391,7 @@ func (e *Engine) runAnalysis(ctx context.Context, check *config.Check, checkID s
 			return ctxErr
 		}
 		e.log.Warn("LLM configuration failed; opening analysis incident: %v", err)
-		return e.processAnalysisUnavailable(check, checkID, runID, e.analysisModelName, err)
+		return e.processAnalysisUnavailable(ctx, check, checkID, runID, e.analysisModelName, err)
 	}
 
 	analyzer := analysis.New(model, e.log)
@@ -421,31 +414,22 @@ func (e *Engine) runAnalysis(ctx context.Context, check *config.Check, checkID s
 			return ctxErr
 		}
 		e.log.Warn("LLM analysis failed; opening analysis incident: %v", err)
-		return e.processAnalysisUnavailable(check, checkID, runID, e.analysisModelName, err)
-	}
-	if err := ctx.Err(); err != nil {
-		return err
+		return e.processAnalysisUnavailable(ctx, check, checkID, runID, e.analysisModelName, err)
 	}
 	if err := e.recordRunAnalysis(runID, e.analysisModelName, result, nil); err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := e.resolveAnalysisUnavailable(check, checkID, runID); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
+	if err := e.resolveAnalysisUnavailable(ctx, check, checkID, runID); err != nil {
 		return err
 	}
 
 	e.log.Info("Analysis: severity=%s should_alert=%v summary=%s", result.Severity, result.ShouldAlert, result.Summary)
 	e.log.Debug("Evidence: %s", result.Evidence)
 
-	return e.processIncident(check, checkID, result, runID)
+	return e.processIncident(ctx, check, checkID, result, runID)
 }
 
-func (e *Engine) processAnalysisUnavailable(check *config.Check, checkID string, runID int64, modelName string, cause error) error {
+func (e *Engine) processAnalysisUnavailable(ctx context.Context, check *config.Check, checkID string, runID int64, modelName string, cause error) error {
 	result := &analysis.Result{
 		Severity:    analysis.SeverityUrgent,
 		ShouldAlert: true,
@@ -459,7 +443,7 @@ func (e *Engine) processAnalysisUnavailable(check *config.Check, checkID string,
 	e.log.Info("Analysis: severity=%s should_alert=%v summary=%s", result.Severity, result.ShouldAlert, result.Summary)
 	e.log.Debug("Evidence: %s", result.Evidence)
 
-	return e.processIncident(check, analysisIssueCheckID(checkID), result, runID)
+	return e.processIncident(ctx, check, analysisIssueCheckID(checkID), result, runID)
 }
 
 func (e *Engine) recordRunAnalysis(runID int64, modelName string, result *analysis.Result, cause error) error {
@@ -480,17 +464,25 @@ func (e *Engine) recordRunAnalysis(runID int64, modelName string, result *analys
 	return nil
 }
 
-func (e *Engine) resolveAnalysisUnavailable(check *config.Check, checkID string, runID int64) error {
+func (e *Engine) resolveAnalysisUnavailable(ctx context.Context, check *config.Check, checkID string, runID int64) error {
+	analysisCheckID := analysisIssueCheckID(checkID)
+	active, err := e.db.ActiveIncident(analysisCheckID)
+	if err != nil {
+		return fmt.Errorf("failed to check active analysis incident: %w", err)
+	}
+	if active == nil {
+		return nil
+	}
 	result := &analysis.Result{
 		Severity:    analysis.SeverityNormal,
 		ShouldAlert: false,
 		Summary:     fmt.Sprintf("%s AI analysis recovered", checkID),
 		Evidence:    "AI analysis completed successfully on this run.",
 	}
-	return e.processIncident(check, analysisIssueCheckID(checkID), result, runID)
+	return e.processIncident(ctx, check, analysisCheckID, result, runID)
 }
 
-func (e *Engine) processIncident(check *config.Check, checkID string, result *analysis.Result, runID int64) error {
+func (e *Engine) processIncident(ctx context.Context, check *config.Check, checkID string, result *analysis.Result, runID int64) error {
 	im := incidents.New(e.db)
 	event, err := im.Process(checkID, result, runID, check.Alert.Cooldown, check.Alert.RepeatAfter)
 	if err != nil {
@@ -502,8 +494,7 @@ func (e *Engine) processIncident(check *config.Check, checkID string, result *an
 			e.log.Debug("Resolution notification suppressed by check '%s' config", checkID)
 			return nil
 		}
-		ntf := notifier.FromConfig(e.cfg, e.log)
-		if err := notifyEvent(ntf, event); err != nil {
+		if err := notifyEvent(ctx, e.ntf, event); err != nil {
 			e.log.Error("Failed to send notification: %v", err)
 			return nil
 		}
@@ -581,8 +572,7 @@ func parseDuration(s string, defaultDur time.Duration) time.Duration {
 	return defaultDur
 }
 
-func notifyEvent(ntf notifier.Notifier, event incidents.Event) error {
-	ctx := context.Background()
+func notifyEvent(ctx context.Context, ntf notifier.Notifier, event incidents.Event) error {
 	inc := *event.Incident
 	switch event.Type {
 	case incidents.EventCreated:

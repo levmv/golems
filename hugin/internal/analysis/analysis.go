@@ -175,6 +175,8 @@ func buildPrompt(in Input) string {
 			count := statusCounts[status]
 			b.WriteString(fmt.Sprintf("  %s: %d\n", status, count))
 		}
+		b.WriteString("Recent runs (newest first):\n")
+		writeHistoryTimeline(&b, in.History)
 		b.WriteString("\n")
 	}
 
@@ -264,6 +266,36 @@ func sortedIntMapKeys(values map[string]int) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func writeHistoryTimeline(b *strings.Builder, runs []storage.RunRecord) {
+	for _, r := range runs {
+		b.WriteString(fmt.Sprintf("  - %s status=%s", r.CreatedAt.UTC().Format(time.RFC3339), r.Status))
+		if r.Window != "" {
+			b.WriteString(fmt.Sprintf(" window=%s", r.Window))
+		}
+		if len(r.Metrics) > 0 {
+			b.WriteString(" metrics={")
+			for i, k := range sortedAnyMapKeys(r.Metrics) {
+				if i > 0 {
+					b.WriteString(", ")
+				}
+				b.WriteString(fmt.Sprintf("%s=%s", k, truncate(fmt.Sprint(r.Metrics[k]), 120)))
+			}
+			b.WriteString("}")
+		}
+		if len(r.Errors) > 0 {
+			b.WriteString(" errors=[")
+			for i, err := range r.Errors {
+				if i > 0 {
+					b.WriteString("; ")
+				}
+				b.WriteString(fmt.Sprintf("%s: %s", err.Code, truncate(err.Message, 160)))
+			}
+			b.WriteString("]")
+		}
+		b.WriteByte('\n')
+	}
 }
 
 type metricSummary struct {

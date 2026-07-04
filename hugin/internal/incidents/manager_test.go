@@ -58,6 +58,27 @@ func TestProcessRetriesNotificationWhenIncidentWasNeverNotified(t *testing.T) {
 	}
 }
 
+func TestProcessRepeatsActiveIncidentWithCooldownOnly(t *testing.T) {
+	db := newTestDB(t)
+	manager := New(db)
+	now := time.Now().UTC()
+
+	if err := db.CreateIncident("inc-disk-1", "disk", "urgent", "Disk full", "evidence", 1, 1); err != nil {
+		t.Fatalf("CreateIncident returned error: %v", err)
+	}
+	if err := db.MarkIncidentNotified("inc-disk-1", now.Add(-2*time.Hour)); err != nil {
+		t.Fatalf("MarkIncidentNotified returned error: %v", err)
+	}
+
+	event, err := manager.Process("disk", urgentResult(), 2, time.Hour, 0)
+	if err != nil {
+		t.Fatalf("Process returned error: %v", err)
+	}
+	if event.Type != EventUpdated {
+		t.Fatalf("expected cooldown-only repeat update, got %+v", event)
+	}
+}
+
 func TestProcessRepeatsActiveIncidentWhenStillAbnormalWithoutFreshAlert(t *testing.T) {
 	db := newTestDB(t)
 	manager := New(db)

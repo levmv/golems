@@ -588,7 +588,7 @@ func handleCleanup(db *storage.DB, log logger.Logger) {
 
 func handleResolve(cfg *config.Config, db *storage.DB, incidentID, note string, log logger.Logger) {
 	inc, err := db.Incident(incidentID)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		log.Error("Incident '%s' not found", incidentID)
 		os.Exit(1)
 	}
@@ -598,7 +598,7 @@ func handleResolve(cfg *config.Config, db *storage.DB, incidentID, note string, 
 	}
 
 	if err := db.ResolveIncident(incidentID, note); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			log.Error("Incident '%s' not found", incidentID)
 			os.Exit(1)
 		}

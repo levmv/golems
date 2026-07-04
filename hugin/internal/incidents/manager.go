@@ -121,7 +121,7 @@ func shouldNotifyActive(now time.Time, lastNotifiedAt *time.Time, cooldown, repe
 	if repeatAfter > 0 && sinceNotification >= repeatAfter {
 		return true
 	}
-	return false
+	return repeatAfter == 0 && cooldown > 0
 }
 
 func incidentEvidence(result *analysis.Result) string {

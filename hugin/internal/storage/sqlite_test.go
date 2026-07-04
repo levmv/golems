@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"math"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -136,6 +137,32 @@ func TestRunAnalysisPersistence(t *testing.T) {
 	}
 }
 
+func TestRunAnalysisUsesCreatedAtAsSentinel(t *testing.T) {
+	db := newTestDB(t)
+	runID, err := db.InsertRun("disk", &models.CollectorOutput{
+		Check:   "disk",
+		Status:  models.StatusOK,
+		Metrics: map[string]any{"used_pct": 72.5},
+	}, 123)
+	if err != nil {
+		t.Fatalf("InsertRun returned error: %v", err)
+	}
+	if _, err := db.sql.Exec(
+		`UPDATE runs SET analysis_severity = ?, analysis_should_alert = ?, analysis_summary = ? WHERE id = ?`,
+		"normal", false, "stale partial analysis", runID,
+	); err != nil {
+		t.Fatalf("partial analysis update returned error: %v", err)
+	}
+
+	got, err := db.RunAnalysis(runID)
+	if err != nil {
+		t.Fatalf("RunAnalysis returned error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected nil without analysis_created_at, got %+v", got)
+	}
+}
+
 func TestRunsSinceExcludingOmitsCurrentRun(t *testing.T) {
 	db := newTestDB(t)
 	since := time.Now().Add(-time.Hour)
@@ -163,6 +190,18 @@ func TestRunsSinceExcludingOmitsCurrentRun(t *testing.T) {
 	}
 	if len(runs) != 1 || runs[0].ID != previousID {
 		t.Fatalf("expected only previous run %d, got %+v", previousID, runs)
+	}
+}
+
+func TestInsertRunReturnsMetricsMarshalError(t *testing.T) {
+	db := newTestDB(t)
+	_, err := db.InsertRun("disk", &models.CollectorOutput{
+		Check:   "disk",
+		Status:  models.StatusOK,
+		Metrics: map[string]any{"bad": math.Inf(1)},
+	}, 10)
+	if err == nil {
+		t.Fatal("InsertRun error = nil, want metrics marshal error")
 	}
 }
 

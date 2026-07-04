@@ -285,3 +285,9 @@ notifiers:
     bot_token_env: HUGIN_TELEGRAM_TOKEN
     chat_id_env: HUGIN_TELEGRAM_CHAT_ID
 ```
+
+Alert timing semantics:
+
+- `cooldown` is the minimum interval between notifications for an active incident.
+- `repeat_after` is an optional longer reminder interval; when set, active incident reminders wait for both `cooldown` and `repeat_after`.
+- With only `cooldown`, Hugin may repeat an active incident notification once the cooldown has elapsed.

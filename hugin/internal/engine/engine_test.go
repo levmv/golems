@@ -46,7 +46,7 @@ func TestSyncCheckTasksReconcilesConfigWithTaskQueue(t *testing.T) {
 	if err := eng.syncCheckTasks(ctx, q); err != nil {
 		t.Fatalf("syncCheckTasks returned error: %v", err)
 	}
-	taskID := checkTaskID("disk")
+	taskID := CheckTaskID("disk")
 	task, err := store.Get(ctx, taskID)
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
@@ -158,7 +158,7 @@ func TestRunDueDiscardsRemovedCheckTask(t *testing.T) {
 	if err := eng.syncCheckTasks(ctx, q); err != nil {
 		t.Fatalf("syncCheckTasks returned error: %v", err)
 	}
-	taskID := checkTaskID("disk")
+	taskID := CheckTaskID("disk")
 	if _, err := store.Get(ctx, taskID); err != nil {
 		t.Fatalf("Get returned error: %v", err)
 	}
@@ -261,7 +261,7 @@ func TestRunDueCancellationLeavesClaimedTaskUnfinished(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskStore returned error: %v", err)
 	}
-	task, err := store.Get(ctx, checkTaskID("disk"))
+	task, err := store.Get(ctx, CheckTaskID("disk"))
 	if err != nil {
 		t.Fatalf("Get returned error: %v", err)
 	}

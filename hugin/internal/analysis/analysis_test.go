@@ -3,6 +3,7 @@ package analysis
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/levmv/golems/hugin/internal/models"
@@ -62,14 +63,17 @@ func TestBuildPromptSortsMapBackedSections(t *testing.T) {
 		},
 		History: []storage.RunRecord{
 			{
-				Status: "warning",
+				Status:    "warning",
+				Window:    "15m",
+				CreatedAt: time.Date(2026, 7, 4, 12, 30, 0, 0, time.UTC),
 				Metrics: map[string]any{
 					"z_metric": 3.0,
 					"a_metric": 4.0,
 				},
 			},
 			{
-				Status: "ok",
+				Status:    "ok",
+				CreatedAt: time.Date(2026, 7, 4, 12, 15, 0, 0, time.UTC),
 				Metrics: map[string]any{
 					"z_metric": 5.0,
 					"a_metric": 6.0,
@@ -81,6 +85,15 @@ func TestBuildPromptSortsMapBackedSections(t *testing.T) {
 	assertBefore(t, prompt, "  a_metric: 2", "  z_metric: 1")
 	assertBefore(t, prompt, "  a_metric: 4.00", "  z_metric: 3.00")
 	assertBefore(t, prompt, "  ok: 1", "  warning: 1")
+	for _, want := range []string{
+		"Recent runs (newest first):",
+		"2026-07-04T12:30:00Z status=warning window=15m metrics={a_metric=4, z_metric=3}",
+		"2026-07-04T12:15:00Z status=ok metrics={a_metric=6, z_metric=5}",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
 }
 
 func TestTruncatePreservesUTF8(t *testing.T) {

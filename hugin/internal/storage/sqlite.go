@@ -217,8 +217,14 @@ type NoteRecord struct {
 
 // InsertRun saves a completed execution into the database and returns the new row ID.
 func (d *DB) InsertRun(checkID string, output *models.CollectorOutput, durationMs int64) (int64, error) {
-	metricsJSON, _ := json.Marshal(output.Metrics)
-	errorsJSON, _ := json.Marshal(output.Errors)
+	metricsJSON, err := json.Marshal(output.Metrics)
+	if err != nil {
+		return 0, fmt.Errorf("marshal run metrics: %w", err)
+	}
+	errorsJSON, err := json.Marshal(output.Errors)
+	if err != nil {
+		return 0, fmt.Errorf("marshal run errors: %w", err)
+	}
 
 	res, err := d.sql.Exec(
 		`INSERT INTO runs (check_id, status, metrics, errors, duration_ms, window, created_at)
@@ -278,18 +284,13 @@ func (d *DB) RunAnalysis(runID int64) (*RunAnalysis, error) {
 		&analysis.Model,
 		&createdAt,
 	); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, sql.ErrNoRows
-		}
 		return nil, err
 	}
-	if analysis.Severity == "" && !shouldAlert.Valid && analysis.Summary == "" && analysis.Error == "" {
+	if !createdAt.Valid {
 		return nil, nil
 	}
 	analysis.ShouldAlert = shouldAlert.Valid && shouldAlert.Bool
-	if createdAt.Valid {
-		analysis.CreatedAt = createdAt.Time
-	}
+	analysis.CreatedAt = createdAt.Time
 	return &analysis, nil
 }
 
@@ -398,9 +399,6 @@ func (d *DB) Incident(incidentID string) (*IncidentRecord, error) {
 	)
 	var inc IncidentRecord
 	err := scanIncident(row, &inc)
-	if err == sql.ErrNoRows {
-		return nil, sql.ErrNoRows
-	}
 	if err != nil {
 		return nil, err
 	}
