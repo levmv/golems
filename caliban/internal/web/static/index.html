@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#111827">
+    <title>Caliban</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="64x64" href="/icons/favicon-64.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/favicon-32.png">
+    <link rel="stylesheet" href="/app.css">
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+
+      body {
+        overflow: hidden;
+      }
+
+    </style>
+  </head>
+  <body>
+    <div class="mur-app">
+      <main class="mur-main-area">
+        <header class="mur-main-header">
+          <h2 class="mur-header-title">Caliban</h2>
+        </header>
+
+        <div class="mur-chat-layout-wrapper">
+          <div class="mur-chat-scroll-area">
+            <div class="mur-chat-history" role="log" aria-live="polite" aria-atomic="false"></div>
+          </div>
+          <div class="mur-chat-form-container">
+            <form class="mur-chat-form">
+              <textarea class="mur-chat-input" placeholder="Message Caliban..." rows="1"></textarea>
+              <div class="mur-form-footer-right">
+                <button type="submit" class="mur-send-btn mur-form-icon-btn mur-action-btn" title="Send" aria-label="Send">
+                  <svg class="mur-send-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="12" y1="19" x2="12" y2="5"></line>
+                    <polyline points="5 12 12 5 19 12"></polyline>
+                  </svg>
+                  <svg class="mur-stop-icon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="4" y="4" width="16" height="16" rx="2" ry="2"></rect>
+                  </svg>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </main>
+    </div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

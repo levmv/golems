@@ -1,0 +1,41 @@
+{
+  "db_path": "/var/lib/caliban/caliban.db",
+  "workspace_path": "/var/lib/caliban/workspace",
+  "providers": {
+    "deepseek": { "api_key": "sk-..." },
+    "openrouter": { "api_key": "sk-...", "base_url": "https://openrouter.ai/api/v1" }
+  },
+  "models": {
+    "main": "deepseek/deepseek-v4-pro",
+    "cheap": "deepseek/deepseek-v4-flash"
+  },
+  "telegram": {
+    "token": "12345:ABC...",
+    "chat_id": 123456789,
+    "conversation_id": 1
+  },
+  "shell": {
+    "timeout_seconds": 120,
+    "max_output_bytes": 32768,
+    "sandbox": "require"
+  },
+  "context": {
+    "tail_budget_tokens": 48000,
+    "keep_recent_tokens": 24000
+  },
+  "max_tool_iterations": 40,
+  "web": {
+    "addr": "127.0.0.1:8721",
+    "conversation_id": 2,
+    "auth": {
+      "enabled": true
+    },
+    "push": {
+      "vapid_public_key": "",
+      "vapid_private_key": "",
+      "subject": ""
+    }
+  },
+  "timezone": "Europe/Amsterdam",
+  "log_level": "info"
+}

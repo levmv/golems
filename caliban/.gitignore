@@ -1,0 +1,16 @@
+# Local build output.
+/caliban
+
+# Local config/data. Config files may contain provider keys and bot tokens.
+/config.json
+/dev-config.json
+/*.db
+
+# Frontend dependencies are restored from package-lock.json.
+/webapp/node_modules/
+
+# Local run/test artifacts.
+*.log
+coverage.out
+.env
+.env.*

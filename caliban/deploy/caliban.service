@@ -1,0 +1,91 @@
+# caliban systemd unit — the deployment security boundary.
+#
+# Caliban runs a shell tool driven by a semi-trusted LLM: it executes arbitrary
+# bash in its workspace. The product bet is "isolation over a permission system"
+# which is only true if the deployment supplies a real box. This unit IS that
+# box. The hardening below is not boilerplate — it is the
+# only thing standing between a prompt-injected model and the host.
+#
+# This unit is the HOST boundary. A second layer — the per-command Landlock
+# sandbox (shell.sandbox=require in the config) — stops the shell from reading
+# caliban's own secrets.
+
+[Unit]
+Description=Caliban personal assistant
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# A fixed system user (create it once: `useradd --system --no-create-home \
+# --shell /usr/sbin/nologin caliban`). Fixed rather than DynamicUser so the
+# git-backed workspace keeps stable ownership across restarts.
+User=caliban
+Group=caliban
+
+# Secrets stay out of a world-readable path: systemd reads the config as root
+# and exposes a private 0400 copy at %d/config (tmpfs, owned by the service).
+# Keep /etc/golems/caliban.json mode 0600 root:root.
+LoadCredential=config:/etc/golems/caliban.json
+ExecStart=/usr/local/bin/caliban serve -config %d/config
+
+Restart=on-failure
+RestartSec=10s
+
+# Persistent state: SQLite DB + git workspace. With StateDirectory systemd
+# creates and owns /var/lib/caliban. It must match db_path / workspace_path in
+# the config (e.g. /var/lib/caliban/caliban.db, /var/lib/caliban/workspace).
+StateDirectory=caliban
+WorkingDirectory=/var/lib/caliban
+
+# --- Privilege boundary ---
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# --- Filesystem boundary ---
+# The shell may write only the workspace/DB; everything else is read-only or
+# hidden. /var/lib/caliban is writable via StateDirectory.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+
+# --- Kernel / namespace boundary ---
+RestrictNamespaces=true
+RestrictRealtime=true
+RemoveIPC=true
+SystemCallArchitectures=native
+# @system-service is broad enough for ordinary shell tooling (curl, python, …).
+# Exotic commands may need additions; tune per workload rather than widening.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+
+# --- Network ---
+# caliban needs egress (Telegram long-poll, the LLM API, and curl in the shell),
+# so egress stays open. Note this is also the model's data-exfiltration channel
+# by design. Restrict to IP sockets; no raw/packet sockets.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# --- Resource limits (contain a runaway or fork-bombing shell command) ---
+MemoryMax=1G
+CPUQuota=80%
+TasksMax=256
+LimitNOFILE=4096
+
+# MemoryDenyWriteExecute is intentionally NOT set: the shell legitimately runs
+# JIT runtimes (node, python with native extensions) that need W+X pages. Enable
+# it only if you know the workload never does.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,92 @@
+.mur-message.mur-message-user:has(.caliban-scheduled-turn) {
+	align-self: flex-start;
+	max-width: min(100%, 46rem);
+}
+
+.mur-message.mur-message-user .mur-block-text.caliban-scheduled-turn {
+	align-self: flex-start;
+	padding: 0.65rem 0.85rem;
+	border: 1px solid var(--mur-border, #e5e7eb);
+	border-radius: 8px;
+	background: var(--mur-surface, #f9fafb);
+	color: var(--mur-text-secondary, #374151);
+	cursor: pointer;
+}
+
+.caliban-scheduled-turn::before {
+	content: "Scheduled turn";
+	display: block;
+	margin-bottom: 0.35rem;
+	color: var(--mur-text-muted, #6b7280);
+	font-size: 0.72rem;
+	font-weight: 650;
+	line-height: 1.2;
+	text-transform: uppercase;
+}
+
+.caliban-scheduled-turn:not(.is-expanded) > * {
+	display: none;
+}
+
+.caliban-scheduled-turn:not(.is-expanded) > :first-child {
+	display: -webkit-box;
+	overflow: hidden;
+	margin-bottom: 0;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 1;
+}
+
+.caliban-scheduled-turn:focus-visible {
+	outline: 2px solid var(--mur-text, #111827);
+	outline-offset: 2px;
+}
+
+.caliban-push-button {
+	position: fixed;
+	top: max(12px, env(safe-area-inset-top));
+	right: max(12px, env(safe-area-inset-right));
+	z-index: 80;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 36px;
+	height: 36px;
+	border: 1px solid var(--mur-border, #e5e7eb);
+	border-radius: 8px;
+	background: var(--mur-header-button-bg, rgba(255, 255, 255, 0.86));
+	color: var(--mur-text-muted, #6b7280);
+	box-shadow: var(--mur-shadow-button, 0 1px 2px rgba(0, 0, 0, 0.05));
+	backdrop-filter: blur(6px);
+	cursor: pointer;
+}
+
+.caliban-push-button:hover {
+	color: var(--mur-text, #111827);
+	background: var(--mur-hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.caliban-push-button:focus-visible {
+	outline: 2px solid var(--mur-text, #111827);
+	outline-offset: 2px;
+}
+
+.caliban-push-button.is-enabled {
+	color: var(--mur-success, #10b981);
+}
+
+.caliban-push-button.is-blocked {
+	color: var(--mur-danger, #ef4444);
+}
+
+@media (max-width: 768px) {
+	.caliban-push-button {
+		top: calc(max(7px, env(safe-area-inset-top)) + 1px);
+		right: max(10px, env(safe-area-inset-right));
+		width: 34px;
+		height: 34px;
+		border-radius: 7px;
+		background: transparent;
+		box-shadow: none;
+		backdrop-filter: none;
+	}
+}
