@@ -119,7 +119,7 @@ func (e *Engine) executeRun(ctx context.Context, conversationID int64, input sto
 
 	profile := e.runProfile(conversationID)
 	agent, err := golem.New(golem.Config{
-		Model:              e.main,
+		Request:            e.mainRequester.Request,
 		SystemPrompt:       profile.systemPrompt(prompt),
 		History:            history,
 		Tools:              profile.tools,
@@ -185,6 +185,10 @@ func (e *Engine) logEvent(runID int64, ev golem.StreamEvent) {
 		e.logf(debugLevel, "run %d tool result %s: %s", runID, ev.Step.ToolName, truncate(ev.Step.Result, 200))
 	case golem.EventToolError:
 		e.logf(warnLevel, "run %d tool error %s: %s", runID, ev.Step.ToolName, ev.Step.Error)
+	case golem.EventModelRetry:
+		e.logf(warnLevel, "run %d model retry: %s", runID, ev.Text)
+	case golem.EventAttemptReset:
+		e.logf(debugLevel, "run %d discarded a partial model attempt", runID)
 	}
 }
 
@@ -354,17 +358,6 @@ func (e *Engine) systemPrompt(summary store.Summary, hasSummary bool) (string, e
 	return b.String(), nil
 }
 
-// estTokens approximates a message's token cost with the len/4 chars heuristic,
-// plus a small per-message overhead.
-func estTokens(m llm.Message) int {
-	n := len(m.Content)
-	for _, tc := range m.ToolCalls {
-		n += len(tc.Function.Name) + len(tc.Function.Arguments)
-	}
-	n += len(m.ToolCallID)
-	return n/4 + 4
-}
-
 // trimToBudget drops messages from the front until the estimated token total is
 // within budget, then advances the start to the next user message so the window
 // always opens on a clean turn boundary. The trailing message (the input) is
@@ -387,11 +380,11 @@ func trimToBudget(msgs []llm.Message, budget int) []llm.Message {
 	}
 	total := 0
 	for _, m := range msgs {
-		total += estTokens(m)
+		total += llm.EstimateMessageTokens(m)
 	}
 	start := 0
 	for start < len(msgs)-1 && total > budget {
-		total -= estTokens(msgs[start])
+		total -= llm.EstimateMessageTokens(msgs[start])
 		start++
 	}
 	for start < len(msgs)-1 && msgs[start].Role != llm.RoleUser {

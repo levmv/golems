@@ -91,13 +91,19 @@ func (m *scriptModel) lastRequest() (llm.Request, bool) {
 }
 
 type scriptStream struct {
-	chunks []llm.StreamChunk
-	usage  llm.Usage
-	idx    int
+	chunks   []llm.StreamChunk
+	finalErr error
+	usage    llm.Usage
+	idx      int
 }
 
 func (s *scriptStream) Recv() (llm.StreamChunk, error) {
 	if s.idx >= len(s.chunks) {
+		if s.finalErr != nil {
+			err := s.finalErr
+			s.finalErr = nil
+			return llm.StreamChunk{}, err
+		}
 		return llm.StreamChunk{}, io.EOF
 	}
 	c := s.chunks[s.idx]
@@ -108,6 +114,28 @@ func (s *scriptStream) Usage() llm.Usage { return s.usage }
 func (s *scriptStream) Close() error     { return nil }
 
 var errModel = errors.New("model exploded")
+
+type streamSequenceModel struct {
+	mu      sync.Mutex
+	streams []llm.Stream
+	calls   int
+}
+
+func (m *streamSequenceModel) Chat(context.Context, llm.Request) (*llm.Response, error) {
+	return nil, errors.New("unexpected Chat call")
+}
+
+func (m *streamSequenceModel) Stream(context.Context, llm.Request) (llm.Stream, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls++
+	if len(m.streams) == 0 {
+		return nil, errors.New("no scripted stream")
+	}
+	stream := m.streams[0]
+	m.streams = m.streams[1:]
+	return stream, nil
+}
 
 // blockingModel gates each Stream call: it announces the call's index on started
 // and blocks until the test sends on release, letting a test hold a run open
@@ -154,6 +182,15 @@ func (m *blockingModel) Stream(_ context.Context, req llm.Request) (llm.Stream, 
 // runEngine builds an engine over fresh temp store/workspace and the given model
 // and runs it under a cancelable context.
 func runEngine(t *testing.T, model golem.Model) (*Engine, *store.Store) {
+	return runEngineWithOptionalPolicy(t, model, nil)
+}
+
+func runEngineWithPolicy(t *testing.T, model golem.Model, policy golem.RequestPolicy) (*Engine, *store.Store) {
+	t.Helper()
+	return runEngineWithOptionalPolicy(t, model, &policy)
+}
+
+func runEngineWithOptionalPolicy(t *testing.T, model golem.Model, policy *golem.RequestPolicy) (*Engine, *store.Store) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "c.db"))
 	if err != nil {
@@ -164,10 +201,11 @@ func runEngine(t *testing.T, model golem.Model) (*Engine, *store.Store) {
 		t.Fatalf("workspace.Open: %v", err)
 	}
 	eng, err := New(Config{
-		Store:       st,
-		Workspace:   ws,
-		Main:        model,
-		MainModelID: "fake/model",
+		Store:         st,
+		Workspace:     ws,
+		Main:          model,
+		MainModelID:   "fake/model",
+		RequestPolicy: policy,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -503,7 +541,7 @@ func TestRestartInvariantFiresPendingRun(t *testing.T) {
 
 func TestRunFailureAppendsMessageAndStops(t *testing.T) {
 	model := &scriptModel{streamErr: errModel}
-	eng, st := runEngine(t, model)
+	eng, st := runEngineWithPolicy(t, model, golem.RequestPolicy{})
 
 	if err := eng.SubmitUserMessage(context.Background(), 1, "trigger failure", "telegram"); err != nil {
 		t.Fatal(err)
@@ -523,6 +561,28 @@ func TestRunFailureAppendsMessageAndStops(t *testing.T) {
 	all, _ := st.MessagesAfter(context.Background(), 1, 0)
 	if len(all) != 2 {
 		t.Fatalf("expected user + one failure message, got %d", len(all))
+	}
+}
+
+func TestRunRetriesPartialStreamWithoutPersistingPartialReply(t *testing.T) {
+	model := &streamSequenceModel{streams: []llm.Stream{
+		&scriptStream{chunks: []llm.StreamChunk{{Text: "partial"}}, finalErr: errors.New("connection reset")},
+		&scriptStream{chunks: []llm.StreamChunk{{Text: "complete", FinishReason: llm.FinishReasonStop}}, usage: llm.Usage{TotalTokens: 4}},
+	}}
+	eng, st := runEngineWithPolicy(t, model, golem.RequestPolicy{MaxRetries: 1})
+
+	if err := eng.SubmitUserMessage(context.Background(), 1, "retry this", "telegram"); err != nil {
+		t.Fatal(err)
+	}
+	reply := waitForLastRole(t, st, llm.RoleAI)
+	if reply.Content.Text != "complete" {
+		t.Fatalf("reply = %q", reply.Content.Text)
+	}
+	model.mu.Lock()
+	calls := model.calls
+	model.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("model calls = %d, want 2", calls)
 	}
 }
 

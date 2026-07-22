@@ -95,7 +95,7 @@ func (e *Engine) runDelegatedTurn(ctx context.Context, conversationID int64, pro
 		return "", err
 	}
 	agent, err := golem.New(golem.Config{
-		Model:              e.main,
+		Request:            e.mainRequester.Request,
 		SystemPrompt:       promptText,
 		History:            history,
 		Tools:              e.childTools(),

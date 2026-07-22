@@ -209,7 +209,7 @@ func cleanExistingPaths(paths []string) []string {
 
 func runnerListTool(manager *RunnerManager) golem.Tool {
 	schema := jsonschema.Obj()
-	return golem.FunctionTool("runner_list",
+	return golem.FunctionToolWithEffect(golem.ToolEffectRead, "runner_list",
 		"List trusted external agent runners available to Caliban.",
 		schema,
 		func(ctx context.Context, call llm.ToolCall) (golem.ToolResult, error) {

@@ -178,7 +178,7 @@ func parseAtWithZoneSuffix(s string, loc *time.Location) (time.Time, bool) {
 }
 
 func listScheduledTool(s Scheduler, loc *time.Location) golem.Tool {
-	return golem.FunctionTool("list_scheduled",
+	return golem.FunctionToolWithEffect(golem.ToolEffectRead, "list_scheduled",
 		"List the currently scheduled reminders and agent turns, soonest first.",
 		jsonschema.Obj(),
 		func(ctx context.Context, _ llm.ToolCall) (golem.ToolResult, error) {

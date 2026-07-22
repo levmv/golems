@@ -746,7 +746,7 @@ func taskListTool(manager *BackgroundManager) golem.Tool {
 			Description: "Maximum number of tasks to show. Defaults to 20; capped at 100.",
 		}),
 	)
-	return golem.FunctionTool("task_list",
+	return golem.FunctionToolWithEffect(golem.ToolEffectRead, "task_list",
 		"List managed background tasks started by shell(run_in_background=true).",
 		schema,
 		func(ctx context.Context, call llm.ToolCall) (golem.ToolResult, error) {

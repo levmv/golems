@@ -43,6 +43,16 @@ const (
 	defaultMaxToolIterations = 40
 )
 
+func defaultRequestPolicy() golem.RequestPolicy {
+	return golem.RequestPolicy{
+		MaxRetries:        -1,
+		RetryBudget:       5 * time.Minute,
+		BaseDelay:         time.Second,
+		MaxDelay:          30 * time.Second,
+		StreamIdleTimeout: 2 * time.Minute,
+	}
+}
+
 // Config wires the engine's dependencies. Tools and the main model are built in
 // main; the store and workspace are opened there too.
 type Config struct {
@@ -65,24 +75,27 @@ type Config struct {
 	MaxToolIterations int
 	Timezone          *time.Location
 	Logger            llm.Logger
+	// RequestPolicy overrides the resilient default. The pointer distinguishes
+	// an explicit zero policy (one attempt, no idle timeout) from no override.
+	RequestPolicy *golem.RequestPolicy
 }
 
 // Engine executes conversation runs and broadcasts their stream events.
 type Engine struct {
-	store        *store.Store
-	workspace    *workspace.Workspace
-	main         golem.Model
-	modelID      string
-	cheap        golem.Model
-	cheapModelID string
-	tools        []golem.Tool
-	skillCatalog string
-	tasks        *tasks.Queue
-	tailTok      int
-	keepTok      int
-	maxToolIter  int
-	loc          *time.Location
-	log          llm.Logger
+	store          *store.Store
+	workspace      *workspace.Workspace
+	mainRequester  *golem.Requester
+	modelID        string
+	cheapRequester *golem.Requester
+	cheapModelID   string
+	tools          []golem.Tool
+	skillCatalog   string
+	tasks          *tasks.Queue
+	tailTok        int
+	keepTok        int
+	maxToolIter    int
+	loc            *time.Location
+	log            llm.Logger
 	// freeTimeConvID is the resolved int id of the free-time conversation (looked
 	// up by its sentinel uuid at Start), or 0 when free-time is disabled. Set once
 	// before any worker is spawned, then read by runProfile.
@@ -130,6 +143,21 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.Main == nil {
 		return nil, fmt.Errorf("engine: main model is required")
 	}
+	requestPolicy := defaultRequestPolicy()
+	if cfg.RequestPolicy != nil {
+		requestPolicy = *cfg.RequestPolicy
+	}
+	mainRequester, err := golem.NewRequester(golem.RequesterConfig{Model: cfg.Main, Policy: requestPolicy})
+	if err != nil {
+		return nil, fmt.Errorf("engine: main requester: %w", err)
+	}
+	var cheapRequester *golem.Requester
+	if cfg.Cheap != nil {
+		cheapRequester, err = golem.NewRequester(golem.RequesterConfig{Model: cfg.Cheap, Policy: requestPolicy})
+		if err != nil {
+			return nil, fmt.Errorf("engine: cheap requester: %w", err)
+		}
+	}
 	tail := cfg.TailBudgetTokens
 	if tail <= 0 {
 		tail = defaultTailBudgetTokens
@@ -152,22 +180,22 @@ func New(cfg Config) (*Engine, error) {
 		loc = time.UTC
 	}
 	e := &Engine{
-		store:        cfg.Store,
-		workspace:    cfg.Workspace,
-		main:         cfg.Main,
-		modelID:      cfg.MainModelID,
-		cheap:        cfg.Cheap,
-		cheapModelID: cfg.CheapModelID,
-		tools:        cfg.Tools,
-		skillCatalog: cfg.SkillCatalog,
-		tasks:        cfg.Tasks,
-		tailTok:      tail,
-		keepTok:      keep,
-		maxToolIter:  maxToolIter,
-		loc:          loc,
-		log:          cfg.Logger,
-		workers:      make(map[int64]chan struct{}),
-		subscribers:  make(map[int]func(Event)),
+		store:          cfg.Store,
+		workspace:      cfg.Workspace,
+		mainRequester:  mainRequester,
+		modelID:        cfg.MainModelID,
+		cheapRequester: cheapRequester,
+		cheapModelID:   cfg.CheapModelID,
+		tools:          cfg.Tools,
+		skillCatalog:   cfg.SkillCatalog,
+		tasks:          cfg.Tasks,
+		tailTok:        tail,
+		keepTok:        keep,
+		maxToolIter:    maxToolIter,
+		loc:            loc,
+		log:            cfg.Logger,
+		workers:        make(map[int64]chan struct{}),
+		subscribers:    make(map[int]func(Event)),
 	}
 	// The main conversation row must exist before anything appends to it — a
 	// reminder firing or a scheduled turn can run before Start does. Make it a

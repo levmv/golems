@@ -34,7 +34,7 @@ Output only the summary text.`
 // has grown past the budget. It is cheap to call after every run: it does one
 // token estimate and enqueues at most one pending task per conversation.
 func (e *Engine) maybeScheduleCompaction(ctx context.Context, conversationID int64) {
-	if e.tasks == nil || e.cheap == nil {
+	if e.tasks == nil || e.cheapRequester == nil {
 		return
 	}
 	tail, _, err := e.tailAfterSummary(ctx, conversationID)
@@ -84,7 +84,7 @@ func (e *Engine) maybeScheduleCompaction(ctx context.Context, conversationID int
 // using the cheap model. It is idempotent: if the tail is already within budget
 // (a prior compaction handled it), it does nothing.
 func (e *Engine) HandleCompaction(ctx context.Context, t tasks.Task) error {
-	if e.cheap == nil {
+	if e.cheapRequester == nil {
 		return tasks.Discard("compaction: no cheap model configured")
 	}
 	payload, err := tasks.DecodeJSON[CompactionPayload](t)
@@ -159,12 +159,12 @@ func (e *Engine) summarize(ctx context.Context, prev string, folded []store.Mess
 		b.WriteString(renderForSummary(m))
 	}
 
-	resp, err := e.cheap.Chat(ctx, llm.Request{
+	resp, err := e.cheapRequester.Request(ctx, 0, llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: compactionSummarizerPrompt},
 			{Role: llm.RoleUser, Content: b.String()},
 		},
-	})
+	}, false, nil)
 	if err != nil {
 		return "", llm.Usage{}, err
 	}
@@ -250,12 +250,11 @@ func foldPoint(msgs []store.Message, keepTokens int) int {
 }
 
 func estContentTokens(c store.Content) int {
-	n := len(c.Text)
-	for _, tc := range c.ToolCalls {
-		n += len(tc.Function.Name) + len(tc.Function.Arguments)
-	}
-	n += len(c.ToolCallID)
-	return n/4 + 4
+	return llm.EstimateMessageTokens(llm.Message{
+		Content:    c.Text,
+		ToolCalls:  c.ToolCalls,
+		ToolCallID: c.ToolCallID,
+	})
 }
 
 func estMessagesTokens(msgs []store.Message) int {

@@ -39,7 +39,7 @@ type historySearchArgs struct {
 // History returns tools for searching the current conversation transcript.
 func History(searcher HistorySearcher) []golem.Tool {
 	return []golem.Tool{
-		golem.FunctionTool("history_search",
+		golem.FunctionToolWithEffect(golem.ToolEffectRead, "history_search",
 			"Search older raw transcript messages in the current conversation when the compacted summary or memory index is not enough. "+
 				"Use concise substring queries; results are newest first.",
 			jsonschema.Obj(

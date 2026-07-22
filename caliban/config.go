@@ -191,11 +191,11 @@ func (c *Config) registry() *llm.Registry {
 	return r
 }
 
-// model resolves a configured model URI into a retrying, logging handle.
+// model resolves a configured model URI and attaches request logging.
 func (c *Config) model(r *llm.Registry, uri string, log llm.Logger) (llm.Model, error) {
 	m, err := r.Model(uri)
 	if err != nil {
 		return llm.Model{}, fmt.Errorf("config: model %q: %w", uri, err)
 	}
-	return m.WithRetries(3, time.Second).WithLogging(log), nil
+	return m.WithLogging(log), nil
 }

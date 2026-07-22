@@ -160,12 +160,12 @@ func (e *Engine) reflectOnce(ctx context.Context, current, activity string) (str
 	b.WriteString("\n")
 	b.WriteString(activity)
 
-	resp, err := e.main.Chat(ctx, llm.Request{
+	resp, err := e.mainRequester.Request(ctx, 0, llm.Request{
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: reflectionPrompt},
 			{Role: llm.RoleUser, Content: b.String()},
 		},
-	})
+	}, false, nil)
 	if err != nil {
 		return "", llm.Usage{}, err
 	}

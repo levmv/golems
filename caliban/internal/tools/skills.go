@@ -102,7 +102,7 @@ func parseSkill(path, content string) (Skill, error) {
 
 func skillListTool(lib *SkillLibrary) golem.Tool {
 	schema := jsonschema.Obj()
-	return golem.FunctionTool("skill_list",
+	return golem.FunctionToolWithEffect(golem.ToolEffectRead, "skill_list",
 		"List builtin Caliban skills. Skills are detailed operating procedures; read one before using a matching capability.",
 		schema,
 		func(ctx context.Context, call llm.ToolCall) (golem.ToolResult, error) {
@@ -119,7 +119,7 @@ func skillReadTool(lib *SkillLibrary) golem.Tool {
 			Description: "Skill name from skill_list, for example runners.",
 		}),
 	)
-	return golem.FunctionTool("skill_read",
+	return golem.FunctionToolWithEffect(golem.ToolEffectRead, "skill_read",
 		"Read the full instructions for one builtin Caliban skill.",
 		schema,
 		func(ctx context.Context, call llm.ToolCall) (golem.ToolResult, error) {
