@@ -49,7 +49,9 @@ func (m Model) WithMaxTokens(mt int) Model {
 	return m
 }
 
-// WithRetries wraps the model's execution with automatic exponential backoff.
+// WithRetries retries Chat failures and failures while opening a Stream. Errors
+// after Stream returns must be handled by the stream-consuming layer; agent
+// runtimes should prefer golem.Requester, which can retry a complete stream.
 func (m Model) WithRetries(maxRetries int, baseDelay time.Duration) Model {
 	if maxRetries <= 0 {
 		return m

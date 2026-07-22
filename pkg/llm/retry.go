@@ -25,7 +25,7 @@ func (r *retryClient) Chat(ctx context.Context, req *Request) (*Response, error)
 		if err == nil {
 			return resp, nil
 		}
-		if !isRetryable(err) {
+		if !IsRetryable(err) {
 			return nil, err
 		}
 
@@ -33,7 +33,7 @@ func (r *retryClient) Chat(ctx context.Context, req *Request) (*Response, error)
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(backoffDelay(r.baseDelay, i)):
+			case <-time.After(retryDelay(err, r.baseDelay, i)):
 			}
 		}
 	}
@@ -50,7 +50,7 @@ func (r *retryClient) Stream(ctx context.Context, req *Request) (Stream, error) 
 			return stream, nil
 		}
 
-		if !isRetryable(err) {
+		if !IsRetryable(err) {
 			return nil, err
 		}
 
@@ -58,7 +58,7 @@ func (r *retryClient) Stream(ctx context.Context, req *Request) (Stream, error) 
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(backoffDelay(r.baseDelay, i)):
+			case <-time.After(retryDelay(err, r.baseDelay, i)):
 			}
 		}
 	}
@@ -86,7 +86,19 @@ func backoffDelay(base time.Duration, attempt int) time.Duration {
 	return delay
 }
 
-func isRetryable(err error) bool {
+func retryDelay(err error, base time.Duration, attempt int) time.Duration {
+	delay := backoffDelay(base, attempt)
+	var providerErr *Error
+	if errors.As(err, &providerErr) && providerErr.RetryAfter > delay {
+		delay = min(providerErr.RetryAfter, maxDelay)
+	}
+	return delay
+}
+
+// IsRetryable reports whether retrying a failed provider request can reasonably
+// succeed without changing the request. Agent runtimes may add recovery for
+// non-retryable request errors such as an oversized context.
+func IsRetryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}

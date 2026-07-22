@@ -71,6 +71,23 @@ func (t *Translator) Feed(ev golem.StreamEvent) {
 		t.emitToolOutcome(ev.Step.ToolCallID, ev.Step.Result, StatusComplete, false)
 	case golem.EventToolError:
 		t.emitToolOutcome(ev.Step.ToolCallID, ev.Step.Error, StatusError, true)
+	case golem.EventAttemptReset:
+		if !t.assistantStarted {
+			return
+		}
+		// murm-ui deliberately has no provider-specific retry event, but a
+		// message_start carrying a non-empty block list replaces the current
+		// streamed blocks. Reset to one empty text block, then let the next
+		// attempt reuse the stable message and block ids.
+		t.emit(StreamEvent{Type: EventMessageStart, Message: &Message{
+			ID:   t.assistantID(),
+			Role: RoleAssistant,
+			Blocks: []ContentBlock{{
+				ID:   textBlockID(t.run, t.iteration),
+				Type: BlockText,
+			}},
+			RunID: t.run,
+		}})
 	case golem.EventDone:
 		t.emit(StreamEvent{
 			Type:      EventUsage,

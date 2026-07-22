@@ -37,7 +37,7 @@ func (r *Registry) WithProvider(name, token string, opts ...ProviderOption) *Reg
 		opt(&cfg)
 	}
 
-	r.providers[name] = newOpenAIAdapter(openai.NewClientWithConfig(cfg))
+	r.providers[name] = newOpenAIAdapter(name, openai.NewClientWithConfig(cfg))
 	return r
 }
 

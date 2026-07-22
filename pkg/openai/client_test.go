@@ -5,7 +5,18 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, time.July, 21, 12, 0, 0, 0, time.UTC)
+	if got := parseRetryAfter("17", now); got != 17*time.Second {
+		t.Fatalf("seconds Retry-After = %s", got)
+	}
+	if got := parseRetryAfter(now.Add(45*time.Second).Format(http.TimeFormat), now); got != 45*time.Second {
+		t.Fatalf("date Retry-After = %s", got)
+	}
+}
 
 func TestDefaultHTTPClientUsesResponseHeaderTimeout(t *testing.T) {
 	client := DefaultHTTPClient()

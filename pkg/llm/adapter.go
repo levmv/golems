@@ -9,12 +9,14 @@ import (
 )
 
 type openAIAdapter struct {
-	client *openai.Client
+	client   *openai.Client
+	provider string
 }
 
-func newOpenAIAdapter(client *openai.Client) *openAIAdapter {
+func newOpenAIAdapter(provider string, client *openai.Client) *openAIAdapter {
 	return &openAIAdapter{
-		client: client,
+		client:   client,
+		provider: provider,
 	}
 }
 
@@ -203,7 +205,7 @@ func (a *openAIAdapter) Chat(ctx context.Context, req *Request) (*Response, erro
 
 	resp, err := a.client.CreateChatCompletion(ctx, oaiReq)
 	if err != nil {
-		return nil, wrapOpenAIError(err)
+		return nil, wrapProviderError(a.provider, err)
 	}
 
 	var choice openai.ChatCompletionChoice
@@ -241,16 +243,18 @@ func (a *openAIAdapter) Stream(ctx context.Context, req *Request) (Stream, error
 
 	stream, err := a.client.CreateChatCompletionStream(ctx, oaiReq)
 	if err != nil {
-		return nil, wrapOpenAIError(err)
+		return nil, wrapProviderError(a.provider, err)
 	}
 
 	return &streamAdapter{
-		stream: stream,
+		stream:   stream,
+		provider: a.provider,
 	}, nil
 }
 
 type streamAdapter struct {
 	stream    *openai.ChatCompletionStream
+	provider  string
 	usage     Usage
 	toolCalls []ToolCall
 }
@@ -261,7 +265,7 @@ func (s *streamAdapter) Recv() (StreamChunk, error) {
 		if err == io.EOF {
 			return StreamChunk{}, err
 		}
-		return StreamChunk{}, wrapOpenAIError(err)
+		return StreamChunk{}, wrapProviderError(s.provider, err)
 	}
 
 	chunk := StreamChunk{}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"testing"
+	"time"
 )
 
 type failingClient struct {
@@ -92,5 +93,12 @@ func TestRetryClientRetriesRetryableStatus(t *testing.T) {
 				t.Fatalf("chat calls = %d, want 3", client.chatCalls)
 			}
 		})
+	}
+}
+
+func TestRetryDelayHonorsProviderRetryAfter(t *testing.T) {
+	err := &Error{RetryAfter: 10 * time.Second}
+	if got := retryDelay(err, time.Second, 0); got != 10*time.Second {
+		t.Fatalf("retryDelay() = %s, want 10s", got)
 	}
 }

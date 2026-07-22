@@ -50,6 +50,15 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
+func (u Usage) Add(other Usage) Usage {
+	return Usage{
+		PromptTokens:     u.PromptTokens + other.PromptTokens,
+		CompletionTokens: u.CompletionTokens + other.CompletionTokens,
+		CachedTokens:     u.CachedTokens + other.CachedTokens,
+		TotalTokens:      u.TotalTokens + other.TotalTokens,
+	}
+}
+
 type Response struct {
 	Content          string       `json:"content"`
 	ReasoningContent string       `json:"reasoning_content,omitempty"`

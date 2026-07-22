@@ -5,16 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // APIError provides error information returned by the API.
 type APIError struct {
-	Code           any     `json:"code,omitempty"`
-	Message        string  `json:"message"`
-	Param          *string `json:"param,omitempty"`
-	Type           string  `json:"type,omitempty"`
-	HTTPStatus     string  `json:"-"`
-	HTTPStatusCode int     `json:"-"`
+	Code           any           `json:"code,omitempty"`
+	Message        string        `json:"message"`
+	Param          *string       `json:"param,omitempty"`
+	Type           string        `json:"type,omitempty"`
+	HTTPStatus     string        `json:"-"`
+	HTTPStatusCode int           `json:"-"`
+	RetryAfter     time.Duration `json:"-"`
 }
 
 // RequestError provides information about generic request errors.
@@ -23,6 +25,7 @@ type RequestError struct {
 	HTTPStatusCode int
 	Err            error
 	Body           []byte
+	RetryAfter     time.Duration
 }
 
 type ErrorResponse struct {

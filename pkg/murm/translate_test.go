@@ -121,6 +121,29 @@ func TestTranslatorPlainTextTurn(t *testing.T) {
 	}
 }
 
+func TestTranslatorResetsPartialModelAttempt(t *testing.T) {
+	tr, got := collect("r")
+	tr.Feed(golem.StreamEvent{Kind: golem.EventTextDelta, Text: "partial"})
+	tr.Feed(golem.StreamEvent{Kind: golem.EventAttemptReset})
+	tr.Feed(golem.StreamEvent{Kind: golem.EventTextDelta, Text: "complete"})
+
+	events := *got
+	if len(events) != 4 {
+		t.Fatalf("got %d events:\n%s", len(events), dump(events))
+	}
+	reset := events[2]
+	if reset.Type != EventMessageStart || reset.Message == nil || len(reset.Message.Blocks) != 1 {
+		t.Fatalf("reset event = %+v", reset)
+	}
+	block := reset.Message.Blocks[0]
+	if block.Type != BlockText || block.Text != "" || block.ID != events[1].BlockID {
+		t.Fatalf("reset block = %+v, first delta = %+v", block, events[1])
+	}
+	if events[3].BlockID != block.ID || events[3].Delta != "complete" {
+		t.Fatalf("replacement delta = %+v", events[3])
+	}
+}
+
 func TestMessageStartMarshalsEmptyBlocksArray(t *testing.T) {
 	ev := StreamEvent{Type: EventMessageStart, Message: &Message{
 		ID: "m1", Role: RoleAssistant, Blocks: []ContentBlock{}, RunID: "r",

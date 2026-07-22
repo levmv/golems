@@ -7,6 +7,21 @@ import (
 	"github.com/levmv/golems/pkg/openai"
 )
 
+func TestIsContextLengthError(t *testing.T) {
+	for _, err := range []error{
+		&Error{Code: "context_length_exceeded"},
+		&Error{Message: "maximum context length is 128k"},
+		&Error{Message: "too many tokens in request"},
+	} {
+		if !IsContextLengthError(err) {
+			t.Fatalf("IsContextLengthError(%v) = false", err)
+		}
+	}
+	if IsContextLengthError(errors.New("maximum context length")) {
+		t.Fatal("plain error was classified as a provider context error")
+	}
+}
+
 func TestWrapOpenAIErrorAPIError(t *testing.T) {
 	apiErr := &openai.APIError{
 		Code:           "invalid_api_key",

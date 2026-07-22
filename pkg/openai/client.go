@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 )
 
 const maxErrorResponseBodyBytes = 1 << 20
@@ -137,12 +139,32 @@ func (c *Client) handleErrorResp(resp *http.Response) error {
 			HTTPStatus:     resp.Status,
 			HTTPStatusCode: resp.StatusCode,
 			Body:           body,
+			RetryAfter:     parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
 		}
 	}
 
 	errRes.Error.HTTPStatus = resp.Status
 	errRes.Error.HTTPStatusCode = resp.StatusCode
+	errRes.Error.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 	return errRes.Error
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		if seconds > 0 {
+			return time.Duration(seconds) * time.Second
+		}
+		return 0
+	}
+	when, err := http.ParseTime(value)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	return when.Sub(now)
 }
 
 // fullURL returns full URL for request.

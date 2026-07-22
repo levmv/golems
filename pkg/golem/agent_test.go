@@ -6,10 +6,57 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/levmv/golems/pkg/jsonschema"
 	"github.com/levmv/golems/pkg/llm"
 )
+
+func TestRunTurnRunsSiblingReadToolsConcurrentlyInSourceOrder(t *testing.T) {
+	calls := []llm.ToolCall{
+		{ID: "call-1", Function: llm.ToolFunction{Name: "read", Arguments: `{"path":"one"}`}},
+		{ID: "call-2", Function: llm.ToolFunction{Name: "read", Arguments: `{"path":"two"}`}},
+	}
+	model := &fakeModel{chatResponses: []*llm.Response{
+		{ToolCalls: calls, FinishReason: llm.FinishReasonToolUse},
+		{Content: "done", FinishReason: llm.FinishReasonStop},
+	}}
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	tool := FunctionToolWithEffect(ToolEffectRead, "read", "read", jsonschema.Object(nil), func(_ context.Context, call llm.ToolCall) (ToolResult, error) {
+		started <- call.ID
+		<-release
+		return ToolResult{Content: call.ID + " result"}, nil
+	})
+	tools, err := NewToolSet([]Tool{tool})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type replyResult struct {
+		turn *Turn
+		err  error
+	}
+	done := make(chan replyResult, 1)
+	go func() {
+		turn, err := RunTurn(context.Background(), TurnConfig{Model: model, Tools: tools, Input: "read both"})
+		done <- replyResult{turn: turn, err: err}
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("sibling read calls did not start concurrently")
+		}
+	}
+	close(release)
+	result := <-done
+	if result.err != nil {
+		t.Fatal(result.err)
+	}
+	if len(result.turn.Steps) != 4 || result.turn.Steps[0].ToolCallID != "call-1" || result.turn.Steps[1].ToolCallID != "call-1" || result.turn.Steps[2].ToolCallID != "call-2" || result.turn.Steps[3].ToolCallID != "call-2" {
+		t.Fatalf("steps are not in source order: %#v", result.turn.Steps)
+	}
+}
 
 type fakeModel struct {
 	chatResponses []*llm.Response
@@ -50,6 +97,22 @@ type fakeStream struct {
 	usage  llm.Usage
 	idx    int
 	closed bool
+}
+
+func TestAgentAcceptsRequestFunctionWithoutModel(t *testing.T) {
+	agent, err := New(Config{Request: func(_ context.Context, _ int, _ llm.Request, _ bool, _ StreamFunc) (*llm.Response, error) {
+		return &llm.Response{Content: "from requester", FinishReason: llm.FinishReasonStop}, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := agent.Reply(context.Background(), "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Reply != "from requester" {
+		t.Fatalf("reply = %q", turn.Reply)
+	}
 }
 
 func (s *fakeStream) Recv() (llm.StreamChunk, error) {
@@ -368,54 +431,7 @@ func TestHistorySeedAndSetHistoryAreCopied(t *testing.T) {
 	}
 }
 
-func TestNegativeMaxToolIterationsAllowsUnlimitedToolLoops(t *testing.T) {
-	firstCall := llm.ToolCall{
-		ID: "call_1",
-		Function: llm.ToolFunction{
-			Name:      "echo",
-			Arguments: `{"n":1}`,
-		},
-	}
-	secondCall := llm.ToolCall{
-		ID: "call_2",
-		Function: llm.ToolFunction{
-			Name:      "echo",
-			Arguments: `{"n":2}`,
-		},
-	}
-	model := &fakeModel{
-		chatResponses: []*llm.Response{
-			{ToolCalls: []llm.ToolCall{firstCall}, FinishReason: llm.FinishReasonToolUse},
-			{ToolCalls: []llm.ToolCall{secondCall}, FinishReason: llm.FinishReasonToolUse},
-			{Content: "done", FinishReason: llm.FinishReasonStop},
-		},
-	}
-	tool := FunctionTool("echo", "Echo", jsonschema.Object(nil), func(_ context.Context, call llm.ToolCall) (ToolResult, error) {
-		return ToolResult{Content: call.Function.Arguments}, nil
-	})
-
-	agent, err := New(Config{
-		Model:             model,
-		Tools:             []Tool{tool},
-		MaxToolIterations: UnlimitedToolIterations,
-	})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	turn, err := agent.Reply(context.Background(), "loop")
-	if err != nil {
-		t.Fatalf("Reply() error = %v", err)
-	}
-	if turn.Reply != "done" {
-		t.Fatalf("reply = %q, want done", turn.Reply)
-	}
-	if len(turn.Steps) != 4 {
-		t.Fatalf("steps len = %d, want 4", len(turn.Steps))
-	}
-}
-
-func TestReplyToolLoopLimitForcesFinalReplyAndCommitsTurn(t *testing.T) {
+func TestRunTurnToolLoopLimitForcesFinalReply(t *testing.T) {
 	firstCall := llm.ToolCall{
 		ID: "call_1",
 		Function: llm.ToolFunction{
@@ -443,18 +459,14 @@ func TestReplyToolLoopLimitForcesFinalReplyAndCommitsTurn(t *testing.T) {
 		return ToolResult{Content: call.Function.Arguments}, nil
 	})
 
-	agent, err := New(Config{
-		Model:             model,
-		Tools:             []Tool{tool},
-		MaxToolIterations: 1,
-	})
+	tools, err := NewToolSet([]Tool{tool})
 	if err != nil {
-		t.Fatalf("New() error = %v", err)
+		t.Fatalf("NewToolSet() error = %v", err)
 	}
 
-	turn, err := agent.Reply(context.Background(), "loop")
+	turn, err := RunTurn(context.Background(), TurnConfig{Model: model, Tools: tools, Input: "loop", MaxToolIterations: 1})
 	if err != nil {
-		t.Fatalf("Reply() error = %v", err)
+		t.Fatalf("RunTurn() error = %v", err)
 	}
 	if turn.Reply != "final without tools" {
 		t.Fatalf("reply = %q, want final without tools", turn.Reply)
@@ -475,28 +487,14 @@ func TestReplyToolLoopLimitForcesFinalReplyAndCommitsTurn(t *testing.T) {
 		t.Fatalf("requests len = %d, want 3", len(model.requests))
 	}
 	finalReq := model.requests[2]
-	if finalReq.ToolChoice == nil || finalReq.ToolChoice.Mode != llm.ToolChoiceAuto {
-		t.Fatalf("final request tool choice = %#v, want auto", finalReq.ToolChoice)
+	if finalReq.ToolChoice == nil || finalReq.ToolChoice.Mode != llm.ToolChoiceNone {
+		t.Fatalf("final request tool choice = %#v, want none", finalReq.ToolChoice)
 	}
-	if got := finalReq.Messages[len(finalReq.Messages)-2]; got.Role != llm.RoleTool || got.ToolCallID != "call_1" {
-		t.Fatalf("final request penultimate message = %#v, want first tool result", got)
+	if got := finalReq.Messages[len(finalReq.Messages)-2]; got.Role != llm.RoleTool || got.ToolCallID != "call_2" || !strings.Contains(got.Content, "tool iteration limit reached") {
+		t.Fatalf("final request penultimate message = %#v, want rejected tool result", got)
 	}
 	if got := finalReq.Messages[len(finalReq.Messages)-1]; got.Role != llm.RoleUser || !strings.Contains(got.Content, "Tool call limit reached") {
 		t.Fatalf("final request last message = %#v, want tool limit prompt", got)
-	}
-
-	history := agent.History()
-	if len(history) != 4 {
-		t.Fatalf("history len = %d, want 4: %#v", len(history), history)
-	}
-	if history[1].Role != llm.RoleAI || len(history[1].ToolCalls) != 1 {
-		t.Fatalf("history first assistant tool call = %#v", history[1])
-	}
-	if history[2].Role != llm.RoleTool || history[2].ToolCallID != "call_1" {
-		t.Fatalf("history first tool result = %#v", history[2])
-	}
-	if history[3].Role != llm.RoleAI || history[3].Content != "final without tools" {
-		t.Fatalf("history final reply = %#v", history[3])
 	}
 }
 
@@ -568,370 +566,6 @@ func TestReasoningEchoedWithinTurnButStrippedAcrossTurns(t *testing.T) {
 	// Retained history stays faithful so consumers can persist reasoning.
 	if got := toolCallReasoning(agent.History()); got != "t1 plan" {
 		t.Fatalf("history reasoning = %q, want retained", got)
-	}
-}
-
-func TestReplyExecutesToolLoopAndStoresTrace(t *testing.T) {
-	call := llm.ToolCall{
-		ID:   "call_1",
-		Type: string(llm.ToolTypeFunction),
-		Function: llm.ToolFunction{
-			Name:      "read_file",
-			Arguments: `{"path":"README.md"}`,
-		},
-	}
-	model := &fakeModel{
-		chatResponses: []*llm.Response{
-			{
-				ReasoningContent: "tool thought",
-				ToolCalls:        []llm.ToolCall{call},
-				FinishReason:     llm.FinishReasonToolUse,
-				Usage:            llm.Usage{TotalTokens: 3},
-			},
-			{
-				Content:          " done ",
-				ReasoningContent: "final thought",
-				FinishReason:     llm.FinishReasonStop,
-				Usage:            llm.Usage{TotalTokens: 4},
-			},
-		},
-	}
-	tool := FunctionTool(
-		"read_file",
-		"Read a file",
-		jsonschema.Object(map[string]jsonschema.Schema{
-			"path": jsonschema.String("Path under root"),
-		}, "path"),
-		func(_ context.Context, call llm.ToolCall) (ToolResult, error) {
-			if call.Function.Arguments != `{"path":"README.md"}` {
-				t.Fatalf("arguments = %q", call.Function.Arguments)
-			}
-			return ToolResult{Content: "README contents"}, nil
-		},
-	)
-
-	agent, err := New(Config{Model: model, SystemPrompt: "system", Tools: []Tool{tool}})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	turn, err := agent.Reply(context.Background(), "what is in readme?")
-	if err != nil {
-		t.Fatalf("Reply() error = %v", err)
-	}
-	if turn.Reply != "done" {
-		t.Fatalf("reply = %q, want done", turn.Reply)
-	}
-	if turn.Usage.TotalTokens != 7 {
-		t.Fatalf("usage = %d, want 7", turn.Usage.TotalTokens)
-	}
-	if turn.Reasoning != "tool thought\nfinal thought" {
-		t.Fatalf("reasoning = %q, want per-response aggregate", turn.Reasoning)
-	}
-	if len(turn.Steps) != 2 {
-		t.Fatalf("steps len = %d, want 2", len(turn.Steps))
-	}
-	if turn.Steps[0].Kind != StepToolCall || turn.Steps[0].ToolName != "read_file" {
-		t.Fatalf("call step = %#v", turn.Steps[0])
-	}
-	if turn.Steps[1].Kind != StepToolResult || turn.Steps[1].Result != "README contents" {
-		t.Fatalf("result step = %#v", turn.Steps[1])
-	}
-
-	if len(model.requests) != 2 {
-		t.Fatalf("requests len = %d, want 2", len(model.requests))
-	}
-	if len(model.requests[0].Tools) != 1 || model.requests[0].Tools[0].Function.Name != "read_file" {
-		t.Fatalf("first request tools = %#v", model.requests[0].Tools)
-	}
-
-	secondMessages := model.requests[1].Messages
-	assistantMsg := secondMessages[len(secondMessages)-2]
-	toolMsg := secondMessages[len(secondMessages)-1]
-	if assistantMsg.Role != llm.RoleAI || len(assistantMsg.ToolCalls) != 1 {
-		t.Fatalf("assistant tool message = %#v", assistantMsg)
-	}
-	if toolMsg.Role != llm.RoleTool || toolMsg.ToolCallID != "call_1" || toolMsg.Content != "README contents" {
-		t.Fatalf("tool result message = %#v", toolMsg)
-	}
-
-	history := agent.History()
-	if len(history) != 4 {
-		t.Fatalf("history len = %d, want 4", len(history))
-	}
-	if history[1].Role != llm.RoleAI || len(history[1].ToolCalls) != 1 || history[1].ReasoningContent != "tool thought" {
-		t.Fatalf("history assistant tool call = %#v", history[1])
-	}
-	if history[2].Role != llm.RoleTool || history[2].ToolCallID != "call_1" {
-		t.Fatalf("history tool result = %#v", history[2])
-	}
-	if history[3].Role != llm.RoleAI || history[3].Content != "done" || history[3].ReasoningContent != "final thought" {
-		t.Fatalf("history final reply = %#v", history[3])
-	}
-}
-
-func TestReplyFeedsToolErrorBackToModel(t *testing.T) {
-	call := llm.ToolCall{
-		ID:   "call_missing",
-		Type: string(llm.ToolTypeFunction),
-		Function: llm.ToolFunction{
-			Name:      "missing_tool",
-			Arguments: `{}`,
-		},
-	}
-	model := &fakeModel{
-		chatResponses: []*llm.Response{
-			{ToolCalls: []llm.ToolCall{call}, FinishReason: llm.FinishReasonToolUse},
-			{Content: "I cannot use that tool.", FinishReason: llm.FinishReasonStop},
-		},
-	}
-
-	agent, err := New(Config{Model: model, SystemPrompt: "system"})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	turn, err := agent.Reply(context.Background(), "use a missing tool")
-	if err != nil {
-		t.Fatalf("Reply() error = %v", err)
-	}
-	if len(turn.Steps) != 2 {
-		t.Fatalf("steps len = %d, want 2", len(turn.Steps))
-	}
-	if turn.Steps[1].Kind != StepToolError || !strings.Contains(turn.Steps[1].Error, "unknown tool") {
-		t.Fatalf("error step = %#v", turn.Steps[1])
-	}
-
-	secondMessages := model.requests[1].Messages
-	toolMsg := secondMessages[len(secondMessages)-1]
-	if toolMsg.Role != llm.RoleTool || !strings.Contains(toolMsg.Content, "unknown tool") {
-		t.Fatalf("tool error message = %#v", toolMsg)
-	}
-}
-
-func TestStreamStoresReasoningOnEachAssistantMessage(t *testing.T) {
-	call := llm.ToolCall{
-		ID:   "call_1",
-		Type: string(llm.ToolTypeFunction),
-		Function: llm.ToolFunction{
-			Name:      "read_file",
-			Arguments: `{"path":"README.md"}`,
-		},
-	}
-	firstStream := &fakeStream{
-		chunks: []llm.StreamChunk{
-			{ReasoningContent: "need tool "},
-			{ToolCalls: []llm.ToolCall{call}, FinishReason: llm.FinishReasonToolUse},
-		},
-	}
-	secondStream := &fakeStream{
-		chunks: []llm.StreamChunk{
-			{ReasoningContent: "answer now "},
-			{Text: "done", FinishReason: llm.FinishReasonStop},
-		},
-	}
-	model := &fakeModel{streams: []*fakeStream{firstStream, secondStream}}
-	tool := FunctionTool(
-		"read_file",
-		"Read a file",
-		jsonschema.Object(map[string]jsonschema.Schema{"path": jsonschema.String("Path")}, "path"),
-		func(context.Context, llm.ToolCall) (ToolResult, error) {
-			return ToolResult{Content: "README contents"}, nil
-		},
-	)
-
-	agent, err := New(Config{Model: model, Tools: []Tool{tool}})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	turn, err := agent.Stream(context.Background(), "read", nil)
-	if err != nil {
-		t.Fatalf("Stream() error = %v", err)
-	}
-	if turn.Reasoning != "need tool\nanswer now" {
-		t.Fatalf("reasoning = %q, want per-stream aggregate", turn.Reasoning)
-	}
-	if len(turn.messages) != 4 {
-		t.Fatalf("turn messages len = %d, want 4: %#v", len(turn.messages), turn.messages)
-	}
-	if turn.messages[1].Role != llm.RoleAI || turn.messages[1].ReasoningContent != "need tool" {
-		t.Fatalf("first assistant reasoning = %#v", turn.messages[1])
-	}
-	if turn.messages[3].Role != llm.RoleAI || turn.messages[3].Content != "done" || turn.messages[3].ReasoningContent != "answer now" {
-		t.Fatalf("final assistant reasoning = %#v", turn.messages[3])
-	}
-
-	history := agent.History()
-	if len(history) != 4 || history[1].ReasoningContent != "need tool" || history[3].ReasoningContent != "answer now" {
-		t.Fatalf("history = %#v", history)
-	}
-}
-
-func TestStreamExecutesToolLoopAndEmitsToolEvents(t *testing.T) {
-	call := llm.ToolCall{
-		ID:   "call_1",
-		Type: string(llm.ToolTypeFunction),
-		Function: llm.ToolFunction{
-			Name:      "read_file",
-			Arguments: `{"path":"README.md"}`,
-		},
-	}
-	firstStream := &fakeStream{
-		chunks: []llm.StreamChunk{{ToolCalls: []llm.ToolCall{call}, FinishReason: llm.FinishReasonToolUse}},
-		usage:  llm.Usage{TotalTokens: 2},
-	}
-	secondStream := &fakeStream{
-		chunks: []llm.StreamChunk{{Text: "do"}, {Text: "ne", FinishReason: llm.FinishReasonStop}},
-		usage:  llm.Usage{TotalTokens: 5},
-	}
-	model := &fakeModel{streams: []*fakeStream{firstStream, secondStream}}
-	tool := FunctionTool(
-		"read_file",
-		"Read a file",
-		jsonschema.Object(map[string]jsonschema.Schema{"path": jsonschema.String("Path")}, "path"),
-		func(context.Context, llm.ToolCall) (ToolResult, error) {
-			return ToolResult{Content: "README contents"}, nil
-		},
-	)
-
-	agent, err := New(Config{Model: model, Tools: []Tool{tool}})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var events []StreamEvent
-	turn, err := agent.Stream(context.Background(), "read", func(ev StreamEvent) {
-		events = append(events, ev)
-	})
-	if err != nil {
-		t.Fatalf("Stream() error = %v", err)
-	}
-
-	if turn.Reply != "done" {
-		t.Fatalf("reply = %q, want done", turn.Reply)
-	}
-	if turn.Usage.TotalTokens != 7 {
-		t.Fatalf("usage = %d, want 7", turn.Usage.TotalTokens)
-	}
-	if !firstStream.closed || !secondStream.closed {
-		t.Fatalf("streams were not closed: first=%v second=%v", firstStream.closed, secondStream.closed)
-	}
-	if len(events) != 5 {
-		t.Fatalf("events len = %d, want 5: %#v", len(events), events)
-	}
-	if events[0].Kind != EventToolCall || events[0].Step.ToolName != "read_file" {
-		t.Fatalf("tool call event = %#v", events[0])
-	}
-	if events[1].Kind != EventToolResult || events[1].Step.Result != "README contents" {
-		t.Fatalf("tool result event = %#v", events[1])
-	}
-	if events[2].Kind != EventTextDelta || events[2].Text != "do" {
-		t.Fatalf("text event = %#v", events[2])
-	}
-	if events[4].Kind != EventDone || events[4].Usage.TotalTokens != 7 {
-		t.Fatalf("done event = %#v", events[4])
-	}
-}
-
-func TestStreamToolLoopLimitForcesFinalReplyAndCommitsTurn(t *testing.T) {
-	firstCall := llm.ToolCall{
-		ID: "call_1",
-		Function: llm.ToolFunction{
-			Name:      "echo",
-			Arguments: `{"n":1}`,
-		},
-	}
-	secondCall := llm.ToolCall{
-		ID: "call_2",
-		Function: llm.ToolFunction{
-			Name:      "echo",
-			Arguments: `{"n":2}`,
-		},
-	}
-	firstStream := &fakeStream{
-		chunks: []llm.StreamChunk{{ToolCalls: []llm.ToolCall{firstCall}, FinishReason: llm.FinishReasonToolUse}},
-		usage:  llm.Usage{TotalTokens: 2},
-	}
-	secondStream := &fakeStream{
-		chunks: []llm.StreamChunk{{ToolCalls: []llm.ToolCall{secondCall}, FinishReason: llm.FinishReasonToolUse}},
-		usage:  llm.Usage{TotalTokens: 3},
-	}
-	model := &fakeModel{
-		streams: []*fakeStream{firstStream, secondStream},
-		// Model still emits a tool call at the limit; golem must ignore it
-		// and use Content as the final reply (not execute or leak it).
-		chatResponses: []*llm.Response{{
-			Content:      "final without tools",
-			ToolCalls:    []llm.ToolCall{secondCall},
-			FinishReason: llm.FinishReasonStop,
-			Usage:        llm.Usage{TotalTokens: 5},
-		}},
-	}
-	tool := FunctionTool("echo", "Echo", jsonschema.Object(nil), func(_ context.Context, call llm.ToolCall) (ToolResult, error) {
-		return ToolResult{Content: call.Function.Arguments}, nil
-	})
-
-	agent, err := New(Config{
-		Model:             model,
-		Tools:             []Tool{tool},
-		MaxToolIterations: 1,
-	})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-
-	var events []StreamEvent
-	turn, err := agent.Stream(context.Background(), "loop", func(ev StreamEvent) {
-		events = append(events, ev)
-	})
-	if err != nil {
-		t.Fatalf("Stream() error = %v", err)
-	}
-	if turn.Reply != "final without tools" {
-		t.Fatalf("reply = %q, want final without tools", turn.Reply)
-	}
-	if turn.Usage.TotalTokens != 10 {
-		t.Fatalf("usage = %d, want 10", turn.Usage.TotalTokens)
-	}
-	if len(model.requests) != 3 {
-		t.Fatalf("requests len = %d, want 3", len(model.requests))
-	}
-	finalReq := model.requests[2]
-	if finalReq.ToolChoice == nil || finalReq.ToolChoice.Mode != llm.ToolChoiceAuto {
-		t.Fatalf("final request tool choice = %#v, want auto", finalReq.ToolChoice)
-	}
-	if got := finalReq.Messages[len(finalReq.Messages)-1]; got.Role != llm.RoleUser || !strings.Contains(got.Content, "Tool call limit reached") {
-		t.Fatalf("final request last message = %#v, want tool limit prompt", got)
-	}
-	if !firstStream.closed || !secondStream.closed {
-		t.Fatalf("streams were not closed: first=%v second=%v", firstStream.closed, secondStream.closed)
-	}
-	if len(turn.Steps) != 3 {
-		t.Fatalf("steps len = %d, want 3", len(turn.Steps))
-	}
-	if turn.Steps[2].Kind != StepToolError || turn.Steps[2].ToolCallID != "call_2" {
-		t.Fatalf("limit step = %#v", turn.Steps[2])
-	}
-	if len(events) != 5 {
-		t.Fatalf("events len = %d, want 5: %#v", len(events), events)
-	}
-	if events[2].Kind != EventToolError || events[2].Step.ToolCallID != "call_2" {
-		t.Fatalf("limit event = %#v", events[2])
-	}
-	if events[3].Kind != EventTextDelta || events[3].Text != "final without tools" {
-		t.Fatalf("final text event = %#v", events[3])
-	}
-	if events[4].Kind != EventDone || events[4].Usage.TotalTokens != 10 {
-		t.Fatalf("done event = %#v", events[4])
-	}
-
-	history := agent.History()
-	if len(history) != 4 {
-		t.Fatalf("history len = %d, want 4: %#v", len(history), history)
-	}
-	if history[3].Role != llm.RoleAI || history[3].Content != "final without tools" {
-		t.Fatalf("history final reply = %#v", history[3])
 	}
 }
 
