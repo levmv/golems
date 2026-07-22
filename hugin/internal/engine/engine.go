@@ -36,6 +36,23 @@ type Engine struct {
 	ntf               notifier.Notifier
 }
 
+// analysisPipelineError means collector output was already persisted, but a
+// later analysis/incident step failed. Direct runs surface the error; scheduled
+// runs deliberately advance to the next occurrence instead of executing the
+// collector again.
+type analysisPipelineError struct {
+	runID int64
+	cause error
+}
+
+func (e *analysisPipelineError) Error() string {
+	return fmt.Sprintf("run %d analysis pipeline failed: %v", e.runID, e.cause)
+}
+
+func (e *analysisPipelineError) Unwrap() error {
+	return e.cause
+}
+
 func New(cfg *config.Config, db *storage.DB, log logger.Logger) *Engine {
 	model, modelErr := buildModel(cfg)
 	ntf := notifier.FromConfig(cfg, log)
@@ -104,9 +121,13 @@ func (e *Engine) runCheck(ctx context.Context, checkID string, execRunner *runne
 
 	if err := e.runAnalysis(ctx, check, checkID, runID, output); err != nil {
 		e.log.Error("Analysis failed: %v", err)
-		if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
+		if markErr := e.db.MarkRunAnalysisPipelineFailed(runID, err); markErr != nil {
+			e.log.Error("Failed to record analysis pipeline failure for run %d: %v", runID, markErr)
+		}
+		return &analysisPipelineError{runID: runID, cause: err}
 	}
 	if err := ctx.Err(); err != nil {
 		e.log.Info("Check '%s' canceled after execution", checkID)
@@ -246,7 +267,13 @@ func (e *Engine) newScheduledCheckQueue(opts scheduledCheckQueueOptions) (*sched
 		if e.cfg.FindCheck(payload.CheckID) == nil {
 			return tasks.Discardf("hugin check %q is no longer in configuration", payload.CheckID)
 		}
-		return e.runCheck(ctx, payload.CheckID, scheduled.execRunner)
+		err = e.runCheck(ctx, payload.CheckID, scheduled.execRunner)
+		var pipelineErr *analysisPipelineError
+		if errors.As(err, &pipelineErr) {
+			e.log.Error("Scheduled %v; advancing to the next occurrence without rerunning the collector", pipelineErr)
+			return nil
+		}
+		return err
 	})
 
 	handler = tasks.Chain(handler, tasks.GroupConcurrency(1))

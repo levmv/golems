@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -315,6 +316,121 @@ func TestRunAnalysisCancellationDoesNotOpenAnalysisUnavailableIncident(t *testin
 	}
 	if _, err := db.Incident(analysisIssueCheckID("disk")); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("expected no analysis-unavailable incident, got %v", err)
+	}
+}
+
+func TestRunCheckPersistsAnalysisPipelineFailureWithoutRerunningCollector(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "hugin.db")
+	db, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("storage.New returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.Exec(
+		`INSERT INTO runs (check_id, status, metrics, errors, duration_ms, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"disk", "ok", "{broken", "[]", 1, time.Now().Add(-time.Minute).UTC(),
+	); err != nil {
+		t.Fatalf("insert corrupt history returned error: %v", err)
+	}
+
+	countFile := filepath.Join(t.TempDir(), "collector-count")
+	cfg := testConfig()
+	cfg.LLM.MaxInputRuns = 50
+	cfg.Targets["web"] = config.Target{Type: "local", Host: "localhost"}
+	cfg.Checks[0].Command = "printf x >> " + strconv.Quote(countFile) + `; printf '%s\n' '{"check":"disk","status":"ok","metrics":{"ok":true}}'`
+	eng := New(cfg, db, logger.New(logger.Config{Out: io.Discard, Err: io.Discard}))
+
+	err = eng.RunCheck(ctx, "disk")
+	var pipelineErr *analysisPipelineError
+	if !errors.As(err, &pipelineErr) {
+		t.Fatalf("RunCheck error = %v, want analysisPipelineError", err)
+	}
+	count, err := os.ReadFile(countFile)
+	if err != nil {
+		t.Fatalf("read collector count returned error: %v", err)
+	}
+	if string(count) != "x" {
+		t.Fatalf("collector executions = %q, want exactly one", count)
+	}
+
+	var runID int64
+	if err := raw.QueryRow(`SELECT MAX(id) FROM runs`).Scan(&runID); err != nil {
+		t.Fatalf("load current run id returned error: %v", err)
+	}
+	got, err := db.RunAnalysis(runID)
+	if err != nil {
+		t.Fatalf("RunAnalysis returned error: %v", err)
+	}
+	if got == nil || !strings.Contains(got.PipelineError, "failed to fetch history") {
+		t.Fatalf("pipeline failure was not persisted: %+v", got)
+	}
+}
+
+func TestRunDueAdvancesAfterAnalysisPipelineFailure(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "hugin.db")
+	db, err := storage.New(dbPath)
+	if err != nil {
+		t.Fatalf("storage.New returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	})
+
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	if _, err := raw.Exec(
+		`INSERT INTO runs (check_id, status, metrics, errors, duration_ms, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		"disk", "ok", "{broken", "[]", 1, time.Now().Add(-time.Minute).UTC(),
+	); err != nil {
+		t.Fatalf("insert corrupt history returned error: %v", err)
+	}
+
+	countFile := filepath.Join(t.TempDir(), "collector-count")
+	cfg := testConfig()
+	cfg.LLM.MaxInputRuns = 50
+	cfg.Targets["web"] = config.Target{Type: "local", Host: "localhost"}
+	cfg.Checks[0].Command = "printf x >> " + strconv.Quote(countFile) + `; printf '%s\n' '{"check":"disk","status":"ok","metrics":{"ok":true}}'`
+	eng := New(cfg, db, logger.New(logger.Config{Out: io.Discard, Err: io.Discard}))
+
+	if err := eng.RunDue(ctx); err != nil {
+		t.Fatalf("RunDue returned error: %v", err)
+	}
+	count, err := os.ReadFile(countFile)
+	if err != nil {
+		t.Fatalf("read collector count returned error: %v", err)
+	}
+	if string(count) != "x" {
+		t.Fatalf("collector executions = %q, want exactly one", count)
+	}
+	store, err := db.TaskStore()
+	if err != nil {
+		t.Fatalf("TaskStore returned error: %v", err)
+	}
+	task, err := store.Get(ctx, CheckTaskID("disk"))
+	if err != nil {
+		t.Fatalf("Get scheduled task returned error: %v", err)
+	}
+	if task.Attempts != 0 || task.LastError != "" || task.NextRunAt == nil {
+		t.Fatalf("pipeline failure should advance without queue retry: %+v", task)
 	}
 }
 

@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"math"
 	"path/filepath"
 	"strings"
@@ -160,6 +161,46 @@ func TestRunAnalysisUsesCreatedAtAsSentinel(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("expected nil without analysis_created_at, got %+v", got)
+	}
+}
+
+func TestRunAnalysisPipelineFailurePersistence(t *testing.T) {
+	db := newTestDB(t)
+	runID, err := db.InsertRun("disk", &models.CollectorOutput{
+		Check:   "disk",
+		Status:  models.StatusOK,
+		Metrics: map[string]any{"used_pct": 72.5},
+	}, 123)
+	if err != nil {
+		t.Fatalf("InsertRun returned error: %v", err)
+	}
+
+	if err := db.MarkRunAnalysisPipelineFailed(runID, errors.New("incident update failed")); err != nil {
+		t.Fatalf("MarkRunAnalysisPipelineFailed returned error: %v", err)
+	}
+	got, err := db.RunAnalysis(runID)
+	if err != nil {
+		t.Fatalf("RunAnalysis returned error: %v", err)
+	}
+	if got == nil || got.PipelineError != "incident update failed" || got.PipelineFailedAt == nil {
+		t.Fatalf("unexpected pipeline failure: %+v", got)
+	}
+
+	analysis := RunAnalysis{
+		Severity:  "normal",
+		Summary:   "Recovered",
+		Model:     "openai/gpt-test",
+		CreatedAt: time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC),
+	}
+	if err := db.UpdateRunAnalysis(runID, analysis); err != nil {
+		t.Fatalf("UpdateRunAnalysis returned error: %v", err)
+	}
+	got, err = db.RunAnalysis(runID)
+	if err != nil {
+		t.Fatalf("RunAnalysis after recovery returned error: %v", err)
+	}
+	if got == nil || got.PipelineError != "" || got.PipelineFailedAt != nil {
+		t.Fatalf("successful analysis did not clear pipeline failure: %+v", got)
 	}
 }
 

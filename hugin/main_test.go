@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/levmv/golems/hugin/internal/deploy"
+	"github.com/levmv/golems/hugin/internal/storage"
 )
 
 func TestParseRunsArgs(t *testing.T) {
@@ -86,5 +87,19 @@ func TestParseDeployArgs(t *testing.T) {
 	}
 	if opts.Dest != deploy.DefaultCollectorsDest {
 		t.Fatalf("expected default dest %q, got %q", deploy.DefaultCollectorsDest, opts.Dest)
+	}
+}
+
+func TestFormatRunAnalysisStatusPrioritizesPipelineFailure(t *testing.T) {
+	severity, summary := formatRunAnalysisStatus(&storage.RunAnalysis{
+		Severity:      "urgent",
+		Summary:       "Analysis completed",
+		PipelineError: "incident update failed",
+	})
+	if severity != "failed" {
+		t.Fatalf("severity = %q, want failed", severity)
+	}
+	if summary != "analysis pipeline failed: incident update failed" {
+		t.Fatalf("summary = %q", summary)
 	}
 }

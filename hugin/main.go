@@ -443,11 +443,7 @@ func handleStatus(cfg *config.Config, db *storage.DB, log logger.Logger) {
 			if err != nil {
 				summary = "analysis error: " + err.Error()
 			} else if analysis != nil {
-				analysisSeverity = analysis.Severity
-				summary = analysis.Summary
-				if analysis.Error != "" {
-					summary = "analysis failed: " + analysis.Error
-				}
+				analysisSeverity, summary = formatRunAnalysisStatus(analysis)
 			}
 		}
 
@@ -461,6 +457,25 @@ func handleStatus(cfg *config.Config, db *storage.DB, log logger.Logger) {
 			ellipsize(summary, 80),
 		)
 	}
+}
+
+func formatRunAnalysisStatus(analysis *storage.RunAnalysis) (severity, summary string) {
+	severity = analysis.Severity
+	if severity == "" {
+		severity = "-"
+	}
+	summary = analysis.Summary
+	if summary == "" {
+		summary = "-"
+	}
+	if analysis.Error != "" {
+		summary = "analysis failed: " + analysis.Error
+	}
+	if analysis.PipelineError != "" {
+		severity = "failed"
+		summary = "analysis pipeline failed: " + analysis.PipelineError
+	}
+	return severity, summary
 }
 
 func statusTaskNext(ctx context.Context, store tasks.Store, checkID string, loc *time.Location) string {

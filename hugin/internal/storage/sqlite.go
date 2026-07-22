@@ -75,6 +75,8 @@ func initSchema(db *sql.DB) error {
 		analysis_error TEXT NOT NULL DEFAULT '',
 		analysis_model TEXT NOT NULL DEFAULT '',
 		analysis_created_at DATETIME,
+		analysis_pipeline_error TEXT NOT NULL DEFAULT '',
+		analysis_pipeline_failed_at DATETIME,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 
@@ -133,6 +135,12 @@ func initSchema(db *sql.DB) error {
 	if err := ensureColumn(db, "runs", "analysis_created_at", "analysis_created_at DATETIME"); err != nil {
 		return err
 	}
+	if err := ensureColumn(db, "runs", "analysis_pipeline_error", "analysis_pipeline_error TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := ensureColumn(db, "runs", "analysis_pipeline_failed_at", "analysis_pipeline_failed_at DATETIME"); err != nil {
+		return err
+	}
 	if err := ensureColumn(db, "incidents", "last_notified_at", "last_notified_at DATETIME"); err != nil {
 		return err
 	}
@@ -183,13 +191,15 @@ type RunRecord struct {
 }
 
 type RunAnalysis struct {
-	Severity    string
-	ShouldAlert bool
-	Summary     string
-	Evidence    string
-	Error       string
-	Model       string
-	CreatedAt   time.Time
+	Severity         string
+	ShouldAlert      bool
+	Summary          string
+	Evidence         string
+	Error            string
+	Model            string
+	CreatedAt        time.Time
+	PipelineError    string
+	PipelineFailedAt *time.Time
 }
 
 // IncidentRecord is a row from the incidents table.
@@ -250,7 +260,9 @@ func (d *DB) UpdateRunAnalysis(runID int64, analysis RunAnalysis) error {
 		        analysis_evidence = ?,
 		        analysis_error = ?,
 		        analysis_model = ?,
-		        analysis_created_at = ?
+		        analysis_created_at = ?,
+		        analysis_pipeline_error = '',
+		        analysis_pipeline_failed_at = NULL
 		  WHERE id = ?`,
 		analysis.Severity,
 		analysis.ShouldAlert,
@@ -264,10 +276,38 @@ func (d *DB) UpdateRunAnalysis(runID int64, analysis RunAnalysis) error {
 	return err
 }
 
+// MarkRunAnalysisPipelineFailed records a failure after collector output was
+// saved. It intentionally leaves any already-persisted analysis intact: the
+// failure may have happened later while updating incidents or notifications.
+func (d *DB) MarkRunAnalysisPipelineFailed(runID int64, cause error) error {
+	if cause == nil {
+		return fmt.Errorf("mark analysis pipeline failed: cause is required")
+	}
+	res, err := d.sql.Exec(
+		`UPDATE runs
+		    SET analysis_pipeline_error = ?,
+		        analysis_pipeline_failed_at = ?
+		  WHERE id = ?`,
+		cause.Error(), time.Now().UTC(), runID,
+	)
+	if err != nil {
+		return fmt.Errorf("mark analysis pipeline failed: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("mark analysis pipeline failed rows affected: %w", err)
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 func (d *DB) RunAnalysis(runID int64) (*RunAnalysis, error) {
 	row := d.sql.QueryRow(
 		`SELECT analysis_severity, analysis_should_alert, analysis_summary,
-		        analysis_evidence, analysis_error, analysis_model, analysis_created_at
+		        analysis_evidence, analysis_error, analysis_model, analysis_created_at,
+		        analysis_pipeline_error, analysis_pipeline_failed_at
 		   FROM runs
 		  WHERE id = ?`,
 		runID,
@@ -275,6 +315,7 @@ func (d *DB) RunAnalysis(runID int64) (*RunAnalysis, error) {
 	var analysis RunAnalysis
 	var shouldAlert sql.NullBool
 	var createdAt sql.NullTime
+	var pipelineFailedAt sql.NullTime
 	if err := row.Scan(
 		&analysis.Severity,
 		&shouldAlert,
@@ -283,14 +324,22 @@ func (d *DB) RunAnalysis(runID int64) (*RunAnalysis, error) {
 		&analysis.Error,
 		&analysis.Model,
 		&createdAt,
+		&analysis.PipelineError,
+		&pipelineFailedAt,
 	); err != nil {
 		return nil, err
 	}
-	if !createdAt.Valid {
+	if !createdAt.Valid && !pipelineFailedAt.Valid {
 		return nil, nil
 	}
 	analysis.ShouldAlert = shouldAlert.Valid && shouldAlert.Bool
-	analysis.CreatedAt = createdAt.Time
+	if createdAt.Valid {
+		analysis.CreatedAt = createdAt.Time
+	}
+	if pipelineFailedAt.Valid {
+		failedAt := pipelineFailedAt.Time
+		analysis.PipelineFailedAt = &failedAt
+	}
 	return &analysis, nil
 }
 
