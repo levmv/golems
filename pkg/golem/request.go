@@ -137,16 +137,33 @@ func (r *Requester) Request(ctx context.Context, step int, request llm.Request, 
 			return nil, err
 		}
 		if emit != nil {
-			message := fmt.Sprintf("attempt %d failed: %v; retrying in %s", attempt, err, delay.Round(time.Millisecond))
-			if r.policy.RetryBudget > 0 {
-				message += fmt.Sprintf("; budget remaining %s", remaining.Round(time.Second))
-			}
-			emit(StreamEvent{Kind: EventModelRetry, Text: r.sanitize(message)})
+			cause := r.sanitize(formatRetryCause(err))
+			message := fmt.Sprintf("#%d in %s — %s", attempt, delay.Round(time.Millisecond), cause)
+			emit(StreamEvent{Kind: EventModelRetry, Text: message, RetryKey: cause})
 		}
 		if err := waitForRetry(ctx, delay); err != nil {
 			return nil, err
 		}
 	}
+}
+
+func formatRetryCause(err error) string {
+	var providerErr *llm.Error
+	if errors.As(err, &providerErr) {
+		provider := strings.TrimSpace(providerErr.Provider)
+		if provider == "" {
+			provider = "model"
+		}
+		switch {
+		case providerErr.StatusCode > 0 && providerErr.Message != "":
+			return fmt.Sprintf("%s %d: %s", provider, providerErr.StatusCode, providerErr.Message)
+		case providerErr.Message != "":
+			return provider + ": " + providerErr.Message
+		case providerErr.StatusCode > 0:
+			return fmt.Sprintf("%s %d", provider, providerErr.StatusCode)
+		}
+	}
+	return err.Error()
 }
 
 func (r *Requester) retryAllowed(attempt int, startedAt time.Time) bool {

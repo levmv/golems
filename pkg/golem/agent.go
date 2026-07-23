@@ -120,6 +120,7 @@ const (
 type StreamEvent struct {
 	Kind         StreamEventKind
 	Text         string
+	RetryKey     string
 	Step         Step
 	Usage        llm.Usage
 	FinishReason llm.FinishReason

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -101,8 +102,18 @@ func TestRequesterRetriesAndResetsPartialStream(t *testing.T) {
 			t.Fatalf("event %d kind = %q, want %q", index, events[index].Kind, kind)
 		}
 	}
+	if retry := events[2]; retry.RetryKey != wantErr.Error() || !strings.Contains(retry.Text, "#1 in ") || strings.Contains(retry.Text, "budget remaining") {
+		t.Fatalf("retry event = %#v, want compact text and stable cause", retry)
+	}
 	if len(failures) != 1 || failures[0].Step != 3 || failures[0].Attempt != 1 || failures[0].ProvisionalText != "partial" || !failures[0].HadProvisionalOutput {
 		t.Fatalf("failures = %#v", failures)
+	}
+}
+
+func TestFormatRetryCauseCompactsProviderError(t *testing.T) {
+	err := &llm.Error{Provider: "openrouter", StatusCode: 429, Message: "Provider returned error"}
+	if got, want := formatRetryCause(err), "openrouter 429: Provider returned error"; got != want {
+		t.Fatalf("formatRetryCause() = %q, want %q", got, want)
 	}
 }
 
