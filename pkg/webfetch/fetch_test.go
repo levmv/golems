@@ -27,6 +27,59 @@ func TestExtractContentDropsScriptsAndKeepsReadableBlocks(t *testing.T) {
 	}
 }
 
+func TestExtractContentPrefersMainContentAndDeduplicatesBlocks(t *testing.T) {
+	raw := []byte(`<html>
+		<head><title>Docs</title></head>
+		<body>
+			<header><p>site header</p></header>
+			<p>outside main</p>
+			<main>
+				<h1>Reference</h1>
+				<p>Useful content.<script>hidden()</script></p>
+				<p>Repeated note.</p>
+				<p>Repeated note.</p>
+				<aside><p>related links</p></aside>
+				<form><p>newsletter</p></form>
+			</main>
+			<footer><p>site footer</p></footer>
+		</body>
+	</html>`)
+	text, title, err := extractContent(raw, "text/html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if title != "Docs" {
+		t.Fatalf("title = %q", title)
+	}
+	for _, noise := range []string{"site header", "outside main", "hidden", "related links", "newsletter", "site footer"} {
+		if strings.Contains(text, noise) {
+			t.Fatalf("text contains %q: %q", noise, text)
+		}
+	}
+	if !strings.Contains(text, "Reference") || !strings.Contains(text, "Useful content.") {
+		t.Fatalf("text is missing main content: %q", text)
+	}
+	if strings.Count(text, "Repeated note.") != 1 {
+		t.Fatalf("repeated block was not deduplicated: %q", text)
+	}
+}
+
+func TestExtractContentDoesNotMistakeFirstArticleCardForMainContent(t *testing.T) {
+	raw := []byte(`<html><body>
+		<article><h2>First story</h2><p>First summary.</p></article>
+		<article><h2>Second story</h2><p>Second summary.</p></article>
+	</body></html>`)
+	text, _, err := extractContent(raw, "text/html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"First story", "First summary.", "Second story", "Second summary."} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("text is missing %q: %q", want, text)
+		}
+	}
+}
+
 func TestRejectsNonPublicAndCredentialedURLs(t *testing.T) {
 	for _, raw := range []string{"http://127.0.0.1/admin", "http://169.254.169.254/latest", "http://localhost/admin", "file:///etc/passwd", "https://user:pass@example.com/"} {
 		if _, err := validatePublicURL(raw); err == nil {

@@ -30,9 +30,12 @@ import (
 	"github.com/levmv/golems/caliban/internal/web"
 	"github.com/levmv/golems/caliban/internal/workspace"
 	"github.com/levmv/golems/pkg/golem"
+	"github.com/levmv/golems/pkg/hackernews"
 	"github.com/levmv/golems/pkg/logger"
 	"github.com/levmv/golems/pkg/tasks"
 	tasksqlite "github.com/levmv/golems/pkg/tasks/sqlite"
+	"github.com/levmv/golems/pkg/webfetch"
+	"github.com/levmv/golems/pkg/websearch"
 
 	"golang.org/x/sync/errgroup"
 )
@@ -43,6 +46,9 @@ const (
 	defaultShellMaxOutput = 32768
 	defaultTelegramConvID = 1
 	defaultWebConvID      = 2
+	webReadHeaderTimeout  = 10 * time.Second
+	webIdleTimeout        = 2 * time.Minute
+	webMaxHeaderBytes     = 64 << 10
 )
 
 var taskStoreOptions = tasksqlite.Options{Table: "tasks"}
@@ -96,6 +102,8 @@ func dispatch(args []string) error {
 		return nil
 	case "serve":
 		return serveCommand(rest)
+	case "check-config":
+		return checkConfigCommand(rest)
 	case "inspect-context", "debug-context":
 		return inspectContext(rest)
 	case "set-web-password":
@@ -117,6 +125,7 @@ Usage:
 
 Commands:
   serve                Run the assistant: Telegram/web transports and the task queue.
+  check-config         Validate configuration without starting the assistant.
   inspect-context      Print a conversation's context state (summary, tail, compaction).
   set-web-password     Set or change the web UI password.
   generate-vapid-keys  Print a new Web Push VAPID key pair.
@@ -136,6 +145,50 @@ func serveCommand(args []string) error {
 		return err
 	}
 	return run(*configPath)
+}
+
+func checkConfigCommand(args []string) error {
+	fs := flag.NewFlagSet("check-config", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	configPath := fs.String("config", defaultConfigPath, "path to config.json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := checkConfig(*configPath); err != nil {
+		return err
+	}
+	fmt.Printf("caliban: config OK (%s)\n", *configPath)
+	return nil
+}
+
+// checkConfig exercises all static startup validation without opening state or
+// making network requests. It catches model URIs, timezone/log settings, and
+// optional tool wiring in addition to the strict JSON/schema checks.
+func checkConfig(configPath string) error {
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	log, err := cfg.logger()
+	if err != nil {
+		return err
+	}
+	if _, err := cfg.timezone(); err != nil {
+		return err
+	}
+	registry := cfg.registry()
+	if _, err := cfg.model(registry, cfg.Models.Main, log); err != nil {
+		return err
+	}
+	if cfg.Models.Cheap != "" {
+		if _, err := cfg.model(registry, cfg.Models.Cheap, log); err != nil {
+			return err
+		}
+	}
+	if _, _, err := websearch.NewTool(cfg.webSearchCredentials()); err != nil {
+		return fmt.Errorf("initialize web search: %w", err)
+	}
+	return nil
 }
 
 func setWebPasswordCommand(args []string) error {
@@ -268,8 +321,18 @@ func run(configPath string) error {
 	if err := background.ReconcileStartup(context.Background()); err != nil {
 		return err
 	}
+	hnClient := hackernews.NewClient()
 	builtinTools := []golem.Tool{
 		tools.Shell(ws.Root(), shellTimeout, shellMaxOutput, shellSandbox, background),
+		webfetch.NewTool(cfg.webFetchBackends(hnClient)...),
+		hackernews.NewTool(hnClient),
+	}
+	searchTool, searchAvailable, err := websearch.NewTool(cfg.webSearchCredentials())
+	if err != nil {
+		return fmt.Errorf("initialize web search: %w", err)
+	}
+	if searchAvailable {
+		builtinTools = append(builtinTools, searchTool)
 	}
 	builtinTools = append(builtinTools, tools.Memory(memoryToolStore{ws: ws})...)
 	builtinTools = append(builtinTools, tools.BackgroundTaskTools(background)...)
@@ -350,7 +413,13 @@ func run(configPath string) error {
 			Logger: log,
 		})
 		eng.AddNotifier(webTransport)
-		srv = &http.Server{Addr: cfg.Web.Addr, Handler: webTransport.Handler()}
+		srv = &http.Server{
+			Addr:              cfg.Web.Addr,
+			Handler:           webTransport.Handler(),
+			ReadHeaderTimeout: webReadHeaderTimeout,
+			IdleTimeout:       webIdleTimeout,
+			MaxHeaderBytes:    webMaxHeaderBytes,
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

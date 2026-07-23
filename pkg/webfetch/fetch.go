@@ -116,7 +116,7 @@ func NewTool(backends ...Backend) golem.Tool {
 		if err := decodeArgs(call, &args); err != nil {
 			return golem.ToolResult{}, err
 		}
-		result, err := fetcher.Fetch(ctx, Request{URL: args.URL})
+		result, err := fetcher.Fetch(ctx, Request(args))
 		if err != nil {
 			return golem.ToolResult{}, err
 		}

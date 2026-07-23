@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"path/filepath"
 	"strings"
@@ -561,6 +562,101 @@ func TestRunFailureAppendsMessageAndStops(t *testing.T) {
 	all, _ := st.MessagesAfter(context.Background(), 1, 0)
 	if len(all) != 2 {
 		t.Fatalf("expected user + one failure message, got %d", len(all))
+	}
+}
+
+func TestWorkerRetriesWithoutAnotherKick(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	kick := make(chan struct{}, 1)
+	done := make(chan struct{})
+	recovered := make(chan struct{})
+	var nextCalls, executeCalls, retryLogs int
+
+	go func() {
+		defer close(done)
+		runWorker(
+			ctx,
+			kick,
+			func(context.Context) (store.Message, bool, error) {
+				nextCalls++
+				switch nextCalls {
+				case 1:
+					return store.Message{}, false, errors.New("temporary read failure")
+				case 2, 3:
+					return store.Message{ID: 42}, true, nil
+				default:
+					return store.Message{}, false, nil
+				}
+			},
+			func(context.Context, store.Message) error {
+				executeCalls++
+				if executeCalls == 1 {
+					return errors.New("temporary processing failure")
+				}
+				close(recovered)
+				return nil
+			},
+			func(string, error) { retryLogs++ },
+			time.Millisecond,
+			2*time.Millisecond,
+		)
+	}()
+
+	kick <- struct{}{}
+	select {
+	case <-recovered:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not recover without another kick")
+	}
+	cancel()
+	<-done
+
+	if nextCalls < 3 {
+		t.Fatalf("nextDue calls = %d, want at least 3", nextCalls)
+	}
+	if executeCalls != 2 {
+		t.Fatalf("execute calls = %d, want 2", executeCalls)
+	}
+	if retryLogs != 2 {
+		t.Fatalf("retry logs = %d, want 2", retryLogs)
+	}
+}
+
+func TestDoneEventIsEmittedAfterReplyIsPersisted(t *testing.T) {
+	model := &scriptModel{replies: []string{"durable reply"}}
+	eng, st := runEngine(t, model)
+	done := make(chan error, 1)
+	cancelSubscription := eng.Subscribe(func(ev Event) {
+		if ev.ConversationID != 1 || ev.Ev.Kind != golem.EventDone {
+			return
+		}
+		last, ok, err := st.LastMessage(context.Background(), 1)
+		if err != nil {
+			done <- err
+			return
+		}
+		if !ok {
+			done <- errors.New("no persisted message at EventDone")
+			return
+		}
+		if last.Role != llm.RoleAI || last.Content.Text != ev.Ev.Text {
+			done <- fmt.Errorf("last message at EventDone = role %q text %q, event text %q", last.Role, last.Content.Text, ev.Ev.Text)
+			return
+		}
+		done <- nil
+	})
+	defer cancelSubscription()
+
+	if err := eng.SubmitUserMessage(context.Background(), 1, "reply durably", "telegram"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for EventDone")
 	}
 }
 

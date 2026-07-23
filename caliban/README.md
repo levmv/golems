@@ -47,6 +47,8 @@ Key fields:
   shell operates in.
 - `providers` — per-provider `api_key` (and optional `base_url`), e.g. DeepSeek
   or OpenRouter.
+- `services` — API keys for optional external services. Tavily and Exa enable
+  web search; Firecrawl and Exa enable richer page-fetch fallbacks.
 - `models.main` / `models.cheap` — the main reasoning model and a cheaper model
   for lightweight passes.
 - `telegram` — bot `token`, `chat_id`, and the `conversation_id` it maps to.
@@ -68,8 +70,22 @@ Key fields:
 ## Tools & skills
 
 The agent works through a small tool set: file-based memory, a sandboxed shell,
-reminders and scheduled turns, managed background tasks, and trusted external
-runners.
+reminders and scheduled turns, managed background tasks, trusted external
+runners, and a bounded `web_fetch` tool. `web_search` is added when a Tavily or
+Exa service key is configured. Search providers are tried in fixed fallback
+order (Tavily, then Exa), and the first non-empty result wins. The
+always-available `hacker_news` tool reads current `top`, `new`, `best`, and
+`show` feeds, searches stories by relevance or date, or loads a bounded
+discussion thread without an API key. Feeds and threads use the official
+Hacker News API; search uses the public Algolia-powered HN Search API.
+
+`web_fetch` resolves Hacker News item URLs through the discussion reader first.
+For other pages, configured extraction backends are tried as Firecrawl → Exa,
+followed by a bounded direct HTTP(S) reader as the free fallback. Private,
+loopback, and link-local destinations are rejected, including redirects and DNS
+resolutions in the direct reader. Fetched pages and search results are bounded
+and marked as untrusted model input. A Hacker News item's linked article remains
+a separate, explicit fetch.
 
 Skills follow a progressive-disclosure pattern: built-in skills are embedded in
 the binary (from `internal/tools/builtin_skills/`), each a directory with a

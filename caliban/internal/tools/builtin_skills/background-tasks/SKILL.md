@@ -11,7 +11,7 @@ For shell commands, call `shell` with `run_in_background: true`. Do not append `
 
 For external agents, call `runner_run` with `run_in_background: true`.
 
-After starting a task, keep the returned `task_id`. Use `task_output` to read output. Use its returned offset for incremental reads when polling. Use `wait: true` when waiting briefly for more output is useful.
+After starting a task, keep the returned `task_id`. Use `task_output` to read output. Use its returned offset for incremental reads when polling. Use `block: true` when waiting briefly for more output is useful.
 
 Use `task_list` to inspect active or recent work. Use `task_stop` when a task is clearly stuck, no longer needed, or running the wrong command.
 

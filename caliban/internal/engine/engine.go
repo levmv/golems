@@ -41,6 +41,8 @@ const (
 	// cap is a runaway/cost guard; hitting it yields a clean forced reply (golem
 	// switches to a final answer), so it can sit generously high.
 	defaultMaxToolIterations = 40
+	workerRetryInitialDelay  = 250 * time.Millisecond
+	workerRetryMaxDelay      = 30 * time.Second
 )
 
 func defaultRequestPolicy() golem.RequestPolicy {
@@ -372,6 +374,43 @@ func (e *Engine) kick(conversationID int64) {
 // user message appended while a run is in flight is picked up on the next
 // iteration rather than buried under the run's reply.
 func (e *Engine) worker(ctx context.Context, conversationID int64, kick chan struct{}) {
+	runWorker(
+		ctx,
+		kick,
+		func(ctx context.Context) (store.Message, bool, error) {
+			return e.store.NextDueInput(ctx, conversationID)
+		},
+		func(ctx context.Context, input store.Message) error {
+			return e.executeRun(ctx, conversationID, input)
+		},
+		func(operation string, err error) {
+			e.logf(errorLevel, "conversation %d: %s: %v", conversationID, operation, err)
+		},
+		workerRetryInitialDelay,
+		workerRetryMaxDelay,
+	)
+}
+
+// runWorker drains one conversation lane. Store failures and failures that
+// leave an input uncovered are retried without requiring another inbound
+// message to kick the lane. The bounded backoff prevents a broken store from
+// turning that recovery loop into a CPU/logging spin.
+func runWorker(
+	ctx context.Context,
+	kick <-chan struct{},
+	nextDue func(context.Context) (store.Message, bool, error),
+	execute func(context.Context, store.Message) error,
+	logRetry func(operation string, err error),
+	initialDelay, maxDelay time.Duration,
+) {
+	if initialDelay <= 0 {
+		initialDelay = workerRetryInitialDelay
+	}
+	if maxDelay < initialDelay {
+		maxDelay = initialDelay
+	}
+	retryDelay := initialDelay
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -382,15 +421,50 @@ func (e *Engine) worker(ctx context.Context, conversationID int64, kick chan str
 			if ctx.Err() != nil {
 				return
 			}
-			input, ok, err := e.store.NextDueInput(ctx, conversationID)
+			input, ok, err := nextDue(ctx)
 			if err != nil {
-				e.logf(errorLevel, "conversation %d: read due input: %v", conversationID, err)
-				break
+				logRetry("read due input", err)
+				if !waitWorkerRetry(ctx, retryDelay) {
+					return
+				}
+				retryDelay = nextWorkerRetryDelay(retryDelay, maxDelay)
+				continue
 			}
 			if !ok {
+				retryDelay = initialDelay
 				break
 			}
-			e.executeRun(ctx, conversationID, input)
+			if err := execute(ctx, input); err != nil {
+				logRetry("process due input", err)
+				if !waitWorkerRetry(ctx, retryDelay) {
+					return
+				}
+				retryDelay = nextWorkerRetryDelay(retryDelay, maxDelay)
+				continue
+			}
+			retryDelay = initialDelay
 		}
 	}
+}
+
+func waitWorkerRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func nextWorkerRetryDelay(current, maximum time.Duration) time.Duration {
+	if current >= maximum {
+		return maximum
+	}
+	next := current * 2
+	if next > maximum {
+		return maximum
+	}
+	return next
 }

@@ -91,8 +91,7 @@ func (e *Engine) runDelegatedTurn(ctx context.Context, conversationID int64, pro
 
 	promptText, history, inputText, err := e.assembleDelegatedContext(childCtx, conversationID, input)
 	if err != nil {
-		e.failRun(ctx, conversationID, run.ID, input, llm.Usage{}, err)
-		return "", err
+		return "", e.failDelegatedTurn(ctx, conversationID, run.ID, input, llm.Usage{}, err)
 	}
 	agent, err := golem.New(golem.Config{
 		Request:            e.mainRequester.Request,
@@ -103,21 +102,32 @@ func (e *Engine) runDelegatedTurn(ctx context.Context, conversationID int64, pro
 		MaxToolIterations:  e.maxToolIter,
 	})
 	if err != nil {
-		e.failRun(ctx, conversationID, run.ID, input, llm.Usage{}, fmt.Errorf("build delegated agent: %w", err))
-		return "", err
+		cause := fmt.Errorf("build delegated agent: %w", err)
+		return "", e.failDelegatedTurn(ctx, conversationID, run.ID, input, llm.Usage{}, cause)
 	}
 	turn, err := agent.Reply(childCtx, inputText)
 	if err != nil {
-		e.failRun(ctx, conversationID, run.ID, input, agent.Usage(), err)
-		return "", err
+		return "", e.failDelegatedTurn(ctx, conversationID, run.ID, input, agent.Usage(), err)
 	}
 	out := buildTurnMessages(conversationID, run.ID, turn.Messages())
 	if _, err := e.store.CompleteRun(ctx, run.ID, conversationID, input.ID, out, turn.Usage); err != nil {
-		e.failRun(ctx, conversationID, run.ID, input, turn.Usage, err)
-		return "", err
+		return "", e.failDelegatedTurn(ctx, conversationID, run.ID, input, turn.Usage, err)
 	}
 	e.logf(infoLevel, "delegated run %d done (tokens in=%d out=%d)", run.ID, turn.Usage.PromptTokens, turn.Usage.CompletionTokens)
 	return strings.TrimSpace(turn.Reply), nil
+}
+
+func (e *Engine) failDelegatedTurn(
+	ctx context.Context,
+	conversationID, runID int64,
+	input store.Message,
+	usage llm.Usage,
+	cause error,
+) error {
+	if err := e.failRun(ctx, conversationID, runID, input, usage, cause); err != nil {
+		return fmt.Errorf("%w; additionally: %v", cause, err)
+	}
+	return cause
 }
 
 func (e *Engine) assembleDelegatedContext(ctx context.Context, conversationID int64, input store.Message) (string, []llm.Message, string, error) {

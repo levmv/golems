@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -20,6 +21,38 @@ func TestDispatchRouting(t *testing.T) {
 
 	if err := dispatch([]string{"bogus"}); !errors.Is(err, errUnknownCommand) {
 		t.Errorf("dispatch([bogus]) = %v, want errUnknownCommand", err)
+	}
+}
+
+func TestCheckConfigValidatesStaticRuntimeSettings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{
+		"db_path": "caliban.db",
+		"workspace_path": "workspace",
+		"providers": {"openrouter": {"api_key": "sk-test"}},
+		"models": {"main": "openrouter/test"},
+		"timezone": "UTC",
+		"log_level": "info"
+	}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkConfig(path); err != nil {
+		t.Fatalf("checkConfig(valid) = %v", err)
+	}
+
+	badTimezone := []byte(`{
+		"db_path": "caliban.db",
+		"workspace_path": "workspace",
+		"providers": {"openrouter": {"api_key": "sk-test"}},
+		"models": {"main": "openrouter/test"},
+		"timezone": "Not/A-Timezone"
+	}`)
+	if err := os.WriteFile(path, badTimezone, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkConfig(path); err == nil {
+		t.Fatal("checkConfig should reject an invalid timezone")
 	}
 }
 

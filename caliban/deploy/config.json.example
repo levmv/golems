@@ -5,6 +5,11 @@
     "deepseek": { "api_key": "sk-..." },
     "openrouter": { "api_key": "sk-...", "base_url": "https://openrouter.ai/api/v1" }
   },
+  "services": {
+    "tavily": { "api_key": "tvly-..." },
+    "exa": { "api_key": "..." },
+    "firecrawl": { "api_key": "fc-..." }
+  },
   "models": {
     "main": "deepseek/deepseek-v4-pro",
     "cheap": "deepseek/deepseek-v4-flash"

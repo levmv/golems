@@ -3,17 +3,18 @@
 
 CONFIG ?= dev-config.json
 
-.PHONY: help build deploy inspect run test clean
+.PHONY: help build check-config deploy inspect run test clean
 
 help:
 	@printf '%s\n' \
 		'Targets:' \
 		'  make test                         Run Go tests and web typecheck' \
 		'  make build                        Run tests, bundle web assets, build ./caliban' \
+		'  make check-config [CONFIG=...]    Validate a config without starting Caliban' \
 		'  make inspect [CONFIG=...]         Print context/compaction diagnostics' \
 		'  make run [CONFIG=dev-config.json] Run with a local config' \
 		'  make deploy CAL_HOST=alias        Build and deploy over SSH' \
-		'  make clean                        Remove local binary and embedded web assets' \
+		'  make clean                        Remove the local binary' \
 		'' \
 		'Deploy variables:' \
 		'  CAL_HOST    SSH host alias or user@host (required for deploy)' \
@@ -29,16 +30,18 @@ build: test
 	npm --prefix webapp run bundle
 	go build -o caliban .
 
+check-config:
+	go run . check-config -config $(CONFIG)
+
 deploy: build
 	./deploy/deploy.sh
 
 inspect:
-	go run . -config $(CONFIG) inspect-context
+	go run . inspect-context -config $(CONFIG)
 
 # Run the bot against a local (gitignored) config. Override: make run CONFIG=path
 run:
-	go run . -config $(CONFIG)
+	go run . serve -config $(CONFIG)
 
 clean:
 	rm -f caliban
-	rm -rf internal/web/static

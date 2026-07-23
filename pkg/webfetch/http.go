@@ -157,29 +157,36 @@ func extractContent(raw []byte, contentType string) (text, title string, err err
 		if parseErr != nil {
 			return "", "", fmt.Errorf("parse HTML: %w", parseErr)
 		}
+		if titleNode := findElement(document, func(node *html.Node) bool {
+			return node.Data == "title"
+		}); titleNode != nil {
+			title = compactText(nodeText(titleNode), 500)
+		}
+		contentRoot := findContentRoot(document)
 		var blocks []string
-		var walk func(*html.Node, bool)
-		walk = func(node *html.Node, skipped bool) {
+		var walk func(*html.Node)
+		walk = func(node *html.Node) {
 			if node.Type == html.ElementNode {
-				switch node.Data {
-				case "script", "style", "noscript", "svg", "canvas", "nav", "footer":
-					skipped = true
-				case "title":
-					title = compactText(nodeText(node), 500)
-				case "p", "li", "pre", "blockquote", "h1", "h2", "h3", "h4", "td", "th":
-					if !skipped {
-						if value := compactText(nodeText(node), 8000); value != "" {
+				if skipHTMLElement(node.Data) {
+					return
+				}
+				if contentBlockElement(node.Data) {
+					if value := compactText(nodeText(node), 8000); value != "" {
+						if len(blocks) == 0 || blocks[len(blocks)-1] != value {
 							blocks = append(blocks, value)
 						}
-						return
 					}
+					return
 				}
 			}
 			for child := node.FirstChild; child != nil; child = child.NextSibling {
-				walk(child, skipped)
+				walk(child)
 			}
 		}
-		walk(document, false)
+		walk(contentRoot)
+		if len(blocks) == 0 {
+			return compactText(nodeText(contentRoot), maxTextBytes), title, nil
+		}
 		return strings.Join(blocks, "\n\n"), title, nil
 	case strings.Contains(contentType, "text/") || strings.Contains(contentType, "json") || contentType == "":
 		return strings.TrimSpace(string(raw)), "", nil
@@ -188,10 +195,99 @@ func extractContent(raw []byte, contentType string) (text, title string, err err
 	}
 }
 
+func findContentRoot(document *html.Node) *html.Node {
+	if main := findElement(document, func(node *html.Node) bool {
+		return node.Data == "main" || hasHTMLAttribute(node, "role", "main")
+	}); main != nil {
+		return main
+	}
+	if article := findUniqueElement(document, func(node *html.Node) bool {
+		return node.Data == "article"
+	}); article != nil {
+		return article
+	}
+	if body := findElement(document, func(node *html.Node) bool {
+		return node.Data == "body"
+	}); body != nil {
+		return body
+	}
+	return document
+}
+
+func findElement(root *html.Node, matches func(*html.Node) bool) *html.Node {
+	if root.Type == html.ElementNode && matches(root) {
+		return root
+	}
+	for child := root.FirstChild; child != nil; child = child.NextSibling {
+		if found := findElement(child, matches); found != nil {
+			return found
+		}
+	}
+	return nil
+}
+
+func findUniqueElement(root *html.Node, matches func(*html.Node) bool) *html.Node {
+	var found *html.Node
+	var multiple bool
+	var walk func(*html.Node)
+	walk = func(node *html.Node) {
+		if multiple {
+			return
+		}
+		if node.Type == html.ElementNode && matches(node) {
+			if found != nil {
+				multiple = true
+				return
+			}
+			found = node
+		}
+		for child := node.FirstChild; child != nil; child = child.NextSibling {
+			walk(child)
+		}
+	}
+	walk(root)
+	if multiple {
+		return nil
+	}
+	return found
+}
+
+func hasHTMLAttribute(node *html.Node, key, value string) bool {
+	for _, attribute := range node.Attr {
+		if strings.EqualFold(attribute.Key, key) && strings.EqualFold(strings.TrimSpace(attribute.Val), value) {
+			return true
+		}
+	}
+	return false
+}
+
+func skipHTMLElement(tag string) bool {
+	switch tag {
+	case "script", "style", "noscript", "svg", "canvas", "nav", "footer",
+		"header", "aside", "form", "dialog", "menu", "template", "iframe":
+		return true
+	default:
+		return false
+	}
+}
+
+func contentBlockElement(tag string) bool {
+	switch tag {
+	case "p", "li", "pre", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6",
+		"td", "th", "dt", "dd", "figcaption":
+		return true
+	default:
+		return false
+	}
+}
+
 func nodeText(node *html.Node) string {
 	var out strings.Builder
 	var walk func(*html.Node)
 	walk = func(current *html.Node) {
+		if current.Type == html.ElementNode && skipHTMLElement(current.Data) {
+			return
+		}
 		if current.Type == html.TextNode {
 			out.WriteString(current.Data)
 			out.WriteByte(' ')

@@ -14,6 +14,7 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"mime"
 	"net/http"
@@ -38,6 +39,7 @@ const (
 	eventScopeMessages          = "messages"
 	eventBuffer                 = 256
 	keepaliveInterval           = 15 * time.Second
+	maxSubmitBodyBytes          = 1 << 20
 )
 
 //go:embed static/*
@@ -221,7 +223,18 @@ func (t *Transport) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req murm.RunRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSubmitBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body is too large")
+			return
+		}
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

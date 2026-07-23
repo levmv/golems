@@ -1,15 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/levmv/golems/pkg/hackernews"
 	"github.com/levmv/golems/pkg/llm"
 	"github.com/levmv/golems/pkg/logger"
 	"github.com/levmv/golems/pkg/openai"
+	"github.com/levmv/golems/pkg/webfetch"
+	"github.com/levmv/golems/pkg/websearch"
 )
 
 // Config is the on-disk configuration. Secrets live here (outside the workspace
@@ -18,6 +23,7 @@ type Config struct {
 	DBPath        string                    `json:"db_path"`
 	WorkspacePath string                    `json:"workspace_path"`
 	Providers     map[string]ProviderConfig `json:"providers"`
+	Services      map[string]ServiceConfig  `json:"services"`
 	Models        ModelsConfig              `json:"models"`
 	Telegram      TelegramConfig            `json:"telegram"`
 	Shell         ShellConfig               `json:"shell"`
@@ -52,6 +58,10 @@ type WebPushConfig struct {
 type ProviderConfig struct {
 	APIKey  string `json:"api_key"`
 	BaseURL string `json:"base_url"`
+}
+
+type ServiceConfig struct {
+	APIKey string `json:"api_key"`
 }
 
 type ModelsConfig struct {
@@ -92,8 +102,16 @@ func loadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 	var cfg Config
-	if err := json.Unmarshal(b, &cfg); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("parse config: multiple JSON values")
+		}
+		return nil, fmt.Errorf("parse config: trailing data: %w", err)
 	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -121,6 +139,28 @@ func (c *Config) validate() error {
 	if c.Web.ConversationID < 0 {
 		return fmt.Errorf("config: web.conversation_id must be positive")
 	}
+	if c.MaxToolIterations < 0 {
+		return fmt.Errorf("config: max_tool_iterations must not be negative")
+	}
+	if c.Shell.TimeoutSeconds < 0 {
+		return fmt.Errorf("config: shell.timeout_seconds must not be negative")
+	}
+	if c.Shell.MaxOutputBytes < 0 {
+		return fmt.Errorf("config: shell.max_output_bytes must not be negative")
+	}
+	if c.Context.TailBudgetTokens < 0 {
+		return fmt.Errorf("config: context.tail_budget_tokens must not be negative")
+	}
+	if c.Context.KeepRecentTokens < 0 {
+		return fmt.Errorf("config: context.keep_recent_tokens must not be negative")
+	}
+	for name := range c.Services {
+		switch name {
+		case "tavily", "exa", "firecrawl":
+		default:
+			return fmt.Errorf("config: unsupported service %q", name)
+		}
+	}
 	pushKeysSet := c.Web.Push.VAPIDPublicKey != "" || c.Web.Push.VAPIDPrivateKey != ""
 	pushComplete := c.Web.Push.VAPIDPublicKey != "" && c.Web.Push.VAPIDPrivateKey != "" && c.Web.Push.Subject != ""
 	if pushKeysSet && !pushComplete {
@@ -135,6 +175,40 @@ func (c *Config) validate() error {
 		return fmt.Errorf("config: invalid shell.sandbox %q (use require|auto|off)", c.Shell.Sandbox)
 	}
 	return nil
+}
+
+func (c *Config) webSearchCredentials() []websearch.Credential {
+	credentials := make([]websearch.Credential, 0, 2)
+	for _, provider := range []string{"tavily", "exa"} {
+		token := c.serviceKey(provider)
+		if token == "" {
+			continue
+		}
+		credentials = append(credentials, websearch.Credential{Provider: provider, Token: token})
+	}
+	return credentials
+}
+
+func (c *Config) webFetchBackends(hnClient *hackernews.Client) []webfetch.Backend {
+	backends := []webfetch.Backend{hackernews.NewFetchBackend(hnClient)}
+	for _, provider := range []string{"firecrawl", "exa"} {
+		token := c.serviceKey(provider)
+		if token == "" {
+			continue
+		}
+		switch provider {
+		case "firecrawl":
+			backends = append(backends, webfetch.NewFirecrawlBackend(token))
+		case "exa":
+			backends = append(backends, webfetch.NewExaBackend(token))
+		}
+	}
+	backends = append(backends, webfetch.NewHTTPBackend())
+	return backends
+}
+
+func (c *Config) serviceKey(name string) string {
+	return strings.TrimSpace(c.Services[name].APIKey)
 }
 
 func (c WebAuthConfig) enabled() bool {

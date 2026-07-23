@@ -121,6 +121,43 @@ func TestSubmitValidatesInput(t *testing.T) {
 	}
 }
 
+func TestSubmitRejectsOversizedBody(t *testing.T) {
+	fake := &fakeEngine{}
+	srv := httptest.NewServer(New(Config{Engine: fake}).Handler())
+	defer srv.Close()
+
+	body := `{"input":"` + strings.Repeat("x", maxSubmitBodyBytes) + `"}`
+	resp, err := http.Post(srv.URL+"/api/chats/1/runs", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+	if _, ok := fake.lastSubmit(); ok {
+		t.Fatal("engine should not be called for an oversized body")
+	}
+}
+
+func TestSubmitRejectsTrailingJSON(t *testing.T) {
+	fake := &fakeEngine{}
+	srv := httptest.NewServer(New(Config{Engine: fake}).Handler())
+	defer srv.Close()
+
+	resp, err := http.Post(srv.URL+"/api/chats/1/runs", "application/json", strings.NewReader(`{"input":"hello"} {}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if _, ok := fake.lastSubmit(); ok {
+		t.Fatal("engine should not be called for trailing JSON")
+	}
+}
+
 func TestServesEmbeddedPWA(t *testing.T) {
 	fake := &fakeEngine{}
 	srv := httptest.NewServer(New(Config{Engine: fake}).Handler())

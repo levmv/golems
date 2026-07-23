@@ -1,5 +1,5 @@
-// Package tools implements the builtin tool set (kept deliberately small;
-// file operations go through the shell). Implemented today:
+// Package tools implements Caliban-specific builtin tools (kept deliberately
+// small; file operations go through the shell). Implemented today:
 //
 //   - shell: bash in the workspace, scrubbed environment, timeout
 //   - memory_upsert: durable memory fact create/update
@@ -10,9 +10,9 @@
 //   - task_list / task_output / task_stop: managed background process visibility
 //   - runner_list / runner_models / runner_run: trusted external agent harnesses
 //
-// Planned (not yet implemented; do not assume available):
-//
-//   - web_fetch / web_search
+// The complete Caliban catalog also includes shared web_fetch, web_search, and
+// hacker_news tools from pkg/webfetch, pkg/websearch, and pkg/hackernews, wired
+// by main.
 //
 // Tools depend on capability interfaces (scheduling, notification) provided by
 // the engine at construction; they do not import engine.
