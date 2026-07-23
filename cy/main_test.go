@@ -1,0 +1,338 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/levmv/golems/cy/internal/session"
+	toolruntime "github.com/levmv/golems/cy/internal/tools"
+	"github.com/levmv/golems/cy/internal/ui"
+	"github.com/levmv/golems/pkg/golem"
+	"github.com/levmv/golems/pkg/jsonschema"
+	"github.com/levmv/golems/pkg/llm"
+)
+
+func TestMain(m *testing.M) {
+	if toolruntime.RunSandboxChildIfRequested() {
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func TestApplyResumedConfigHonorsExplicitEnvironment(t *testing.T) {
+	t.Setenv("CY_MODEL", "openai/from-env")
+	t.Setenv("CY_ROOT", "/from-env")
+	cfg := Config{ModelURI: "openai/from-env", RootDir: "/from-env"}
+	applyResumedConfig(&cfg, session.State{
+		Model:  "deepseek/from-session",
+		Header: session.SessionStarted{Workspace: "/from-session"},
+	}, nil)
+	if cfg.ModelURI != "openai/from-env" || cfg.RootDir != "/from-env" {
+		t.Fatalf("explicit environment was overwritten: %#v", cfg)
+	}
+}
+
+func TestRunPrintTurnJSONWritesOneFinalResult(t *testing.T) {
+	agent := sessionTaggedAgent{agentRunner: printTurnAgent(t), id: "saved-session"}
+	var stdout, stderr bytes.Buffer
+	if err := runPrintTurn(context.Background(), agent, Config{JSON: true, SaveSession: true}, "read it", &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+
+	decoder := json.NewDecoder(&stdout)
+	var result jsonResult
+	if err := decoder.Decode(&result); err != nil {
+		t.Fatalf("decode JSON result: %v; output=%q", err, stdout.String())
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		t.Fatalf("JSON output contains more than one value: %v", err)
+	}
+	if result.Version != jsonResultVersion || result.Reply != "done" || result.FinishReason != llm.FinishReasonStop || result.SessionID != "saved-session" {
+		t.Fatalf("JSON result = %#v", result)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestEphemeralJSONDoesNotAdvertiseResumableSession(t *testing.T) {
+	agent := sessionTaggedAgent{agentRunner: printTurnAgent(t), id: "temporary-session"}
+	var stdout, stderr bytes.Buffer
+	if err := runPrintTurn(context.Background(), agent, Config{JSON: true, Ephemeral: true}, "hello", &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	var result jsonResult
+	if err := json.NewDecoder(&stdout).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.SessionID != "" {
+		t.Fatalf("ephemeral JSON result = %#v", result)
+	}
+}
+
+type sessionTaggedAgent struct {
+	agentRunner
+	id string
+}
+
+func (a sessionTaggedAgent) SessionID() string { return a.id }
+
+func TestParseInvocationResume(t *testing.T) {
+	id, remaining, err := parseInvocation([]string{"resume", "01234567", "continue", "now"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "01234567" || strings.Join(remaining, " ") != "continue now" {
+		t.Fatalf("id=%q remaining=%q", id, remaining)
+	}
+}
+
+func TestParseInvocationRequiresResumeID(t *testing.T) {
+	_, _, err := parseInvocation([]string{"resume"})
+	if err == nil || !strings.Contains(err.Error(), "requires") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestBuildModelRejectsIncompleteURI(t *testing.T) {
+	for _, uri := range []string{"ollama", "ollama/", "/model"} {
+		if _, err := buildModel(Config{ModelURI: uri}, nil, false); err == nil {
+			t.Fatalf("buildModel(%q) succeeded", uri)
+		}
+	}
+}
+
+func TestBuildModelMissingCredentialSuggestsLogin(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	_, err := buildModel(Config{ModelURI: "deepseek/deepseek-v4-flash"}, nil, true)
+	if err == nil || !strings.Contains(err.Error(), "use /login deepseek") {
+		t.Fatalf("missing credential error = %v, want login guidance", err)
+	}
+}
+
+func TestControlLoginRejectsUnknownProviderBeforePrompt(t *testing.T) {
+	handled, err := handleControlInvocation([]string{"login", "unknown"}, Config{}, nil)
+	if !handled || err == nil || !strings.Contains(err.Error(), "unsupported login provider") {
+		t.Fatalf("handleControlInvocation() handled=%v err=%v", handled, err)
+	}
+}
+
+func TestReadPipedInputRejectsUnboundedPayload(t *testing.T) {
+	file, err := os.CreateTemp(t.TempDir(), "piped-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if err := file.Truncate(maxPipedInputBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	if _, piped, err := readPipedInput(file); !piped || err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("readPipedInput() piped=%v err=%v", piped, err)
+	}
+}
+
+func TestRunPrintTurnWritesOnlyFinalReplyToStdout(t *testing.T) {
+	agent := printTurnAgent(t)
+	var stdout, stderr bytes.Buffer
+
+	if err := runPrintTurn(context.Background(), agent, Config{}, "read", &stdout, &stderr); err != nil {
+		t.Fatalf("runPrintTurn() error = %v", err)
+	}
+	if stdout.String() != "done\n" {
+		t.Fatalf("stdout = %q, want final reply only", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no diagnostics", stderr.String())
+	}
+}
+
+func TestOneShotFencedJSONPrintsOnlyJSONPayload(t *testing.T) {
+	model := &runTurnFakeModel{
+		streams: [][]llm.StreamChunk{{
+			{
+				Text:         "```json\n{\"file_count\": 2}\n```",
+				FinishReason: llm.FinishReasonStop,
+			},
+		}},
+	}
+	agent, err := golem.New(golem.Config{Model: model})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if err := runPrintTurn(context.Background(), agent, Config{PrintMode: true}, "count files", &stdout, &stderr); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stdout.String(), "{\"file_count\": 2}\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestRunPrintTurnVerboseKeepsProgressOutsideJSON(t *testing.T) {
+	agent := printTurnAgent(t)
+	var stdout, stderr bytes.Buffer
+
+	if err := runPrintTurn(context.Background(), agent, Config{Verbose: true, JSON: true}, "read", &stdout, &stderr); err != nil {
+		t.Fatalf("runPrintTurn() error = %v", err)
+	}
+	var result jsonResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil || result.Reply != "done" {
+		t.Fatalf("JSON result = %#v, error = %v", result, err)
+	}
+	if !strings.Contains(stderr.String(), "read  README.md") {
+		t.Fatalf("stderr missed tool progress: %q", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "read  README.md") {
+		t.Fatalf("stdout contains diagnostics: %q", stdout.String())
+	}
+}
+
+func TestResumeHintVisibility(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         Config
+		hasUserTurn bool
+		want        bool
+	}{
+		{name: "empty interactive", cfg: Config{}, want: false},
+		{name: "interactive", cfg: Config{}, hasUserTurn: true, want: true},
+		{name: "quiet one-shot", cfg: Config{PrintMode: true}, hasUserTurn: true, want: false},
+		{name: "verbose one-shot", cfg: Config{PrintMode: true, Verbose: true}, hasUserTurn: true, want: false},
+		{name: "saved one-shot", cfg: Config{PrintMode: true, SaveSession: true}, hasUserTurn: true, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldPrintResumeHint(test.cfg, test.hasUserTurn); got != test.want {
+				t.Fatalf("shouldPrintResumeHint() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestOneShotSessionPersistence(t *testing.T) {
+	if !useEphemeralSession(Config{PrintMode: true}, "") {
+		t.Fatal("ordinary one-shot should be ephemeral")
+	}
+	if useEphemeralSession(Config{PrintMode: true, SaveSession: true}, "") {
+		t.Fatal("--save-session one-shot should be durable")
+	}
+	if useEphemeralSession(Config{PrintMode: true}, "01234567") {
+		t.Fatal("resumed one-shot should keep its existing session")
+	}
+	if useEphemeralSession(Config{}, "") {
+		t.Fatal("interactive mode should be durable")
+	}
+}
+
+func printTurnAgent(t *testing.T) agentRunner {
+	t.Helper()
+	model := &runTurnFakeModel{
+		streams: [][]llm.StreamChunk{
+			{{
+				ToolCalls: []llm.ToolCall{{
+					ID:   "call_1",
+					Type: string(llm.ToolTypeFunction),
+					Function: llm.ToolFunction{
+						Name:      "read",
+						Arguments: `{"path":"README.md"}`,
+					},
+				}},
+				FinishReason: llm.FinishReasonToolUse,
+			}},
+			{{Text: "done", FinishReason: llm.FinishReasonStop}},
+		},
+	}
+	tool := golem.FunctionTool(
+		"read",
+		"Read a file",
+		jsonschema.Object(map[string]jsonschema.Schema{"path": jsonschema.String("Path")}, "path"),
+		func(context.Context, llm.ToolCall) (golem.ToolResult, error) {
+			return golem.ToolResult{Content: "README contents"}, nil
+		},
+	)
+	agent, err := golem.New(golem.Config{Model: model, Tools: []golem.Tool{tool}})
+	if err != nil {
+		t.Fatalf("golem.New() error = %v", err)
+	}
+	return agent
+}
+
+func TestPrintCompactToolEventShowsCallsAndErrorsOnly(t *testing.T) {
+	var out bytes.Buffer
+
+	console := ui.NewConsole(&out)
+	console.PrintCompactToolEvent(golem.StreamEvent{Kind: golem.EventToolCall, Step: golem.Step{ToolName: "bash", Arguments: `{"command":"go test ./cy/..."}`}})
+	console.PrintCompactToolEvent(golem.StreamEvent{Kind: golem.EventToolResult, Step: golem.Step{ToolName: "bash"}})
+	console.PrintCompactToolEvent(golem.StreamEvent{Kind: golem.EventToolError, Step: golem.Step{ToolName: "grep", Error: "invalid pattern"}})
+
+	want := "\n$ go test ./cy/...\n\nerror: invalid pattern\n"
+	if out.String() != want {
+		t.Fatalf("output = %q, want %q", out.String(), want)
+	}
+}
+
+func TestConsolePrintsStructuredFileDiff(t *testing.T) {
+	var out bytes.Buffer
+	console := ui.NewConsole(&out)
+	change := toolruntime.BuildFileChangeMeta("note.txt", "edited", []byte("one\nold\n"), []byte("one\nnew\n"))
+
+	console.PrintCompactToolEvent(golem.StreamEvent{Kind: golem.EventToolCall, Step: golem.Step{ToolName: "edit", ToolCallID: "call-1", Arguments: `{"path":"note.txt"}`}})
+	console.PrintCompactToolEvent(golem.StreamEvent{Kind: golem.EventToolResult, Step: golem.Step{ToolName: "edit", ToolCallID: "call-1", Meta: change}})
+
+	got := out.String()
+	for _, want := range []string{"edit  note.txt", "edited  note.txt  +1 −1", "− 2   │ old", "+   2 │ new"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("console diff missed %q: %q", want, got)
+		}
+	}
+}
+
+type runTurnFakeModel struct {
+	streams [][]llm.StreamChunk
+}
+
+func (m *runTurnFakeModel) Chat(context.Context, llm.Request) (*llm.Response, error) {
+	return nil, nil
+}
+
+func (m *runTurnFakeModel) Stream(context.Context, llm.Request) (llm.Stream, error) {
+	if len(m.streams) == 0 {
+		return &runTurnFakeStream{}, nil
+	}
+	chunks := m.streams[0]
+	m.streams = m.streams[1:]
+	return &runTurnFakeStream{chunks: chunks}, nil
+}
+
+type runTurnFakeStream struct {
+	chunks []llm.StreamChunk
+	idx    int
+}
+
+func (s *runTurnFakeStream) Recv() (llm.StreamChunk, error) {
+	if s.idx >= len(s.chunks) {
+		return llm.StreamChunk{}, io.EOF
+	}
+	chunk := s.chunks[s.idx]
+	s.idx++
+	return chunk, nil
+}
+
+func (s *runTurnFakeStream) Usage() llm.Usage {
+	return llm.Usage{}
+}
+
+func (s *runTurnFakeStream) Close() error {
+	return nil
+}

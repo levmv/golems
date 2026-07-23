@@ -12,7 +12,7 @@ Chat-bot with evolving personality. Multiple bots. History. Context-compaction. 
 Summarization for web pages
 
 **Cy**  
-Draft CLI ai agent
+CLI coding agent
 
 **Chore**  
 ?
@@ -30,8 +30,11 @@ Chat web UI, split out into its own repository: [levmv/murm-ui](https://github.c
 ## Packages
 * llm      - Core abstractions over AI providers
 * golem    - Reusable conversational agent loop
+* hackernews - Hacker News feeds, search, threads, and agent tool
 * jsonschema - JSON Schema helpers for tools and structured outputs
 * logger   - Just simple text logger
 * openai   - OpenAI API package
-* telegram - Telegram Bot API
 * tasks    - Durable task queue with scheduling
+* telegram - Telegram Bot API
+* webfetch - Bounded public web-page fetching with optional provider fallbacks
+* websearch - Web search abstraction with Tavily and Exa providers

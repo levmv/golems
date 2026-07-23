@@ -1,0 +1,608 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/levmv/golems/cy/internal/engine"
+	"github.com/levmv/golems/cy/internal/session"
+	"github.com/levmv/golems/cy/internal/state"
+	toolruntime "github.com/levmv/golems/cy/internal/tools"
+	"github.com/levmv/golems/pkg/golem"
+	"github.com/levmv/golems/pkg/hackernews"
+	"github.com/levmv/golems/pkg/llm"
+	"github.com/levmv/golems/pkg/webfetch"
+	"github.com/levmv/golems/pkg/websearch"
+)
+
+// sessionAgent is the stable UI-facing handle. It owns the session and process
+// runtime that change beneath /clear and /resume, while each individual Engine
+// remains tied to exactly one saved session.
+type sessionAgent struct {
+	mu sync.RWMutex
+
+	cfg       Config
+	model     golem.Model
+	root      string
+	baseTools []golem.Tool
+	state     *state.Store
+	masker    *secretMasker
+
+	engine    *engine.Engine
+	journal   *session.Session
+	processes *toolruntime.ProcessManager
+	context   engine.ContextReport
+	usage     llm.Usage
+	repaired  bool
+	closed    bool
+}
+
+func newSessionAgent(cfg Config, model golem.Model, root string, baseTools []golem.Tool, journal *session.Session, store *state.Store) (*sessionAgent, error) {
+	managed := &sessionAgent{cfg: cfg, model: model, root: root, baseTools: append([]golem.Tool(nil), baseTools...), state: store, masker: newSecretMasker(store)}
+	eng, processes, err := managed.build(journal, cfg, model)
+	if err != nil {
+		return nil, err
+	}
+	report, usage, err := eng.Status()
+	if err != nil {
+		_ = processes.Close()
+		return nil, fmt.Errorf("initialize session status: %w", err)
+	}
+	managed.engine = eng
+	managed.journal = journal
+	managed.processes = processes
+	managed.context = report
+	managed.usage = usage
+	managed.repaired = journal.TailRepaired()
+	return managed, nil
+}
+
+func (a *sessionAgent) refreshStatusLocked() {
+	if a.engine == nil {
+		return
+	}
+	report, usage, err := a.engine.Status()
+	if err == nil {
+		a.context = report
+		a.usage = usage
+	}
+}
+
+func (a *sessionAgent) ProviderStatuses() ([]providerStatus, error) {
+	return listProviderStatus(a.state)
+}
+
+func (a *sessionAgent) Login(provider, key string) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	key, err := storeProviderCredential(a.state, provider, key)
+	if err != nil {
+		return err
+	}
+	a.masker.Add(key)
+	if !isModelLoginProvider(provider) {
+		return a.reloadTools()
+	}
+	a.mu.RLock()
+	current := modelProvider(a.cfg.ModelURI) == provider
+	uri := a.cfg.ModelURI
+	a.mu.RUnlock()
+	if current {
+		return a.reloadModel(uri, false)
+	}
+	return nil
+}
+
+func (a *sessionAgent) Logout(provider string) error {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if err := deleteProviderCredential(a.state, provider); err != nil {
+		return err
+	}
+	if !isModelLoginProvider(provider) {
+		return a.reloadTools()
+	}
+	a.mu.RLock()
+	current := modelProvider(a.cfg.ModelURI) == provider
+	uri := a.cfg.ModelURI
+	a.mu.RUnlock()
+	if current {
+		return a.reloadModel(uri, false)
+	}
+	return nil
+}
+
+func (a *sessionAgent) SwitchModel(uri string) error {
+	uri = strings.TrimSpace(uri)
+	if uri == "" {
+		return errors.New("model URI is required")
+	}
+	return a.reloadModel(uri, true)
+}
+
+func (a *sessionAgent) reloadModel(uri string, selected bool) error {
+	a.mu.RLock()
+	cfg := a.cfg
+	a.mu.RUnlock()
+	cfg.ModelURI = uri
+	model, err := buildModel(cfg, a.state, selected)
+	if err != nil {
+		return err
+	}
+	spec := resolveModelSpec(uri, a.state, selected)
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	eng := a.engine
+	journal := a.journal
+	if a.closed || eng == nil || journal == nil {
+		return errors.New("cy session runtime is closed")
+	}
+	if a.state != nil && selected {
+		if err := a.state.SetDefaultModel(uri); err != nil {
+			return fmt.Errorf("remember selected model: %w", err)
+		}
+	}
+	if a.cfg.ModelURI != uri {
+		if _, err := journal.Append(session.RecordModelChanged, session.ModelChanged{Model: uri}); err != nil {
+			return err
+		}
+	}
+	if err := eng.ReconfigureModel(model, uri, spec.ContextWindow, spec.Estimated); err != nil {
+		return err
+	}
+	a.cfg.ModelURI = uri
+	a.model = model
+	a.refreshStatusLocked()
+	return nil
+}
+
+func (a *sessionAgent) KnownModels() []string {
+	return knownModels(a.state)
+}
+
+func (a *sessionAgent) CurrentModel() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.ModelURI
+}
+
+func (a *sessionAgent) CurrentProfile() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.CapabilityProfile
+}
+
+func (a *sessionAgent) ProcessStatus(jobID string) (toolruntime.ProcessResultMeta, bool) {
+	a.mu.RLock()
+	processes := a.processes
+	if processes == nil {
+		a.mu.RUnlock()
+		return toolruntime.ProcessResultMeta{}, false
+	}
+	meta, ok := processes.Status(jobID)
+	a.mu.RUnlock()
+	return meta, ok
+}
+
+func (a *sessionAgent) SwitchProfile(value string) error {
+	profile, err := toolruntime.NormalizeCapabilityProfile(value)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	eng := a.engine
+	processes := a.processes
+	if a.closed || eng == nil || processes == nil {
+		return errors.New("cy session runtime is closed")
+	}
+	tools, err := a.toolsForProfile(processes, profile)
+	if err != nil {
+		return err
+	}
+	if a.state != nil {
+		if err := a.state.SetDefaultProfile(profile); err != nil {
+			return fmt.Errorf("remember selected profile: %w", err)
+		}
+	}
+	if err := eng.ReconfigureTools(tools); err != nil {
+		return err
+	}
+	a.cfg.CapabilityProfile = profile
+	a.refreshStatusLocked()
+	return nil
+}
+
+func (a *sessionAgent) reloadTools() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || a.engine == nil || a.processes == nil {
+		return errors.New("cy session runtime is closed")
+	}
+	tools, err := a.toolsForProfile(a.processes, a.cfg.CapabilityProfile)
+	if err != nil {
+		return err
+	}
+	if err := a.engine.ReconfigureTools(tools); err != nil {
+		return err
+	}
+	a.refreshStatusLocked()
+	return nil
+}
+
+func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, profile string) ([]golem.Tool, error) {
+	tools := append([]golem.Tool(nil), a.baseTools...)
+	hnClient := hackernews.NewClient()
+	fetchBackends, err := a.webFetchBackends(hnClient)
+	if err != nil {
+		return nil, err
+	}
+	tools = append(tools, webfetch.NewTool(fetchBackends...))
+	tools = append(tools, hackernews.NewTool(hnClient))
+	credentials := make([]websearch.Credential, 0, len(serviceCatalog))
+	for _, service := range serviceCatalog {
+		if !service.search {
+			continue
+		}
+		token, _, err := credentialForProvider(a.state, service.name)
+		if err != nil {
+			return nil, fmt.Errorf("load %s credential: %w", service.name, err)
+		}
+		if token != "" {
+			credentials = append(credentials, websearch.Credential{Provider: service.name, Token: token})
+		}
+	}
+	searchTool, available, err := websearch.NewTool(credentials)
+	if err != nil {
+		return nil, err
+	}
+	if available {
+		tools = append(tools, searchTool)
+	}
+	if processes != nil {
+		tools = append(tools, processes.Tools()...)
+	}
+	tools = toolruntime.FilterForProfile(tools, profile)
+	if _, err := golem.NewToolSet(tools); err != nil {
+		return nil, err
+	}
+	return tools, nil
+}
+
+func (a *sessionAgent) webFetchBackends(hnClient *hackernews.Client) ([]webfetch.Backend, error) {
+	fetchBackends := []webfetch.Backend{hackernews.NewFetchBackend(hnClient), webfetch.NewHTTPBackend()}
+	for _, service := range serviceCatalog {
+		if !service.fetch {
+			continue
+		}
+		token, _, err := credentialForProvider(a.state, service.name)
+		if err != nil {
+			return nil, fmt.Errorf("load %s credential: %w", service.name, err)
+		}
+		if token == "" {
+			continue
+		}
+		switch service.name {
+		case "firecrawl":
+			fetchBackends = append(fetchBackends, webfetch.NewFirecrawlBackend(token))
+		case "exa":
+			fetchBackends = append(fetchBackends, webfetch.NewExaBackend(token))
+		}
+	}
+	return fetchBackends, nil
+}
+
+func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.Model) (*engine.Engine, *toolruntime.ProcessManager, error) {
+	instructionPrompts, err := loadInstructions(a.root)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load project instructions: %w", err)
+	}
+	processes, err := toolruntime.NewProcessManager(a.root, resolveStateHome(cfg.Home), cfg.SandboxPolicy, !cfg.PrintMode)
+	if err != nil {
+		return nil, nil, fmt.Errorf("initialize process runtime: %w", err)
+	}
+	profile, err := toolruntime.NormalizeCapabilityProfile(cfg.CapabilityProfile)
+	if err != nil {
+		_ = processes.Close()
+		return nil, nil, err
+	}
+	tools, err := a.toolsForProfile(processes, profile)
+	if err != nil {
+		_ = processes.Close()
+		return nil, nil, err
+	}
+	spec := resolveModelSpec(cfg.ModelURI, a.state, false)
+	eng, err := engine.New(engine.Config{
+		Model:              model,
+		Session:            journal,
+		ModelURI:           cfg.ModelURI,
+		InstructionPrompts: instructionPrompts,
+		ContextWindow:      spec.ContextWindow,
+		ContextEstimated:   spec.Estimated,
+		Tools:              tools,
+		RequestPolicy: golem.RequestPolicy{
+			MaxRetries:        -1,
+			BaseDelay:         time.Second,
+			RetryBudget:       15 * time.Minute,
+			MaxDelay:          time.Minute,
+			StreamIdleTimeout: 5 * time.Minute,
+		},
+		BoundaryEvents: processes.DeliverCompletionEvents,
+		Sanitize:       a.masker.Redact,
+	})
+	if err != nil {
+		_ = processes.Close()
+		return nil, nil, fmt.Errorf("initialize engine: %w", err)
+	}
+	return eng, processes, nil
+}
+
+func (a *sessionAgent) SessionID() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.journal == nil {
+		return ""
+	}
+	return a.journal.ID()
+}
+
+func (a *sessionAgent) SessionRepaired() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.repaired
+}
+
+func (a *sessionAgent) HasUserTurn() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.journal != nil && a.journal.HasUserTurn()
+}
+
+func (a *sessionAgent) Stream(ctx context.Context, input string, emit golem.StreamFunc) (*golem.Turn, error) {
+	if err := a.requireModelCredential(); err != nil {
+		return nil, err
+	}
+	a.mu.RLock()
+	if a.engine == nil {
+		a.mu.RUnlock()
+		return nil, errors.New("cy session runtime is closed")
+	}
+	eng := a.engine
+	turn, err := eng.Stream(ctx, input, emit)
+	report, usage, statusErr := eng.Status()
+	a.mu.RUnlock()
+	a.mu.Lock()
+	if a.engine == eng && statusErr == nil {
+		a.context = report
+		a.usage = usage
+	}
+	a.mu.Unlock()
+	return turn, err
+}
+
+func (a *sessionAgent) SessionHistory() ([]llm.Message, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.engine == nil {
+		return nil, errors.New("cy session runtime is closed")
+	}
+	return a.engine.History()
+}
+
+func (a *sessionAgent) SessionUsage() (llm.Usage, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.engine == nil {
+		return llm.Usage{}, errors.New("cy session runtime is closed")
+	}
+	return a.usage, nil
+}
+
+func (a *sessionAgent) QueueInput(content string) error {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.engine == nil {
+		return errors.New("cy session runtime is closed")
+	}
+	// QueueInput runs synchronously in the TUI event loop, so keep it limited to
+	// the in-memory queue; context and status refresh at the model boundary.
+	return a.engine.QueueInput(content)
+}
+
+func (a *sessionAgent) ClaimQueued() (string, bool, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.engine == nil {
+		return "", false, errors.New("cy session runtime is closed")
+	}
+	return a.engine.ClaimQueued()
+}
+
+func (a *sessionAgent) RestoreQueued() ([]string, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.engine == nil {
+		return nil, errors.New("cy session runtime is closed")
+	}
+	return a.engine.RestoreQueued()
+}
+
+func (a *sessionAgent) ClearSession() (string, error) {
+	a.mu.RLock()
+	cfg := a.cfg
+	model := a.model
+	a.mu.RUnlock()
+	journal, err := session.Create(session.CreateOptions{
+		Home:      cfg.Home,
+		Workspace: a.root,
+		Model:     cfg.ModelURI,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := a.install(journal, cfg, model); err != nil {
+		_ = journal.Close()
+		return "", err
+	}
+	return journal.ID(), nil
+}
+
+func (a *sessionAgent) ResumeSession(idOrPrefix string) (string, error) {
+	a.mu.RLock()
+	cfg := a.cfg
+	model := a.model
+	a.mu.RUnlock()
+	journal, err := session.Open(cfg.Home, idOrPrefix)
+	if err != nil {
+		return "", err
+	}
+	state, err := journal.Replay()
+	if err != nil {
+		_ = journal.Close()
+		return "", err
+	}
+	if state.Header.Workspace != "" && state.Header.Workspace != a.root {
+		_ = journal.Close()
+		return "", fmt.Errorf("session workspace is %s; current workspace is %s", state.Header.Workspace, a.root)
+	}
+	if state.Model != "" && state.Model != cfg.ModelURI {
+		cfg.ModelURI = state.Model
+		model, err = buildModel(cfg, a.state, false)
+		if err != nil {
+			_ = journal.Close()
+			return "", fmt.Errorf("restore session model: %w", err)
+		}
+	}
+	if err := a.install(journal, cfg, model); err != nil {
+		_ = journal.Close()
+		return "", err
+	}
+	return journal.ID(), nil
+}
+
+func (a *sessionAgent) install(journal *session.Session, cfg Config, model golem.Model) error {
+	eng, processes, err := a.build(journal, cfg, model)
+	if err != nil {
+		return err
+	}
+	report, usage, err := eng.Status()
+	if err != nil {
+		_ = processes.Close()
+		return fmt.Errorf("initialize session status: %w", err)
+	}
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		_ = processes.Close()
+		return errors.New("cy session runtime is closed")
+	}
+	oldJournal := a.journal
+	oldProcesses := a.processes
+	a.engine = eng
+	a.journal = journal
+	a.processes = processes
+	a.cfg = cfg
+	a.model = model
+	a.context = report
+	a.usage = usage
+	a.repaired = journal.TailRepaired()
+	a.mu.Unlock()
+
+	if oldProcesses != nil {
+		_ = oldProcesses.Close()
+	}
+	if oldJournal != nil {
+		_ = oldJournal.ClosePruningEmpty()
+	}
+	return nil
+}
+
+func (a *sessionAgent) ContextReport() (engine.ContextReport, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.engine == nil {
+		return engine.ContextReport{}, errors.New("cy session runtime is closed")
+	}
+	return a.engine.ContextReport()
+}
+
+func (a *sessionAgent) CachedContextReport() engine.ContextReport {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.context
+}
+
+func (a *sessionAgent) Compact(ctx context.Context, focus string) (engine.ContextReport, error) {
+	if err := a.requireModelCredential(); err != nil {
+		return engine.ContextReport{}, err
+	}
+	a.mu.RLock()
+	if a.engine == nil {
+		a.mu.RUnlock()
+		return engine.ContextReport{}, errors.New("cy session runtime is closed")
+	}
+	eng := a.engine
+	report, usage, err := eng.Compact(ctx, focus)
+	if err != nil {
+		a.mu.RUnlock()
+		return report, err
+	}
+	a.mu.RUnlock()
+	a.mu.Lock()
+	if a.engine == eng {
+		a.usage = usage
+		a.context = report
+	}
+	a.mu.Unlock()
+	return report, nil
+}
+
+func (a *sessionAgent) requireModelCredential() error {
+	a.mu.RLock()
+	uri := a.cfg.ModelURI
+	store := a.state
+	a.mu.RUnlock()
+
+	provider := modelProvider(uri)
+	if !isModelLoginProvider(provider) {
+		return nil
+	}
+	token, _, err := credentialForProvider(store, provider)
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		return fmt.Errorf("%s API key is empty for model %q; use /login %s", provider, uri, provider)
+	}
+	return nil
+}
+
+func (a *sessionAgent) ListSessions() ([]session.Summary, error) {
+	return session.List(a.cfg.Home, a.root)
+}
+
+func (a *sessionAgent) Close() error {
+	a.mu.Lock()
+	if a.closed {
+		a.mu.Unlock()
+		return nil
+	}
+	a.closed = true
+	journal := a.journal
+	processes := a.processes
+	a.engine = nil
+	a.journal = nil
+	a.processes = nil
+	a.mu.Unlock()
+	var err error
+	if processes != nil {
+		err = errors.Join(err, processes.Close())
+	}
+	if journal != nil {
+		err = errors.Join(err, journal.ClosePruningEmpty())
+	}
+	return err
+}
