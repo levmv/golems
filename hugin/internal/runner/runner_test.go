@@ -184,6 +184,33 @@ func TestHostKeyCallbackCanBeExplicitlyInsecure(t *testing.T) {
 	}
 }
 
+func TestSSHClientKeyIncludesEffectiveHostKeyPolicy(t *testing.T) {
+	base := config.Target{
+		Host: "example.test",
+		User: "monitor",
+		Key:  "~/.ssh/id_ed25519",
+	}
+	defaultPolicy := sshClientKey(base)
+
+	explicitDefault := base
+	explicitDefault.KnownHosts = "~/.ssh/known_hosts"
+	if got := sshClientKey(explicitDefault); got != defaultPolicy {
+		t.Fatalf("explicit default known_hosts changed cache key: %q != %q", got, defaultPolicy)
+	}
+
+	otherKnownHosts := base
+	otherKnownHosts.KnownHosts = filepath.Join(t.TempDir(), "known_hosts")
+	if got := sshClientKey(otherKnownHosts); got == defaultPolicy {
+		t.Fatal("different known_hosts policy reused cache key")
+	}
+
+	insecure := base
+	insecure.InsecureIgnoreHostKey = true
+	if got := sshClientKey(insecure); got == defaultPolicy {
+		t.Fatal("insecure target reused secure cache key")
+	}
+}
+
 func TestIsLocalTargetTrustsExplicitType(t *testing.T) {
 	if !isLocalTarget(config.Target{Type: "local", Host: "localhost"}) {
 		t.Fatal("local target was not treated as local")

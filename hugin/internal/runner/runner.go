@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -431,7 +432,27 @@ func isDeadCachedClientSessionError(err error) bool {
 }
 
 func sshClientKey(target config.Target) string {
-	return target.User + "@" + target.Host + "|" + target.Key
+	knownHostsPolicy := "insecure"
+	if !target.InsecureIgnoreHostKey {
+		knownHostsPath := target.KnownHosts
+		if knownHostsPath == "" {
+			knownHostsPath = "~/.ssh/known_hosts"
+		}
+		knownHostsPolicy = "known-hosts:" + normalizedSSHPath(knownHostsPath)
+	}
+	return strings.Join([]string{
+		target.User,
+		target.Host,
+		normalizedSSHPath(target.Key),
+		knownHostsPolicy,
+	}, "\x00")
+}
+
+func normalizedSSHPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	return filepath.Clean(expandTilde(path))
 }
 
 // expandTilde handles the common `~/.ssh/id_rsa` pattern in configs.
