@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/levmv/golems/pkg/openai"
 )
@@ -143,7 +144,9 @@ func mapUsage(u openai.Usage) Usage {
 		CompletionTokens: u.CompletionTokens,
 		TotalTokens:      u.TotalTokens,
 	}
-	if u.PromptTokensDetails != nil {
+	if u.PromptCacheHitTokens != nil {
+		usage.CachedTokens = *u.PromptCacheHitTokens
+	} else if u.PromptTokensDetails != nil {
 		usage.CachedTokens = u.PromptTokensDetails.CachedTokens
 	}
 	return usage
@@ -185,6 +188,16 @@ func (a *openAIAdapter) buildBaseRequest(req *Request) (openai.ChatCompletionReq
 	}
 	if req.MaxTokens != nil {
 		oaiReq.MaxTokens = *req.MaxTokens
+	}
+	if effort := strings.ToLower(strings.TrimSpace(req.ReasoningEffort)); effort != "" {
+		switch a.provider {
+		case "deepseek", "openai":
+			oaiReq.ReasoningEffort = effort
+		case "openrouter":
+			oaiReq.Reasoning = &openai.ReasoningConfig{Effort: effort}
+		default:
+			return openai.ChatCompletionRequest{}, fmt.Errorf("%w: reasoning effort is unsupported by provider %q", ErrInvalidRequest, a.provider)
+		}
 	}
 
 	if ext, ok := req.ProviderExtensions.(openai.ChatCompletionRequestExtensions); ok {

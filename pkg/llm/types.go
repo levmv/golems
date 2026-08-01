@@ -37,6 +37,7 @@ type Request struct {
 	Messages           []Message   `json:"messages"`
 	Temperature        *float32    `json:"temperature,omitempty"`
 	MaxTokens          *int        `json:"max_tokens,omitempty"`
+	ReasoningEffort    string      `json:"reasoning_effort,omitempty"`
 	Tools              []Tool      `json:"tools,omitempty"`
 	ToolChoice         *ToolChoice `json:"tool_choice,omitempty"`
 	ParallelToolCalls  *bool       `json:"parallel_tool_calls,omitempty"`

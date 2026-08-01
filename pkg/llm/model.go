@@ -14,10 +14,11 @@ import (
 // logical call, while placing logging or tracking before retries observes each
 // attempt.
 type Model struct {
-	client      Client
-	modelID     string
-	temperature *float32
-	maxTokens   *int
+	client          Client
+	modelID         string
+	temperature     *float32
+	maxTokens       *int
+	reasoningEffort string
 }
 
 // Model creates a new model handle from a string like "openai/gpt-4o".
@@ -46,6 +47,14 @@ func (m Model) WithTemperature(t float32) Model {
 
 func (m Model) WithMaxTokens(mt int) Model {
 	m.maxTokens = &mt
+	return m
+}
+
+// WithReasoningEffort sets the provider-neutral reasoning effort applied to
+// requests which do not override it. An empty value preserves provider
+// defaults and emits no additional wire field.
+func (m Model) WithReasoningEffort(effort string) Model {
+	m.reasoningEffort = strings.ToLower(strings.TrimSpace(effort))
 	return m
 }
 
@@ -108,12 +117,17 @@ func (m Model) buildRequest(req Request) *Request {
 	if req.MaxTokens != nil {
 		maxTokens = req.MaxTokens
 	}
+	reasoningEffort := m.reasoningEffort
+	if strings.TrimSpace(req.ReasoningEffort) != "" {
+		reasoningEffort = strings.ToLower(strings.TrimSpace(req.ReasoningEffort))
+	}
 
 	return &Request{
 		Model:              m.modelID,
 		Messages:           req.Messages,
 		Temperature:        temp,
 		MaxTokens:          maxTokens,
+		ReasoningEffort:    reasoningEffort,
 		Tools:              req.Tools,
 		ToolChoice:         req.ToolChoice,
 		ParallelToolCalls:  req.ParallelToolCalls,

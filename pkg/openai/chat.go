@@ -206,8 +206,12 @@ type ChatCompletionRequest struct {
 	// Store can be set to true to store the output of this completion request for use in distillations and evals.
 	// https://platform.openai.com/docs/api-reference/chat/create#chat-create-store
 	Store bool `json:"store,omitempty"`
-	// Controls effort on reasoning for reasoning models. It can be set to "low", "medium", or "high".
+	// Controls effort on reasoning models. Accepted values are provider-specific.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Reasoning is the normalized reasoning configuration used by gateways such
+	// as OpenRouter. Direct OpenAI-compatible providers generally use the
+	// top-level ReasoningEffort field instead.
+	Reasoning *ReasoningConfig `json:"reasoning,omitempty"`
 	// Metadata to store with the completion.
 	Metadata map[string]string `json:"metadata,omitempty"`
 	// Configuration for a predicted output.
@@ -232,6 +236,10 @@ type ChatCompletionRequest struct {
 	SafetyIdentifier string `json:"safety_identifier,omitempty"`
 	// Embedded struct for non-OpenAI extensions
 	ChatCompletionRequestExtensions
+}
+
+type ReasoningConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type StreamOptions struct {

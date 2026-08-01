@@ -79,6 +79,17 @@ func TestModelChatForwardsToolFields(t *testing.T) {
 	}
 }
 
+func TestModelDefaultReasoningEffort(t *testing.T) {
+	client := &captureClient{}
+	model := (Model{client: client, modelID: "reasoner"}).WithReasoningEffort(" HIGH ")
+	if _, err := model.Chat(context.Background(), Request{}); err != nil {
+		t.Fatal(err)
+	}
+	if client.chatReq == nil || client.chatReq.ReasoningEffort != "high" {
+		t.Fatalf("request = %#v", client.chatReq)
+	}
+}
+
 func TestModelStreamForwardsToolFields(t *testing.T) {
 	client := &captureClient{}
 	model := Model{client: client, modelID: "gpt-test"}

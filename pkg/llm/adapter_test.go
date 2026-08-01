@@ -51,6 +51,55 @@ func TestMapMessagesEchoesAssistantReasoning(t *testing.T) {
 	}
 }
 
+func TestMapUsageCacheTokenShapes(t *testing.T) {
+	directHit := 123
+	directZero := 0
+	tests := []struct {
+		name string
+		in   openai.Usage
+		want int
+	}{
+		{
+			name: "direct DeepSeek top-level field",
+			in: openai.Usage{
+				PromptTokens:         168,
+				PromptCacheHitTokens: &directHit,
+			},
+			want: 123,
+		},
+		{
+			name: "nested OpenAI-compatible field",
+			in: openai.Usage{
+				PromptTokens:        168,
+				PromptTokensDetails: &openai.PromptTokensDetails{CachedTokens: 99},
+			},
+			want: 99,
+		},
+		{
+			name: "reported direct zero takes precedence",
+			in: openai.Usage{
+				PromptTokens:         168,
+				PromptCacheHitTokens: &directZero,
+				PromptTokensDetails:  &openai.PromptTokensDetails{CachedTokens: 99},
+			},
+			want: 0,
+		},
+		{
+			name: "unreported cache usage",
+			in:   openai.Usage{PromptTokens: 168},
+			want: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := mapUsage(tt.in).CachedTokens; got != tt.want {
+				t.Fatalf("cached tokens = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBuildBaseRequestMapsTools(t *testing.T) {
 	parallel := false
 	topP := float32(0.8)
@@ -129,6 +178,58 @@ func TestBuildBaseRequestMapsTools(t *testing.T) {
 	}
 	if oaiReq.ResponseFormat == nil || oaiReq.ResponseFormat.Type != openai.ChatCompletionResponseFormatTypeJSONObject {
 		t.Fatalf("response format = %#v", oaiReq.ResponseFormat)
+	}
+}
+
+func TestBuildBaseRequestMapsReasoningEffortByProvider(t *testing.T) {
+	tests := []struct {
+		provider       string
+		wantTopLevel   string
+		wantOpenRouter string
+	}{
+		{provider: "deepseek", wantTopLevel: "high"},
+		{provider: "openai", wantTopLevel: "high"},
+		{provider: "openrouter", wantOpenRouter: "high"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			request, err := (&openAIAdapter{provider: tt.provider}).buildBaseRequest(&Request{ReasoningEffort: " HIGH "})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if request.ReasoningEffort != tt.wantTopLevel {
+				t.Fatalf("top-level reasoning_effort = %q, want %q", request.ReasoningEffort, tt.wantTopLevel)
+			}
+			if tt.wantOpenRouter == "" {
+				if request.Reasoning != nil {
+					t.Fatalf("reasoning object = %#v, want nil", request.Reasoning)
+				}
+			} else if request.Reasoning == nil || request.Reasoning.Effort != tt.wantOpenRouter {
+				t.Fatalf("reasoning object = %#v, want effort %q", request.Reasoning, tt.wantOpenRouter)
+			}
+		})
+	}
+}
+
+func TestBuildBaseRequestDefaultEffortPreservesWireShape(t *testing.T) {
+	request, err := (&openAIAdapter{provider: "deepseek"}).buildBaseRequest(&Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "reasoning_effort") || strings.Contains(string(raw), `"reasoning"`) {
+		t.Fatalf("default effort changed wire shape: %s", raw)
+	}
+}
+
+func TestBuildBaseRequestRejectsEffortForUnsupportedProvider(t *testing.T) {
+	_, err := (&openAIAdapter{provider: "ollama"}).buildBaseRequest(&Request{ReasoningEffort: "high"})
+	if !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("error = %v, want ErrInvalidRequest", err)
 	}
 }
 
