@@ -19,6 +19,8 @@ const (
 	minVerbatimTail   = 8 * 1024
 	maxVerbatimTail   = 24 * 1024
 	compactionOutput  = 4096
+	prunedToolHead    = 4 * 1024
+	prunedToolTail    = 4 * 1024
 )
 
 type ContextReport struct {
@@ -72,6 +74,11 @@ func (e *Engine) prepareContext(ctx context.Context) ([]llm.Message, ContextRepo
 	if report.TotalInputTokens <= report.InputLimit {
 		return messages, report, nil
 	}
+	if prunedMessages, prunedReport, applied, pruneErr := e.pruneToolResultsIfSufficient(state); pruneErr != nil {
+		return nil, report, fmt.Errorf("prune old tool results: %w", pruneErr)
+	} else if applied {
+		return prunedMessages, prunedReport, nil
+	}
 	if err := e.compactLocked(ctx, "", true); err != nil {
 		return nil, report, fmt.Errorf("context needs compaction: %w", err)
 	}
@@ -119,6 +126,9 @@ func (e *Engine) buildContext(state session.State) ([]llm.Message, ContextReport
 	history := llm.CloneMessages(state.Messages[start:])
 	historyRunIDs := append([]string(nil), state.MessageRunIDs[start:]...)
 	for index, message := range history {
+		if pruning := state.ToolPruning; pruning != nil && message.Role == llm.RoleTool && state.MessageSeqs[start+index] <= pruning.ThroughSeq {
+			message.Content = pruneToolResult(message.Content, pruning.HeadBytes, pruning.TailBytes)
+		}
 		if _, active := state.ActiveRuns[historyRunIDs[index]]; !active {
 			message.ReasoningContent = ""
 		}
@@ -134,6 +144,66 @@ func (e *Engine) buildContext(state session.State) ([]llm.Message, ContextReport
 	report.AvailableInputTokens = max(0, report.InputLimit-report.TotalInputTokens)
 	report.PercentLeft = clamp(report.AvailableInputTokens*100/max(1, report.InputLimit), 0, 100)
 	return messages, report
+}
+
+func (e *Engine) pruneToolResultsIfSufficient(state session.State) ([]llm.Message, ContextReport, bool, error) {
+	activeStart := 0
+	if state.Compaction != nil {
+		activeStart = firstMessageAtOrAfter(state.MessageSeqs, state.Compaction.FirstVerbatimSeq)
+	}
+	tailBudget := clamp(e.contextWindow/5, minVerbatimTail, maxVerbatimTail)
+	firstVerbatim := chooseVerbatimStart(state.Messages, activeStart, tailBudget)
+	if firstVerbatim <= activeStart || firstVerbatim > len(state.MessageSeqs)-1 {
+		return nil, ContextReport{}, false, nil
+	}
+
+	pruning := session.ToolResultsPruned{
+		ThroughSeq: state.MessageSeqs[firstVerbatim-1],
+		HeadBytes:  prunedToolHead,
+		TailBytes:  prunedToolTail,
+	}
+	if state.ToolPruning != nil {
+		if pruning.ThroughSeq <= state.ToolPruning.ThroughSeq {
+			return nil, ContextReport{}, false, nil
+		}
+		pruning.HeadBytes = state.ToolPruning.HeadBytes
+		pruning.TailBytes = state.ToolPruning.TailBytes
+	}
+
+	projected := state
+	projected.ToolPruning = &pruning
+	messages, report := e.buildContext(projected)
+	if report.TotalInputTokens > report.InputLimit {
+		return nil, report, false, nil
+	}
+	if _, err := e.session.Append(session.RecordToolResultsPruned, pruning); err != nil {
+		return nil, report, false, err
+	}
+	return messages, report, true, nil
+}
+
+func pruneToolResult(content string, headBytes, tailBytes int) string {
+	if headBytes <= 0 || tailBytes <= 0 || len(content) <= headBytes+tailBytes {
+		return content
+	}
+	headEnd := min(headBytes, len(content))
+	for headEnd > 0 && !utf8.ValidString(content[:headEnd]) {
+		headEnd--
+	}
+	tailStart := max(headEnd, len(content)-tailBytes)
+	for tailStart < len(content) && !utf8.RuneStart(content[tailStart]) {
+		tailStart++
+	}
+	omitted := tailStart - headEnd
+	if omitted <= 0 {
+		return content
+	}
+	marker := fmt.Sprintf("\n[… %d bytes omitted from old tool result; full output remains in session journal …]\n", omitted)
+	pruned := content[:headEnd] + marker + content[tailStart:]
+	if len(pruned) >= len(content) {
+		return content
+	}
+	return pruned
 }
 
 func (e *Engine) compactLocked(ctx context.Context, focus string, automatic bool) error {

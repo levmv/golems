@@ -116,7 +116,7 @@ func TestWebFetchBackendsFollowConfiguredCredentialOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := backendNames(backends); strings.Join(got, ",") != "hacker_news,http,firecrawl,exa" {
+	if got := backendNames(backends); strings.Join(got, ",") != "hacker_news,firecrawl,exa,http" {
 		t.Fatalf("credentialed backends = %v", got)
 	}
 }
@@ -166,6 +166,45 @@ func TestSessionAgentSwitchModelPersistsJournalAndDefault(t *testing.T) {
 	stored, err := store.Config()
 	if err != nil || stored.Model != "ollama/local-model" {
 		t.Fatalf("settings = %#v, %v", stored, err)
+	}
+}
+
+func TestSessionAgentSwitchReasoningEffortPersistsWithModel(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	uri := "deepseek/deepseek-v4-flash"
+	journal, err := session.Create(session.CreateOptions{Home: home, Workspace: root, Model: uri})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetAPIKey("deepseek", "test-key"); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := newSessionAgent(Config{ModelURI: uri, CapabilityProfile: "full", SandboxPolicy: sandboxOff}, &runTurnFakeModel{}, root, nil, journal, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+	if err := agent.SwitchModelWithEffort(uri, "high"); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := journal.Replay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.Model != uri || replayed.ReasoningEffort != "high" {
+		t.Fatalf("journal selection = %q/%q", replayed.Model, replayed.ReasoningEffort)
+	}
+	stored, err := store.Config()
+	if err != nil || stored.Model != uri || stored.ReasoningEffort != "high" {
+		t.Fatalf("stored selection = %#v, %v", stored, err)
+	}
+	if agent.CurrentReasoningEffort() != "high" {
+		t.Fatalf("current effort = %q", agent.CurrentReasoningEffort())
 	}
 }
 

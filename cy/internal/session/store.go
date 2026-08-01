@@ -23,9 +23,10 @@ const (
 var ErrSessionLocked = errors.New("session is already open")
 
 type CreateOptions struct {
-	Home      string
-	Workspace string
-	Model     string
+	Home            string
+	Workspace       string
+	Model           string
+	ReasoningEffort string
 }
 
 type Session struct {
@@ -86,8 +87,9 @@ func Create(opts CreateOptions) (*Session, error) {
 		return nil, errors.Join(err, removeCreatedSession(dir))
 	}
 	if _, err := s.Append(RecordSessionStarted, SessionStarted{
-		Workspace: opts.Workspace,
-		Model:     opts.Model,
+		Workspace:       opts.Workspace,
+		Model:           opts.Model,
+		ReasoningEffort: opts.ReasoningEffort,
 	}); err != nil {
 		_ = s.Close()
 		return nil, errors.Join(err, removeCreatedSession(dir))

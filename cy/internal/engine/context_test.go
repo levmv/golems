@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/levmv/golems/cy/internal/session"
 	"github.com/levmv/golems/pkg/llm"
@@ -76,6 +77,91 @@ func TestAutoCompactionRunsAtSafeRequestBoundary(t *testing.T) {
 	}
 	if state.CompactionCount != 1 {
 		t.Fatalf("compaction count = %d", state.CompactionCount)
+	}
+}
+
+func TestAutoPruningAvoidsCompactionWhenOldToolResultsAreSufficient(t *testing.T) {
+	s := contextSession(t)
+	largeResult := "BEGIN\n" + strings.Repeat("tool-output ", 16*1024) + "\nEND"
+	appendCompletedToolTurn(t, s, "run-1", "inspect the large output", largeResult)
+	appendCompletedTurn(t, s, "run-2", "recent question", "recent answer")
+	model := &scriptedModel{chatResponses: []*llm.Response{{Content: "final answer", FinishReason: llm.FinishReasonStop}}}
+	eng, err := New(Config{Model: model, Session: s, ModelURI: "unknown/model", ContextWindow: 32 * 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := eng.Stream(context.Background(), "new question", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Reply != "final answer" || len(model.requests) != 1 {
+		t.Fatalf("turn=%#v requests=%d", turn, len(model.requests))
+	}
+
+	var providerToolResult string
+	for _, message := range model.requests[0].Messages {
+		if message.Role == llm.RoleTool {
+			providerToolResult = message.Content
+			break
+		}
+	}
+	if !strings.HasPrefix(providerToolResult, "BEGIN\n") || !strings.HasSuffix(providerToolResult, "\nEND") || !strings.Contains(providerToolResult, "bytes omitted from old tool result") {
+		t.Fatalf("provider tool result was not stable head/tail pruning: %q", providerToolResult)
+	}
+
+	state, err := s.Replay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ToolPruning == nil || state.Compaction != nil {
+		t.Fatalf("maintenance state: pruning=%#v compaction=%#v", state.ToolPruning, state.Compaction)
+	}
+	for _, message := range state.Messages {
+		if message.Role == llm.RoleTool && message.Content != largeResult {
+			t.Fatal("raw tool result was changed in the journal")
+		}
+	}
+}
+
+func TestAutoPruningFallsThroughToCompactionWhenInsufficient(t *testing.T) {
+	s := contextSession(t)
+	appendCompletedToolTurn(t, s, "run-1", strings.Repeat("large user context ", 8*1024), strings.Repeat("large tool output ", 8*1024))
+	appendCompletedTurn(t, s, "run-2", "recent question", "recent answer")
+	model := &scriptedModel{chatResponses: []*llm.Response{
+		{Content: "compact summary", Usage: llm.Usage{TotalTokens: 10}},
+		{Content: "final answer", FinishReason: llm.FinishReasonStop},
+	}}
+	eng, err := New(Config{Model: model, Session: s, ModelURI: "unknown/model", ContextWindow: 12 * 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Stream(context.Background(), "new question", nil); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.Replay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ToolPruning != nil || state.CompactionCount != 1 {
+		t.Fatalf("maintenance state: pruning=%#v compactions=%d", state.ToolPruning, state.CompactionCount)
+	}
+}
+
+func TestPruneToolResultKeepsUTF8HeadAndTail(t *testing.T) {
+	content := "начало-" + strings.Repeat("界", 200) + "-конец"
+	got := pruneToolResult(content, 11, 10)
+	if !strings.HasPrefix(got, "начал") || !strings.HasSuffix(got, "конец") || !strings.Contains(got, "bytes omitted") {
+		t.Fatalf("pruned content = %q", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatalf("pruned content is invalid UTF-8: %q", got)
+	}
+}
+
+func TestPruneToolResultDoesNotExpandSmallSavings(t *testing.T) {
+	content := strings.Repeat("x", 101)
+	if got := pruneToolResult(content, 50, 50); got != content {
+		t.Fatalf("small result expanded to %d bytes", len(got))
 	}
 }
 
@@ -186,6 +272,26 @@ func appendCompletedTurn(t *testing.T, s *session.Session, runID, input, output 
 		t.Fatal(err)
 	}
 	if _, err := s.Append(session.RecordAssistantMessage, session.AssistantMessage{RunID: runID, Content: output}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(session.RecordRunFinished, session.RunFinished{RunID: runID}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func appendCompletedToolTurn(t *testing.T, s *session.Session, runID, input, toolOutput string) {
+	t.Helper()
+	call := llm.ToolCall{ID: runID + "-call", Type: string(llm.ToolTypeFunction), Function: llm.ToolFunction{Name: "read", Arguments: `{}`}}
+	if _, err := s.Append(session.RecordUserMessage, session.UserMessage{RunID: runID, Content: input}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(session.RecordAssistantMessage, session.AssistantMessage{RunID: runID, ToolCalls: []llm.ToolCall{call}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(session.RecordToolResult, session.ToolResult{RunID: runID, ToolCallID: call.ID, Content: toolOutput}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(session.RecordAssistantMessage, session.AssistantMessage{RunID: runID, Content: "tool inspected"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Append(session.RecordRunFinished, session.RunFinished{RunID: runID}); err != nil {

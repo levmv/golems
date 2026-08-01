@@ -15,7 +15,7 @@ func TestStoreSeparatesConfigAndAuth(t *testing.T) {
 	if err := store.SetDefaultModel("openai/test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetDefaultModel("openrouter/moonshotai/kimi-k3"); err != nil {
+	if err := store.SetDefaultModelSelection("deepseek/deepseek-v4-flash", "high"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetDefaultProfile("edit"); err != nil {
@@ -29,7 +29,7 @@ func TestStoreSeparatesConfigAndAuth(t *testing.T) {
 	}
 
 	config, err := store.Config()
-	if err != nil || config.Model != "openrouter/moonshotai/kimi-k3" || config.Profile != "edit" || len(config.RecentModels) != 1 || config.RecentModels[0] != "openai/test" {
+	if err != nil || config.Model != "deepseek/deepseek-v4-flash" || config.ReasoningEffort != "high" || config.Profile != "edit" || len(config.RecentModels) != 1 || config.RecentModels[0] != "openai/test" {
 		t.Fatalf("config = %#v, %v", config, err)
 	}
 	key, ok, err := store.APIKey("exa")

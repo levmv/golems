@@ -12,11 +12,11 @@ import (
 
 func TestSessionPersistsConversationAndRepairsPartialTail(t *testing.T) {
 	home := t.TempDir()
-	s, err := Create(CreateOptions{Home: home, Workspace: "/workspace/project", Model: "deepseek/example"})
+	s, err := Create(CreateOptions{Home: home, Workspace: "/workspace/project", Model: "deepseek/deepseek-v4-flash", ReasoningEffort: "high"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Append(RecordModelChanged, ModelChanged{Model: "openrouter/example"}); err != nil {
+	if _, err := s.Append(RecordModelChanged, ModelChanged{Model: "deepseek/deepseek-v4-pro"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.Append(RecordUserMessage, UserMessage{RunID: "run-1", Content: "hello"}); err != nil {
@@ -62,7 +62,7 @@ func TestSessionPersistsConversationAndRepairsPartialTail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Header.Workspace != "/workspace/project" || state.Model != "openrouter/example" {
+	if state.Header.Workspace != "/workspace/project" || state.Header.ReasoningEffort != "high" || state.Model != "deepseek/deepseek-v4-pro" || state.ReasoningEffort != "" {
 		t.Fatalf("state header/model = %#v / %q", state.Header, state.Model)
 	}
 	if len(state.Messages) != 3 || state.Messages[0].Content != "hello" || state.Messages[2].Content != "continue" {
@@ -96,6 +96,38 @@ func TestOpenUsesExclusiveLockAndUniquePrefix(t *testing.T) {
 	defer resumed.Close()
 	if resumed.ID() != id {
 		t.Fatalf("resumed ID = %q, want %q", resumed.ID(), id)
+	}
+}
+
+func TestSessionReplaysLatestToolPruningBoundary(t *testing.T) {
+	s, err := Create(CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Append(RecordUserMessage, UserMessage{RunID: "run-1", Content: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(RecordToolResultsPruned, ToolResultsPruned{ThroughSeq: 2, HeadBytes: 4096, TailBytes: 4096}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(RecordUserMessage, UserMessage{RunID: "run-2", Content: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(RecordToolResultsPruned, ToolResultsPruned{ThroughSeq: 4, HeadBytes: 4096, TailBytes: 4096}); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.Replay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ToolPruning == nil || state.ToolPruning.ThroughSeq != 4 {
+		t.Fatalf("tool pruning = %#v", state.ToolPruning)
+	}
+	state.ToolPruning.ThroughSeq = 1
+	again, err := s.Replay()
+	if err != nil || again.ToolPruning == nil || again.ToolPruning.ThroughSeq != 4 {
+		t.Fatalf("cached replay was mutated: %#v, %v", again.ToolPruning, err)
 	}
 }
 

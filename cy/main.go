@@ -76,6 +76,7 @@ func runMain() (returnErr error) {
 	}
 	if !setFlags["model"] && strings.TrimSpace(os.Getenv("CY_MODEL")) == "" && storedSettings.Model != "" {
 		cfg.ModelURI = storedSettings.Model
+		cfg.ReasoningEffort = storedSettings.ReasoningEffort
 	}
 	if !setFlags["profile"] && strings.TrimSpace(os.Getenv("CY_PROFILE")) == "" && storedSettings.Profile != "" {
 		cfg.CapabilityProfile, err = toolruntime.NormalizeCapabilityProfile(storedSettings.Profile)
@@ -154,9 +155,10 @@ func runMain() (returnErr error) {
 			sessionHome = temporaryHome
 		}
 		journal, err = session.Create(session.CreateOptions{
-			Home:      sessionHome,
-			Workspace: root,
-			Model:     cfg.ModelURI,
+			Home:            sessionHome,
+			Workspace:       root,
+			Model:           cfg.ModelURI,
+			ReasoningEffort: cfg.ReasoningEffort,
 		})
 		if err != nil {
 			return fmt.Errorf("create session: %w", err)
@@ -166,8 +168,8 @@ func runMain() (returnErr error) {
 				returnErr = errors.Join(returnErr, created.ClosePruningEmpty())
 			}
 		}(journal)
-	} else if resumed.Model != "" && cfg.ModelURI != resumed.Model {
-		if _, err := journal.Append(session.RecordModelChanged, session.ModelChanged{Model: cfg.ModelURI}); err != nil {
+	} else if resumed.Model != "" && (cfg.ModelURI != resumed.Model || cfg.ReasoningEffort != resumed.ReasoningEffort) {
+		if _, err := journal.Append(session.RecordModelChanged, session.ModelChanged{Model: cfg.ModelURI, ReasoningEffort: cfg.ReasoningEffort}); err != nil {
 			return fmt.Errorf("record model change: %w", err)
 		}
 	}
@@ -206,6 +208,7 @@ func runMain() (returnErr error) {
 	}
 	return ui.RunScreen(ctx, agent, ui.Config{
 		ModelURI:          cfg.ModelURI,
+		ReasoningEffort:   cfg.ReasoningEffort,
 		CapabilityProfile: cfg.CapabilityProfile,
 		SecuritySummary:   cfg.Security.Compact(),
 		Providers:         loginProviderCatalog(),
@@ -215,6 +218,7 @@ func runMain() (returnErr error) {
 func applyResumedConfig(cfg *Config, resumed session.State, setFlags map[string]bool) {
 	if !setFlags["model"] && strings.TrimSpace(os.Getenv("CY_MODEL")) == "" && resumed.Model != "" {
 		cfg.ModelURI = resumed.Model
+		cfg.ReasoningEffort = resumed.ReasoningEffort
 	}
 	if !setFlags["root"] && strings.TrimSpace(os.Getenv("CY_ROOT")) == "" && resumed.Header.Workspace != "" {
 		cfg.RootDir = resumed.Header.Workspace
@@ -257,6 +261,13 @@ func buildModel(cfg Config, store *state.Store, requireCredential bool) (llm.Mod
 	model, err := registry.Model(registryURI)
 	if err != nil {
 		return llm.Model{}, err
+	}
+	effort, err := normalizeReasoningEffort(uri, cfg.ReasoningEffort)
+	if err != nil {
+		return llm.Model{}, err
+	}
+	if effort != defaultReasoningEffort {
+		model = model.WithReasoningEffort(effort)
 	}
 
 	return model, nil
@@ -405,6 +416,7 @@ func handleControlInvocation(args []string, cfg Config, store *state.Store) (boo
 			return true, nil
 		}
 		cfg.ModelURI = strings.TrimSpace(args[1])
+		cfg.ReasoningEffort = defaultReasoningEffort
 		if _, err := buildModel(cfg, store, true); err != nil {
 			return true, err
 		}

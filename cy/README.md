@@ -5,6 +5,14 @@ packages. It can inspect and edit a workspace, run managed Bash commands, keep
 resumable sessions, fetch public pages, and optionally use configured web
 search providers.
 
+## Install
+
+Install the latest published release on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/levmv/golems/main/cy/install.sh | sh
+```
+
 ## Quick start
 
 Run from the repository:
@@ -58,7 +66,10 @@ cy model openrouter/moonshotai/kimi-k3
 
 Selected custom models remain in the list. The built-in suggestions stay short:
 the two DeepSeek defaults, OpenRouter's free router, and three rolling `latest`
-aliases.
+aliases. In the interactive `/model` picker, Up/Down selects a model and
+Left/Right selects its reasoning effort when Cy knows the model supports it.
+`default` sends no effort override; the current DeepSeek V4 entries also offer
+`high`.
 
 Local Ollama models do not require a stored key:
 
@@ -163,7 +174,8 @@ Cy provides these workspace tools:
 - `read`, `grep`, and `glob` for bounded discovery;
 - `edit` and `write` for atomic UTF-8 file changes;
 - `bash` and `job` for managed commands and their output;
-- `web_fetch` for public pages, with a direct reader available without configuration;
+- `web_fetch` for public pages, with configured extraction services preferred
+  and a direct reader available as the no-configuration fallback;
 - `hacker_news` for current feeds and bounded discussion threads;
 - `web_search` when at least one search service credential is configured.
 
@@ -178,10 +190,11 @@ Profiles remove whole tool classes from the model-visible catalog:
 | `edit` | Read/write files and available web tools; no Bash |
 | `read-only` | Read/search and available web tools; no writes or Bash |
 
-`web_fetch` first uses a bounded stateless HTTP reader and needs no account. If
-that cannot extract readable content, configured fallbacks are tried as
-Firecrawl → Exa. Search supports Tavily and Exa, tried as Tavily → Exa. Service
-endpoints are built in, so only API keys are required:
+`web_fetch` resolves Hacker News discussion URLs through its dedicated reader.
+For other pages it tries configured extraction backends as Firecrawl → Exa,
+then falls back to the bounded stateless HTTP reader. Search supports Tavily and
+Exa, tried as Tavily → Exa. Service endpoints are built in, so only API keys are
+required:
 
 ```bash
 cy login tavily
@@ -228,8 +241,12 @@ at startup because their backing models can change. If lookup and the built-in
 catalog cannot resolve a model, Cy uses a visibly estimated 128K window.
 
 `/context` shows the current budget. `/compact [focus]` records an additive
-summary while preserving recent complete conversation and tool blocks. Cy also
-retries transient provider and stream failures within a bounded retry budget;
+summary while preserving recent complete conversation and tool blocks. Before
+automatic compaction, Cy checks whether shortening large tool results outside
+the recent verbatim tail is sufficient; the provider sees a stable head/tail
+representation while the full result remains in the append-only journal. If
+that is not enough, normal compaction runs immediately. Cy also retries
+transient provider and stream failures within a bounded retry budget;
 authentication, policy, invalid-request, and missing-model failures stop
 immediately.
 

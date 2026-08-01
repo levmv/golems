@@ -13,10 +13,11 @@ import (
 )
 
 type Config struct {
-	Model         string         `json:"model,omitempty"`
-	RecentModels  []string       `json:"recent_models,omitempty"`
-	Profile       string         `json:"profile,omitempty"`
-	ModelContexts map[string]int `json:"model_contexts,omitempty"`
+	Model           string         `json:"model,omitempty"`
+	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	RecentModels    []string       `json:"recent_models,omitempty"`
+	Profile         string         `json:"profile,omitempty"`
+	ModelContexts   map[string]int `json:"model_contexts,omitempty"`
 }
 
 const maxRecentModels = 20
@@ -108,10 +109,15 @@ func (s *Store) DeleteAPIKey(provider string) error {
 }
 
 func (s *Store) SetDefaultModel(model string) error {
+	return s.SetDefaultModelSelection(model, "")
+}
+
+func (s *Store) SetDefaultModelSelection(model, reasoningEffort string) error {
 	model = strings.TrimSpace(model)
 	return s.updateConfig(func(config *Config) {
 		previous := config.Model
 		config.Model = model
+		config.ReasoningEffort = strings.ToLower(strings.TrimSpace(reasoningEffort))
 		config.RecentModels = recentModels(config.RecentModels, previous, model)
 	})
 }

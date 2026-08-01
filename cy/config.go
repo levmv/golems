@@ -15,6 +15,7 @@ const (
 
 type Config struct {
 	ModelURI          string
+	ReasoningEffort   string
 	RootDir           string
 	Home              string
 	Verbose           bool

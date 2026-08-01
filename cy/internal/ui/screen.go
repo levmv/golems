@@ -69,8 +69,9 @@ type compactDoneMsg struct {
 }
 
 type modelSwitchDoneMsg struct {
-	uri string
-	err error
+	uri    string
+	effort string
+	err    error
 }
 
 type processPollMsg struct{}
@@ -112,6 +113,8 @@ type pickerItem struct {
 	section       string
 	credentialURL string
 	current       bool
+	efforts       []string
+	effortIndex   int
 }
 
 type pickerState struct {
@@ -358,7 +361,12 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.addBlock(screenBlockError, "model: "+msg.err.Error())
 		} else {
 			m.cfg.ModelURI = msg.uri
-			m.addBlock(screenBlockSystem, "model: "+msg.uri)
+			m.cfg.ReasoningEffort = msg.effort
+			label := "model: " + msg.uri
+			if msg.effort != "" {
+				label += " · effort: " + msg.effort
+			}
+			m.addBlock(screenBlockSystem, label)
 		}
 		m.refreshViewport(wasBottom)
 		return m, nil

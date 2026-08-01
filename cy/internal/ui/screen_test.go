@@ -461,6 +461,43 @@ func TestTUIModelCommandOpensPickerAndSwitchesSelection(t *testing.T) {
 	}
 }
 
+func TestTUIModelPickerCyclesReasoningEffort(t *testing.T) {
+	uri := "deepseek/deepseek-v4-flash"
+	control := &authPickerAgent{
+		models:  []string{uri},
+		efforts: map[string][]string{uri: {"", "high"}},
+	}
+	model := newCyTUIModel(context.Background(), control, Config{ModelURI: uri}, ".", nil)
+	model.resize(80, 24)
+	model.input.SetValue("/model")
+	model.input.MoveToEnd()
+
+	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(cyTUIModel)
+	if rendered := got.View().Content; !strings.Contains(rendered, "effort: default") {
+		t.Fatalf("model picker missed default effort: %q", rendered)
+	}
+
+	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyRight})
+	got = updated.(cyTUIModel)
+	if rendered := got.View().Content; !strings.Contains(rendered, "effort: high") {
+		t.Fatalf("model picker did not cycle effort: %q", rendered)
+	}
+	updated, cmd := got.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got = updated.(cyTUIModel)
+	if cmd == nil || got.maintenance != "switching model" {
+		t.Fatalf("effort switch did not start: maintenance=%q cmd=%v", got.maintenance, cmd)
+	}
+	updated, _ = got.Update(cmd())
+	got = updated.(cyTUIModel)
+	if control.switchedModel != uri || control.switchedEffort != "high" {
+		t.Fatalf("selection = %q/%q", control.switchedModel, control.switchedEffort)
+	}
+	if got.cfg.ModelURI != uri || got.cfg.ReasoningEffort != "high" {
+		t.Fatalf("TUI config = %#v", got.cfg)
+	}
+}
+
 func TestTUIProfileCommandOpensPickerAndSwitchesSelection(t *testing.T) {
 	control := &profilePickerAgent{profile: "edit"}
 	model := newCyTUIModel(context.Background(), control, Config{CapabilityProfile: "edit"}, ".", nil)
@@ -830,9 +867,11 @@ func (screenAgentStub) Compact(context.Context, string) (engine.ContextReport, e
 func (screenAgentStub) ProviderStatuses() ([]providerStatus, error) { return nil, nil }
 func (screenAgentStub) Login(string, string) error                  { return nil }
 func (screenAgentStub) Logout(string) error                         { return nil }
-func (screenAgentStub) SwitchModel(string) error                    { return nil }
+func (screenAgentStub) SwitchModelWithEffort(string, string) error  { return nil }
 func (screenAgentStub) KnownModels() []string                       { return nil }
 func (screenAgentStub) CurrentModel() string                        { return "" }
+func (screenAgentStub) CurrentReasoningEffort() string              { return "" }
+func (screenAgentStub) ReasoningEfforts(string) []string            { return []string{""} }
 func (screenAgentStub) CurrentProfile() string                      { return "" }
 func (screenAgentStub) SwitchProfile(string) error                  { return nil }
 func (screenAgentStub) ProcessStatus(string) (processResultMeta, bool) {
@@ -882,10 +921,13 @@ func (a *queueScreenAgent) RestoreQueued() ([]string, error) {
 
 type authPickerAgent struct {
 	screenAgentStub
-	statuses      []providerStatus
-	models        []string
-	loginProvider string
-	switchedModel string
+	statuses       []providerStatus
+	models         []string
+	loginProvider  string
+	switchedModel  string
+	switchedEffort string
+	currentEffort  string
+	efforts        map[string][]string
 }
 
 type compactControlAgent struct {
@@ -913,11 +955,19 @@ func (a *authPickerAgent) Login(provider, _ string) error {
 }
 
 func (a *authPickerAgent) Logout(string) error { return nil }
-func (a *authPickerAgent) SwitchModel(uri string) error {
+func (a *authPickerAgent) SwitchModelWithEffort(uri, effort string) error {
 	a.switchedModel = uri
+	a.switchedEffort = effort
 	return nil
 }
-func (a *authPickerAgent) KnownModels() []string { return append([]string(nil), a.models...) }
+func (a *authPickerAgent) KnownModels() []string          { return append([]string(nil), a.models...) }
+func (a *authPickerAgent) CurrentReasoningEffort() string { return a.currentEffort }
+func (a *authPickerAgent) ReasoningEfforts(uri string) []string {
+	if efforts := a.efforts[uri]; len(efforts) > 0 {
+		return append([]string(nil), efforts...)
+	}
+	return []string{""}
+}
 
 type profilePickerAgent struct {
 	screenAgentStub

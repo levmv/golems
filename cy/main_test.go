@@ -37,6 +37,18 @@ func TestApplyResumedConfigHonorsExplicitEnvironment(t *testing.T) {
 	}
 }
 
+func TestApplyResumedConfigRestoresReasoningEffortWithModel(t *testing.T) {
+	t.Setenv("CY_MODEL", "")
+	cfg := Config{ModelURI: "deepseek/deepseek-v4-flash", RootDir: "."}
+	applyResumedConfig(&cfg, session.State{
+		Model:           "deepseek/deepseek-v4-flash",
+		ReasoningEffort: "high",
+	}, nil)
+	if cfg.ModelURI != "deepseek/deepseek-v4-flash" || cfg.ReasoningEffort != "high" {
+		t.Fatalf("resumed selection = %#v", cfg)
+	}
+}
+
 func TestRunPrintTurnJSONWritesOneFinalResult(t *testing.T) {
 	agent := sessionTaggedAgent{agentRunner: printTurnAgent(t), id: "saved-session"}
 	var stdout, stderr bytes.Buffer

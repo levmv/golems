@@ -16,6 +16,7 @@ const (
 	RecordAssistantMessage    RecordType = "assistant_message"
 	RecordToolResult          RecordType = "tool_result"
 	RecordRunFinished         RecordType = "run_finished"
+	RecordToolResultsPruned   RecordType = "tool_results_pruned"
 	RecordCompactionCompleted RecordType = "compaction_completed"
 )
 
@@ -30,12 +31,14 @@ type Record struct {
 }
 
 type SessionStarted struct {
-	Workspace string `json:"workspace"`
-	Model     string `json:"model"`
+	Workspace       string `json:"workspace"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
 type ModelChanged struct {
-	Model string `json:"model"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoning_effort"`
 }
 
 type UserMessage struct {
@@ -60,6 +63,14 @@ type ToolResult struct {
 
 type RunFinished struct {
 	RunID string `json:"run_id"`
+}
+
+// ToolResultsPruned records a provider-facing context boundary. Original tool
+// result records remain untouched in the journal.
+type ToolResultsPruned struct {
+	ThroughSeq uint64 `json:"through_seq"`
+	HeadBytes  int    `json:"head_bytes"`
+	TailBytes  int    `json:"tail_bytes"`
 }
 
 type CompactionCompleted struct {

@@ -89,9 +89,10 @@ func (a *sessionAgent) Login(provider, key string) error {
 	a.mu.RLock()
 	current := modelProvider(a.cfg.ModelURI) == provider
 	uri := a.cfg.ModelURI
+	effort := a.cfg.ReasoningEffort
 	a.mu.RUnlock()
 	if current {
-		return a.reloadModel(uri, false)
+		return a.reloadModel(uri, effort, false)
 	}
 	return nil
 }
@@ -107,26 +108,36 @@ func (a *sessionAgent) Logout(provider string) error {
 	a.mu.RLock()
 	current := modelProvider(a.cfg.ModelURI) == provider
 	uri := a.cfg.ModelURI
+	effort := a.cfg.ReasoningEffort
 	a.mu.RUnlock()
 	if current {
-		return a.reloadModel(uri, false)
+		return a.reloadModel(uri, effort, false)
 	}
 	return nil
 }
 
 func (a *sessionAgent) SwitchModel(uri string) error {
+	return a.SwitchModelWithEffort(uri, defaultReasoningEffort)
+}
+
+func (a *sessionAgent) SwitchModelWithEffort(uri, effort string) error {
 	uri = strings.TrimSpace(uri)
 	if uri == "" {
 		return errors.New("model URI is required")
 	}
-	return a.reloadModel(uri, true)
+	normalized, err := normalizeReasoningEffort(uri, effort)
+	if err != nil {
+		return err
+	}
+	return a.reloadModel(uri, normalized, true)
 }
 
-func (a *sessionAgent) reloadModel(uri string, selected bool) error {
+func (a *sessionAgent) reloadModel(uri, effort string, selected bool) error {
 	a.mu.RLock()
 	cfg := a.cfg
 	a.mu.RUnlock()
 	cfg.ModelURI = uri
+	cfg.ReasoningEffort = effort
 	model, err := buildModel(cfg, a.state, selected)
 	if err != nil {
 		return err
@@ -141,12 +152,12 @@ func (a *sessionAgent) reloadModel(uri string, selected bool) error {
 		return errors.New("cy session runtime is closed")
 	}
 	if a.state != nil && selected {
-		if err := a.state.SetDefaultModel(uri); err != nil {
+		if err := a.state.SetDefaultModelSelection(uri, effort); err != nil {
 			return fmt.Errorf("remember selected model: %w", err)
 		}
 	}
-	if a.cfg.ModelURI != uri {
-		if _, err := journal.Append(session.RecordModelChanged, session.ModelChanged{Model: uri}); err != nil {
+	if a.cfg.ModelURI != uri || a.cfg.ReasoningEffort != effort {
+		if _, err := journal.Append(session.RecordModelChanged, session.ModelChanged{Model: uri, ReasoningEffort: effort}); err != nil {
 			return err
 		}
 	}
@@ -154,6 +165,7 @@ func (a *sessionAgent) reloadModel(uri string, selected bool) error {
 		return err
 	}
 	a.cfg.ModelURI = uri
+	a.cfg.ReasoningEffort = effort
 	a.model = model
 	a.refreshStatusLocked()
 	return nil
@@ -167,6 +179,16 @@ func (a *sessionAgent) CurrentModel() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.cfg.ModelURI
+}
+
+func (a *sessionAgent) CurrentReasoningEffort() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.ReasoningEffort
+}
+
+func (a *sessionAgent) ReasoningEfforts(uri string) []string {
+	return reasoningEffortsForModel(uri)
 }
 
 func (a *sessionAgent) CurrentProfile() string {
@@ -273,7 +295,7 @@ func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, pr
 }
 
 func (a *sessionAgent) webFetchBackends(hnClient *hackernews.Client) ([]webfetch.Backend, error) {
-	fetchBackends := []webfetch.Backend{hackernews.NewFetchBackend(hnClient), webfetch.NewHTTPBackend()}
+	fetchBackends := []webfetch.Backend{hackernews.NewFetchBackend(hnClient)}
 	for _, service := range serviceCatalog {
 		if !service.fetch {
 			continue
@@ -292,6 +314,7 @@ func (a *sessionAgent) webFetchBackends(hnClient *hackernews.Client) ([]webfetch
 			fetchBackends = append(fetchBackends, webfetch.NewExaBackend(token))
 		}
 	}
+	fetchBackends = append(fetchBackends, webfetch.NewHTTPBackend())
 	return fetchBackends, nil
 }
 
@@ -436,9 +459,10 @@ func (a *sessionAgent) ClearSession() (string, error) {
 	model := a.model
 	a.mu.RUnlock()
 	journal, err := session.Create(session.CreateOptions{
-		Home:      cfg.Home,
-		Workspace: a.root,
-		Model:     cfg.ModelURI,
+		Home:            cfg.Home,
+		Workspace:       a.root,
+		Model:           cfg.ModelURI,
+		ReasoningEffort: cfg.ReasoningEffort,
 	})
 	if err != nil {
 		return "", err
@@ -468,8 +492,9 @@ func (a *sessionAgent) ResumeSession(idOrPrefix string) (string, error) {
 		_ = journal.Close()
 		return "", fmt.Errorf("session workspace is %s; current workspace is %s", state.Header.Workspace, a.root)
 	}
-	if state.Model != "" && state.Model != cfg.ModelURI {
+	if state.Model != "" && (state.Model != cfg.ModelURI || state.ReasoningEffort != cfg.ReasoningEffort) {
 		cfg.ModelURI = state.Model
+		cfg.ReasoningEffort = state.ReasoningEffort
 		model, err = buildModel(cfg, a.state, false)
 		if err != nil {
 			_ = journal.Close()

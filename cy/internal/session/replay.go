@@ -19,10 +19,12 @@ type State struct {
 	Title           string
 	HasUserTurn     bool
 	Model           string
+	ReasoningEffort string
 	Messages        []llm.Message
 	MessageSeqs     []uint64
 	MessageRunIDs   []string
 	Usage           llm.Usage
+	ToolPruning     *ToolResultsPruned
 	Compaction      *CompactionCompleted
 	CompactionCount int
 	ActiveRuns      map[string]struct{}
@@ -77,12 +79,14 @@ func applyRecord(state *State, record Record) error {
 		}
 		state.Header = payload
 		state.Model = payload.Model
+		state.ReasoningEffort = payload.ReasoningEffort
 	case RecordModelChanged:
 		payload, err := DecodePayload[ModelChanged](record)
 		if err != nil {
 			return decodeError(record, err)
 		}
 		state.Model = payload.Model
+		state.ReasoningEffort = payload.ReasoningEffort
 	case RecordUserMessage:
 		payload, err := DecodePayload[UserMessage](record)
 		if err != nil {
@@ -139,6 +143,19 @@ func applyRecord(state *State, record Record) error {
 			return decodeError(record, err)
 		}
 		delete(state.ActiveRuns, payload.RunID)
+	case RecordToolResultsPruned:
+		payload, err := DecodePayload[ToolResultsPruned](record)
+		if err != nil {
+			return decodeError(record, err)
+		}
+		if payload.ThroughSeq == 0 || payload.ThroughSeq >= record.Seq || payload.HeadBytes <= 0 || payload.TailBytes <= 0 {
+			return fmt.Errorf("invalid tool pruning boundary at sequence %d", record.Seq)
+		}
+		if state.ToolPruning != nil && payload.ThroughSeq <= state.ToolPruning.ThroughSeq {
+			return fmt.Errorf("tool pruning boundary at sequence %d does not advance", record.Seq)
+		}
+		copy := payload
+		state.ToolPruning = &copy
 	case RecordCompactionCompleted:
 		payload, err := DecodePayload[CompactionCompleted](record)
 		if err != nil {
@@ -176,6 +193,10 @@ func cloneState(state State) State {
 	if state.Compaction != nil {
 		compaction := *state.Compaction
 		cloned.Compaction = &compaction
+	}
+	if state.ToolPruning != nil {
+		pruning := *state.ToolPruning
+		cloned.ToolPruning = &pruning
 	}
 	cloned.ActiveRuns = make(map[string]struct{}, len(state.ActiveRuns))
 	for runID := range state.ActiveRuns {

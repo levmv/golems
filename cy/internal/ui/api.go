@@ -17,6 +17,7 @@ var capabilityProfileCatalog = toolruntime.CapabilityProfiles()
 
 type Config struct {
 	ModelURI          string
+	ReasoningEffort   string
 	CapabilityProfile string
 	SecuritySummary   string
 	Providers         []string
@@ -61,9 +62,11 @@ type Agent interface {
 	ProviderStatuses() ([]ProviderStatus, error)
 	Login(string, string) error
 	Logout(string) error
-	SwitchModel(string) error
+	SwitchModelWithEffort(string, string) error
 	KnownModels() []string
 	CurrentModel() string
+	CurrentReasoningEffort() string
+	ReasoningEfforts(string) []string
 	CurrentProfile() string
 	SwitchProfile(string) error
 	ProcessStatus(string) (toolruntime.ProcessResultMeta, bool)

@@ -332,7 +332,7 @@ func (m cyTUIModel) submitInput() (tea.Model, tea.Cmd) {
 				if modelURI == "" {
 					m.addBlock(screenBlockError, fmt.Sprintf("login: no model is known for %s", provider))
 				} else {
-					cmd = m.startModelSwitch(modelURI)
+					cmd = m.startModelSwitch(modelURI, "")
 				}
 			}
 		}

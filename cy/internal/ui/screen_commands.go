@@ -103,7 +103,7 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 			m.openModelPicker()
 			break
 		}
-		cmd = m.startModelSwitch(fields[1])
+		cmd = m.startModelSwitch(fields[1], "")
 	case "/profile":
 		if len(fields) == 1 {
 			m.openProfilePicker()
@@ -132,6 +132,8 @@ func (m *cyTUIModel) isLoginProvider(provider string) bool {
 }
 
 func (m *cyTUIModel) openModelPicker() {
+	currentEffort := m.agent.CurrentReasoningEffort()
+	m.cfg.ReasoningEffort = currentEffort
 	seen := make(map[string]struct{})
 	models := make([]string, 0, len(m.agent.KnownModels())+1)
 	add := func(uri string) {
@@ -158,8 +160,23 @@ func (m *cyTUIModel) openModelPicker() {
 	items := make([]pickerItem, 0, len(models))
 	selected := 0
 	for index, uri := range models {
-		current := uri == m.cfg.ModelURI
-		items = append(items, pickerItem{value: uri, label: uri, current: current})
+		efforts := m.agent.ReasoningEfforts(uri)
+		if len(efforts) == 0 {
+			efforts = []string{""}
+		}
+		effortIndex := 0
+		if uri == m.cfg.ModelURI {
+			for candidate, effort := range efforts {
+				if effort == currentEffort {
+					effortIndex = candidate
+					break
+				}
+			}
+		}
+		current := uri == m.cfg.ModelURI && efforts[effortIndex] == currentEffort
+		item := pickerItem{value: uri, label: uri, current: current, efforts: append([]string(nil), efforts...), effortIndex: effortIndex}
+		updateModelEffortDescription(&item)
+		items = append(items, item)
 		if current {
 			selected = index
 		}
@@ -260,6 +277,14 @@ func (m cyTUIModel) handlePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.refreshViewport(true)
 		return m, nil
+	case m.picker.kind == pickerModel && (key.Code == tea.KeyLeft || key.Code == tea.KeyKpLeft || msg.String() == "left"):
+		m.cycleModelEffort(-1)
+		m.refreshViewport(true)
+		return m, nil
+	case m.picker.kind == pickerModel && (key.Code == tea.KeyRight || key.Code == tea.KeyKpRight || msg.String() == "right"):
+		m.cycleModelEffort(1)
+		m.refreshViewport(true)
+		return m, nil
 	case isEnterKey(msg):
 		cmd := m.selectPickerItem()
 		m.refreshViewport(true)
@@ -279,7 +304,7 @@ func (m *cyTUIModel) selectPickerItem() tea.Cmd {
 		if item.current {
 			return nil
 		}
-		return m.startModelSwitch(item.value)
+		return m.startModelSwitch(item.value, selectedModelEffort(item))
 	case pickerProfile:
 		if item.current {
 			return nil
@@ -294,6 +319,35 @@ func (m *cyTUIModel) selectPickerItem() tea.Cmd {
 		m.beginLogin(item.value, picker.loginSwitch, item.credentialURL)
 	}
 	return nil
+}
+
+func (m *cyTUIModel) cycleModelEffort(delta int) {
+	item := &m.picker.items[m.picker.index]
+	if len(item.efforts) <= 1 {
+		return
+	}
+	item.effortIndex = (item.effortIndex + delta + len(item.efforts)) % len(item.efforts)
+	item.current = item.value == m.cfg.ModelURI && selectedModelEffort(*item) == m.cfg.ReasoningEffort
+	updateModelEffortDescription(item)
+}
+
+func selectedModelEffort(item pickerItem) string {
+	if item.effortIndex < 0 || item.effortIndex >= len(item.efforts) {
+		return ""
+	}
+	return item.efforts[item.effortIndex]
+}
+
+func updateModelEffortDescription(item *pickerItem) {
+	if len(item.efforts) <= 1 {
+		item.description = ""
+		return
+	}
+	effort := selectedModelEffort(*item)
+	if effort == "" {
+		effort = "default"
+	}
+	item.description = "effort: " + effort + "  ←/→"
 }
 
 func (m *cyTUIModel) closePicker() {
@@ -336,16 +390,16 @@ func compactCmd(ctx context.Context, agent screenAgent, focus string) tea.Cmd {
 	}
 }
 
-func (m *cyTUIModel) startModelSwitch(uri string) tea.Cmd {
+func (m *cyTUIModel) startModelSwitch(uri, effort string) tea.Cmd {
 	uri = strings.TrimSpace(uri)
 	m.maintenance = "switching model"
 	m.maintenanceCancel = nil
-	return switchModelCmd(m.agent, uri)
+	return switchModelCmd(m.agent, uri, effort)
 }
 
-func switchModelCmd(agent screenAgent, uri string) tea.Cmd {
+func switchModelCmd(agent screenAgent, uri, effort string) tea.Cmd {
 	return func() tea.Msg {
-		return modelSwitchDoneMsg{uri: uri, err: agent.SwitchModel(uri)}
+		return modelSwitchDoneMsg{uri: uri, effort: effort, err: agent.SwitchModelWithEffort(uri, effort)}
 	}
 }
 
@@ -379,6 +433,7 @@ func (m *cyTUIModel) resumeSession(idOrPrefix string) tea.Cmd {
 		return nil
 	}
 	m.cfg.ModelURI = m.agent.CurrentModel()
+	m.cfg.ReasoningEffort = m.agent.CurrentReasoningEffort()
 	m.blocks = nil
 	m.addBlock(screenBlockSystem, "resumed session "+id)
 	m.appendHistoryBlocks()
