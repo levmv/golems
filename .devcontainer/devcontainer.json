@@ -1,21 +1,22 @@
 {
 	"name": "Go",
-	"image": "mcr.microsoft.com/devcontainers/go:2.0.3-bookworm",
-
-	"runArgs": ["--network=host", "--tz=local"],
-	//"runArgs": ["--userns=keep-id"],
-	"containerUser": "vscode",
+	"image": "mcr.microsoft.com/devcontainers/go:1.26-trixie",
+	"workspaceMount": "source=${localWorkspaceFolder},target=/media/dev/golems,type=bind",
+	"workspaceFolder": "/media/dev/golems",
 	"features": {
-		"ghcr.io/devcontainers/features/node:1": {}
-	},
-	"mounts": [
-		{
-		"source": "${localEnv:HOME}/.ssh/config",
-		"target": "/home/vscode/.ssh/config",
-		"type": "bind"
+		"ghcr.io/devcontainers/features/node:1": {
+			"version": "22"
 		}
+	},
+	"runArgs": [
+		"--network=host",
+		"--tz=local",
+		"--env-file",
+		"${localEnv:HOME}/.config/golems/.env"
 	],
-	"postCreateCommand": "sudo chown -R $(whoami) ~/.ssh && chmod 700 ~/.ssh"
+	"containerUser": "vscode",
+	"mounts": [
+		"source=${localEnv:HOME}/dev/murm-ui,target=/media/dev/murm-ui,type=bind,readonly"
+	],
+	"postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends curl gawk git openssh-client jq ripgrep fd-find less tree unzip file procps lsof && sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd"
 }
-
-
