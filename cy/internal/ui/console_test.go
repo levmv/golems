@@ -24,6 +24,22 @@ func TestConsoleMarkdownTable(t *testing.T) {
 	}
 }
 
+func TestConsoleStylesOnlyToolName(t *testing.T) {
+	console := &Console{useStyle: true}
+
+	for _, test := range []struct {
+		text string
+		want string
+	}{
+		{text: "read  cy/main.go", want: ansiCyan + "read" + ansiReset + "  cy/main.go"},
+		{text: "$ go test ./cy/...", want: ansiCyan + "$" + ansiReset + " go test ./cy/..."},
+	} {
+		if got := console.renderToolDisplay(test.text); got != test.want {
+			t.Errorf("renderToolDisplay(%q) = %q, want %q", test.text, got, test.want)
+		}
+	}
+}
+
 func TestTUIWorkingIndicatorAppearsBetweenTranscriptAndEditor(t *testing.T) {
 	var out bytes.Buffer
 	model := cyTUIModel{

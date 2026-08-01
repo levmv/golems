@@ -25,6 +25,13 @@ type compactToolBatch struct {
 	items []string
 }
 
+func splitToolDisplay(text string) (name, arguments string) {
+	if index := strings.IndexAny(text, " \t"); index >= 0 {
+		return text[:index], text[index:]
+	}
+	return text, ""
+}
+
 func describeToolCall(name, rawArguments string) compactToolCall {
 	name = strings.TrimSpace(name)
 	fallback := compactToolCall{Text: compactSingleLine(name, 80)}

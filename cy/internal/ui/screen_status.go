@@ -124,6 +124,13 @@ func (m cyTUIModel) muted(text string) string {
 	return m.mutedStyle.Render(text)
 }
 
+func (m cyTUIModel) selection(text string) string {
+	if !m.console.useStyle || text == "" {
+		return text
+	}
+	return m.selectionStyle.Render(text)
+}
+
 func (m cyTUIModel) accent(text string) string {
 	if !m.console.useStyle || text == "" {
 		return text

@@ -225,7 +225,12 @@ func (c *Console) FlushCompactToolEvents() {
 }
 
 func (c *Console) printCompactToolLine(text string) {
-	fmt.Fprintf(c.out, "\n%s\n", c.style(sanitizeTerminalText(text), ansiCyan))
+	fmt.Fprintf(c.out, "\n%s\n", c.renderToolDisplay(sanitizeTerminalText(text)))
+}
+
+func (c *Console) renderToolDisplay(text string) string {
+	name, arguments := splitToolDisplay(text)
+	return c.style(name, ansiCyan) + arguments
 }
 
 func (c *Console) PrintFileChange(change fileChangeMeta) {
@@ -238,9 +243,9 @@ func (c *Console) PrintFileChange(change fileChangeMeta) {
 	}
 	summary := sanitizeTerminalText(strings.TrimSpace(change.Operation + "  " + change.Path))
 	if len(stats) > 0 {
-		summary = c.style(summary, ansiCyan) + "  " + strings.Join(stats, " ")
+		summary = c.renderToolDisplay(summary) + "  " + strings.Join(stats, " ")
 	} else {
-		summary = c.style(summary, ansiCyan) + "  " + c.muted("no changes")
+		summary = c.renderToolDisplay(summary) + "  " + c.muted("no changes")
 	}
 	fmt.Fprintf(c.out, "\n%s\n", summary)
 

@@ -143,38 +143,41 @@ type cyTUIModel struct {
 	secret   textinput.Model
 	spinner  spinner.Model
 
-	blocks             []screenBlock
-	width              int
-	height             int
-	working            bool
-	maintenance        string
-	maintenanceCancel  context.CancelFunc
-	events             chan tea.Msg
-	turnCancel         context.CancelFunc
-	turnStartedAt      time.Time
-	history            []string
-	historyIndex       int
-	savedInput         string
-	picker             pickerState
-	renderCache        []renderedScreenBlock
-	renderCacheLines   []string
-	renderCacheWidth   int
-	renderCacheStyled  bool
-	loginProvider      string
-	loginSwitchModel   bool
-	turnChangedPaths   []string
-	processPollPending bool
-	renderPending      bool
+	blocks              []screenBlock
+	width               int
+	height              int
+	working             bool
+	maintenance         string
+	maintenanceCancel   context.CancelFunc
+	events              chan tea.Msg
+	turnCancel          context.CancelFunc
+	turnStartedAt       time.Time
+	history             []string
+	historyIndex        int
+	savedInput          string
+	picker              pickerState
+	renderCache         []renderedScreenBlock
+	renderCacheLines    []string
+	renderCacheWidth    int
+	renderCacheStyled   bool
+	loginProvider       string
+	loginSwitchModel    bool
+	turnChangedPaths    []string
+	processPollPending  bool
+	renderPending       bool
+	transcriptSelection transcriptSelection
 
 	commandSuggestions        []string
 	commandSuggestionIndex    int
 	commandSuggestionsEnabled bool
 
-	mutedStyle   lipgloss.Style
-	accentStyle  lipgloss.Style
-	errorStyle   lipgloss.Style
-	successStyle lipgloss.Style
-	userStyle    lipgloss.Style
+	mutedStyle               lipgloss.Style
+	selectionStyle           lipgloss.Style
+	transcriptSelectionStyle lipgloss.Style
+	accentStyle              lipgloss.Style
+	errorStyle               lipgloss.Style
+	successStyle             lipgloss.Style
+	userStyle                lipgloss.Style
 }
 
 func CanUseScreen(in io.Reader, out io.Writer) (*os.File, *os.File, bool) {
@@ -253,21 +256,23 @@ func newCyTUIModel(ctx context.Context, agent screenAgent, cfg Config, root stri
 	spin := spinner.New(spinner.WithSpinner(spinner.Line))
 
 	m := cyTUIModel{
-		ctx:          ctx,
-		agent:        agent,
-		cfg:          cfg,
-		root:         root,
-		console:      console,
-		viewport:     vp,
-		input:        input,
-		secret:       secret,
-		spinner:      spin,
-		historyIndex: 0,
-		mutedStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		accentStyle:  lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true),
-		errorStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
-		successStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
-		userStyle:    lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Background(lipgloss.Color("254")),
+		ctx:                      ctx,
+		agent:                    agent,
+		cfg:                      cfg,
+		root:                     root,
+		console:                  console,
+		viewport:                 vp,
+		input:                    input,
+		secret:                   secret,
+		spinner:                  spin,
+		historyIndex:             0,
+		mutedStyle:               lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+		selectionStyle:           lipgloss.NewStyle().Bold(true),
+		transcriptSelectionStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("4")),
+		accentStyle:              lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true),
+		errorStyle:               lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
+		successStyle:             lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
+		userStyle:                lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Background(lipgloss.Color("254")),
 	}
 	m.configureCommandSuggestions()
 	m.blocks = append(m.blocks, screenBlock{kind: screenBlockBanner})
@@ -292,11 +297,18 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		wasBottom := m.viewport.AtBottom()
+		m.transcriptSelection = transcriptSelection{}
 		m.resize(msg.Width, msg.Height)
 		m.refreshViewport(wasBottom)
 		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
+	case tea.MouseClickMsg:
+		return m.handleTranscriptMouseClick(msg)
+	case tea.MouseMotionMsg:
+		return m.handleTranscriptMouseMotion(msg)
+	case tea.MouseReleaseMsg:
+		return m.handleTranscriptMouseRelease(msg)
 	case spinner.TickMsg:
 		if !m.working && m.maintenance == "" {
 			return m, nil
@@ -380,6 +392,9 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.isViewportMsg(msg) {
 			return m.updateViewport(msg)
 		}
+		if _, ok := msg.(tea.MouseMsg); ok {
+			return m, nil
+		}
 		return m.updateEditor(msg)
 	}
 }
@@ -392,7 +407,7 @@ func (m cyTUIModel) View() tea.View {
 	}
 
 	footerMeta := strings.Repeat(" ", transcriptGutter) + truncateANSI(m.footerMetaLine(), m.contentWidth())
-	parts := []string{m.viewport.View(), m.workingIndicatorLine()}
+	parts := []string{m.transcriptViewportView(), m.workingIndicatorLine()}
 	if m.picker.active() {
 		parts = append(parts, m.renderPicker()...)
 	} else if m.maintenance != "" {

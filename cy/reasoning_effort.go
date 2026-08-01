@@ -8,13 +8,8 @@ import (
 
 const defaultReasoningEffort = ""
 
-func reasoningEffortsForModel(uri string) []string {
-	switch strings.ToLower(strings.TrimSpace(uri)) {
-	case "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro":
-		return []string{defaultReasoningEffort, "high"}
-	default:
-		return []string{defaultReasoningEffort}
-	}
+func reasoningEffortsForModel(string) []string {
+	return []string{defaultReasoningEffort, "high"}
 }
 
 func normalizeReasoningEffort(uri, effort string) (string, error) {

@@ -67,9 +67,9 @@ cy model openrouter/moonshotai/kimi-k3
 Selected custom models remain in the list. The built-in suggestions stay short:
 the two DeepSeek defaults, OpenRouter's free router, and three rolling `latest`
 aliases. In the interactive `/model` picker, Up/Down selects a model and
-Left/Right selects its reasoning effort when Cy knows the model supports it.
-`default` sends no effort override; the current DeepSeek V4 entries also offer
-`high`.
+Left/Right selects its reasoning effort. `default` sends no effort override;
+`high` requests high reasoning effort. A provider or model that does not
+support the override will return its normal API error.
 
 Local Ollama models do not require a stored key:
 
@@ -133,8 +133,8 @@ Session IDs may be abbreviated to a unique prefix.
 Typing `/` opens command completion. Use Up/Down to select, Tab to complete,
 and Enter to run. Shift+Enter inserts a newline. At the first or last editor
 line, Up/Down browses input history. PageUp/PageDown, Ctrl+Up/Ctrl+Down,
-Ctrl+Home/Ctrl+End, and the mouse wheel scroll the transcript. Hold Shift for
-terminal-native mouse selection and copying.
+Ctrl+Home/Ctrl+End, and the mouse wheel scroll the transcript. Drag across the
+transcript to highlight text and copy it to the clipboard.
 
 While Cy is working, Enter queues input for the next model boundary. Ctrl+C
 cancels active work and exits when idle; Escape cancels and restores any queued

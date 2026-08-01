@@ -139,6 +139,109 @@ func TestTUIMouseWheelScrollsTranscriptInsteadOfInputHistory(t *testing.T) {
 	}
 }
 
+func TestTUINonWheelMouseEventsPreserveTranscriptScroll(t *testing.T) {
+	events := []struct {
+		name string
+		msg  tea.Msg
+	}{
+		{name: "motion", msg: tea.MouseMotionMsg{X: 2, Y: 1}},
+		{name: "click", msg: tea.MouseClickMsg{X: 2, Y: 1, Button: tea.MouseLeft}},
+		{name: "release", msg: tea.MouseReleaseMsg{X: 2, Y: 1, Button: tea.MouseLeft}},
+	}
+
+	for _, event := range events {
+		t.Run(event.name, func(t *testing.T) {
+			model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+			model.viewport = viewport.New(viewport.WithWidth(40), viewport.WithHeight(2))
+			model.viewport.SetContentLines([]string{"one", "two", "three", "four"})
+			model.viewport.GotoBottom()
+			model.viewport.ScrollUp(1)
+			before := model.viewport.YOffset()
+
+			updated, cmd := model.Update(event.msg)
+			got := updated.(cyTUIModel)
+			if cmd != nil {
+				t.Fatalf("mouse event returned command: %v", cmd)
+			}
+			if got.viewport.YOffset() != before {
+				t.Fatalf("viewport offset = %d, want %d", got.viewport.YOffset(), before)
+			}
+		})
+	}
+}
+
+func TestTUIMouseDragSelectsAndCopiesTranscript(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.viewport = viewport.New(viewport.WithWidth(20), viewport.WithHeight(2))
+	model.viewport.SetContentLines([]string{"\x1b[36mhello\x1b[0m world", "second line"})
+
+	updated, _ := model.Update(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	got := updated.(cyTUIModel)
+	updated, _ = got.Update(tea.MouseMotionMsg{X: 5, Y: 0, Button: tea.MouseLeft})
+	got = updated.(cyTUIModel)
+	if selected := got.selectedTranscriptText(); selected != "hello" {
+		t.Fatalf("selected text while dragging = %q, want hello", selected)
+	}
+	if rendered := got.transcriptViewportView(); strings.Contains(rendered, "\x1b[7m") || strings.Contains(rendered, ";7m") ||
+		!strings.Contains(rendered, "\x1b[97;44m") && !strings.Contains(rendered, ";44m") {
+		t.Fatalf("drag selection does not use the configured selection colors: %q", rendered)
+	}
+
+	updated, cmd := got.Update(tea.MouseReleaseMsg{X: 5, Y: 0, Button: tea.MouseLeft})
+	got = updated.(cyTUIModel)
+	if cmd == nil {
+		t.Fatal("mouse release did not copy selected text")
+	}
+	if copied := fmt.Sprint(cmd()); copied != "hello" {
+		t.Fatalf("clipboard content = %q, want hello", copied)
+	}
+	if got.transcriptSelection.dragging || !got.transcriptSelection.hasRange() {
+		t.Fatalf("selection after release = %#v", got.transcriptSelection)
+	}
+}
+
+func TestTUIClipboardMessagePreservesTranscriptScroll(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.resize(40, 8)
+	model.blocks = nil
+	for i := 0; i < 10; i++ {
+		model.addBlock(screenBlockSystem, fmt.Sprintf("line %d", i))
+	}
+	model.refreshViewport(true)
+	model.viewport.ScrollUp(1)
+	before := model.viewport.YOffset()
+
+	updated, _ := model.Update(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	updated, _ = updated.(cyTUIModel).Update(tea.MouseMotionMsg{X: 3, Y: 0, Button: tea.MouseLeft})
+	updated, cmd := updated.(cyTUIModel).Update(tea.MouseReleaseMsg{X: 3, Y: 0, Button: tea.MouseLeft})
+	if cmd == nil {
+		t.Fatal("mouse release did not return clipboard command")
+	}
+	updated, _ = updated.(cyTUIModel).Update(cmd())
+	got := updated.(cyTUIModel)
+	if got.viewport.YOffset() != before {
+		t.Fatalf("clipboard message changed viewport offset from %d to %d", before, got.viewport.YOffset())
+	}
+}
+
+func TestTUIMouseSelectionUsesScrolledTranscriptCoordinates(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.viewport = viewport.New(viewport.WithWidth(20), viewport.WithHeight(2))
+	model.viewport.SetContentLines([]string{"first", "second", "third"})
+	model.viewport.GotoBottom()
+	before := model.viewport.YOffset()
+
+	updated, _ := model.Update(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
+	updated, _ = updated.(cyTUIModel).Update(tea.MouseMotionMsg{X: 3, Y: 1, Button: tea.MouseLeft})
+	got := updated.(cyTUIModel)
+	if selected := got.selectedTranscriptText(); selected != "second\nthi" {
+		t.Fatalf("selected scrolled text = %q", selected)
+	}
+	if got.viewport.YOffset() != before {
+		t.Fatalf("selection changed viewport offset from %d to %d", before, got.viewport.YOffset())
+	}
+}
+
 func TestTUIShiftEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
 	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
 	model.resize(40, 16)
@@ -251,6 +354,26 @@ func TestTUIResumePickerReplacesComposerWithoutHeader(t *testing.T) {
 	}
 	if !strings.Contains(view.Content, "Investigate flaky tests") || !strings.Contains(view.Content, "› Refactor tool runner") {
 		t.Fatalf("resume picker was not rendered in place of the composer: %q", view.Content)
+	}
+}
+
+func TestTUIPickerBoldsFocusedItem(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.console.useStyle = true
+	model.picker = pickerState{kind: pickerSession, index: 1, items: []pickerItem{
+		{value: "current", label: "Current item", current: true},
+		{value: "focused", label: "Focused item"},
+	}}
+
+	lines := model.renderPicker()
+	if len(lines) != 2 {
+		t.Fatalf("picker lines = %q", lines)
+	}
+	if !strings.Contains(lines[0], model.accentStyle.Render("Current item")) {
+		t.Fatalf("current item is not accented: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], model.selectionStyle.Render("Focused item")) {
+		t.Fatalf("focused item is not bold: %q", lines[1])
 	}
 }
 
@@ -480,8 +603,8 @@ func TestTUIModelPickerCyclesReasoningEffort(t *testing.T) {
 
 	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	got = updated.(cyTUIModel)
-	if rendered := got.View().Content; !strings.Contains(rendered, "effort: high") {
-		t.Fatalf("model picker did not cycle effort: %q", rendered)
+	if rendered := got.View().Content; !strings.Contains(rendered, "effort: high") || !strings.Contains(rendered, uri+"  current") {
+		t.Fatalf("model picker did not cycle effort while retaining current model: %q", rendered)
 	}
 	updated, cmd := got.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got = updated.(cyTUIModel)
@@ -495,6 +618,33 @@ func TestTUIModelPickerCyclesReasoningEffort(t *testing.T) {
 	}
 	if got.cfg.ModelURI != uri || got.cfg.ReasoningEffort != "high" {
 		t.Fatalf("TUI config = %#v", got.cfg)
+	}
+}
+
+func TestTUIModelPickerShowsEffortOnlyForFocusedModel(t *testing.T) {
+	currentURI := "deepseek/deepseek-v4-flash"
+	otherURI := "openrouter/free"
+	control := &authPickerAgent{
+		models: []string{currentURI, otherURI},
+		efforts: map[string][]string{
+			currentURI: {"", "high"},
+			otherURI:   {"", "high"},
+		},
+	}
+	model := newCyTUIModel(context.Background(), control, Config{ModelURI: currentURI}, ".", nil)
+	model.resize(80, 24)
+	model.console.useStyle = false
+	model.openModelPicker()
+
+	lines := model.renderPicker()
+	if len(lines) != 2 || !strings.Contains(lines[0], "effort: default") || strings.Contains(lines[1], "effort:") {
+		t.Fatalf("initial model effort labels = %q", lines)
+	}
+
+	updated, _ := model.handlePickerKey(tea.KeyPressMsg{Code: tea.KeyDown})
+	lines = updated.(cyTUIModel).renderPicker()
+	if len(lines) != 2 || strings.Contains(lines[0], "effort:") || !strings.Contains(lines[1], "effort: default") {
+		t.Fatalf("moved model effort labels = %q", lines)
 	}
 }
 

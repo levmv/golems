@@ -19,7 +19,7 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 	case "/exit", "/quit", "/q":
 		return true, true, nil
 	case "/help":
-		m.addBlock(screenBlockInfo, "Type / to browse commands; use ↑/↓ to choose, Tab to complete, and Enter to run. Shift+Enter inserts a new line. While working: Enter queues input, Esc cancels and restores undelivered input, Ctrl+C cancels. Scroll: PgUp/PgDn, Ctrl+Up/Ctrl+Down, Ctrl+Home/Ctrl+End.")
+		m.addBlock(screenBlockInfo, "Type / to browse commands; use ↑/↓ to choose, Tab to complete, and Enter to run. Shift+Enter inserts a new line. While working: Enter queues input, Esc cancels and restores undelivered input, Ctrl+C cancels. Scroll: PgUp/PgDn, Ctrl+Up/Ctrl+Down, Ctrl+Home/Ctrl+End, or the mouse wheel. Drag transcript text to select and copy it.")
 	case "/clear":
 		id, err := m.agent.ClearSession()
 		if err != nil {
@@ -27,6 +27,7 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 			break
 		}
 		m.blocks = nil
+		m.transcriptSelection = transcriptSelection{}
 		m.addBlock(screenBlockSystem, "new session "+id)
 	case "/resume":
 		if len(fields) > 1 {
@@ -173,7 +174,7 @@ func (m *cyTUIModel) openModelPicker() {
 				}
 			}
 		}
-		current := uri == m.cfg.ModelURI && efforts[effortIndex] == currentEffort
+		current := uri == m.cfg.ModelURI
 		item := pickerItem{value: uri, label: uri, current: current, efforts: append([]string(nil), efforts...), effortIndex: effortIndex}
 		updateModelEffortDescription(&item)
 		items = append(items, item)
@@ -301,7 +302,7 @@ func (m *cyTUIModel) selectPickerItem() tea.Cmd {
 	case pickerSession:
 		return m.resumeSession(item.value)
 	case pickerModel:
-		if item.current {
+		if item.value == m.cfg.ModelURI && selectedModelEffort(item) == m.cfg.ReasoningEffort {
 			return nil
 		}
 		return m.startModelSwitch(item.value, selectedModelEffort(item))
@@ -327,7 +328,6 @@ func (m *cyTUIModel) cycleModelEffort(delta int) {
 		return
 	}
 	item.effortIndex = (item.effortIndex + delta + len(item.efforts)) % len(item.efforts)
-	item.current = item.value == m.cfg.ModelURI && selectedModelEffort(*item) == m.cfg.ReasoningEffort
 	updateModelEffortDescription(item)
 }
 
@@ -435,6 +435,7 @@ func (m *cyTUIModel) resumeSession(idOrPrefix string) tea.Cmd {
 	m.cfg.ModelURI = m.agent.CurrentModel()
 	m.cfg.ReasoningEffort = m.agent.CurrentReasoningEffort()
 	m.blocks = nil
+	m.transcriptSelection = transcriptSelection{}
 	m.addBlock(screenBlockSystem, "resumed session "+id)
 	m.appendHistoryBlocks()
 	if m.agent.SessionRepaired() {

@@ -76,6 +76,26 @@ func TestTUIShowsBashCommandInsteadOfToolName(t *testing.T) {
 	}
 }
 
+func TestTUIStylesOnlyToolName(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.console.useStyle = true
+
+	for _, test := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "read", text: "read  cy/main.go", want: model.accentStyle.Render("read") + "  cy/main.go"},
+		{name: "bash", text: "$ go test ./cy/...", want: model.accentStyle.Render("$") + " go test ./cy/..."},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := model.renderToolDisplay(test.text); got != test.want {
+				t.Fatalf("renderToolDisplay(%q) = %q, want %q", test.text, got, test.want)
+			}
+		})
+	}
+}
+
 func TestTUIUpdatesBashCallWithCompletionStatus(t *testing.T) {
 	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
 	model.blocks = nil

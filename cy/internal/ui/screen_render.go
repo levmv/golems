@@ -68,12 +68,14 @@ func (m cyTUIModel) renderPicker() []string {
 		label := sanitizeTerminalText(item.label)
 		if item.current {
 			label = m.accent(label)
+		} else if index == selected {
+			label = m.selection(label)
 		}
 		detail := label
 		if item.current && m.picker.kind != pickerLogin {
 			detail += m.muted("  current")
 		}
-		if item.description != "" {
+		if item.description != "" && (m.picker.kind != pickerModel || index == selected) {
 			detail += m.muted("  " + sanitizeTerminalText(item.description))
 		}
 		marker := " "
@@ -286,7 +288,12 @@ func (m cyTUIModel) renderToolLines(text string) []string {
 	if strings.Contains(strings.ToLower(text), "error") {
 		style = m.errorStyle
 	}
-	return m.renderWrappedMarkedLine("•", m.accent(text), style)
+	return m.renderWrappedMarkedLine("•", m.renderToolDisplay(text), style)
+}
+
+func (m cyTUIModel) renderToolDisplay(text string) string {
+	name, arguments := splitToolDisplay(text)
+	return m.accent(name) + arguments
 }
 
 func (m cyTUIModel) renderProcessResultLines(command string, result processResultMeta) []string {
@@ -299,7 +306,7 @@ func (m cyTUIModel) renderProcessResultLines(command string, result processResul
 		marker = "✓"
 		style = m.successStyle
 	}
-	line := m.accent(command)
+	line := m.renderToolDisplay(command)
 	if detail := processStatusText(result); detail != "" {
 		line += "  " + m.muted(detail)
 	}
@@ -314,7 +321,7 @@ func (m cyTUIModel) renderProcessResultLines(command string, result processResul
 
 func (m cyTUIModel) renderPendingProcessLines(command string, elapsedMillis int64) []string {
 	detail := formatProcessDuration(time.Duration(elapsedMillis) * time.Millisecond)
-	return m.renderWrappedMarkedLine("◌", m.accent(command)+"  "+m.muted(detail), m.mutedStyle)
+	return m.renderWrappedMarkedLine("◌", m.renderToolDisplay(command)+"  "+m.muted(detail), m.mutedStyle)
 }
 
 func (m cyTUIModel) renderFileChangeLines(summary string, change fileChangeMeta) []string {
@@ -325,7 +332,7 @@ func (m cyTUIModel) renderFileChangeLines(summary string, change fileChangeMeta)
 	if change.Deletions > 0 {
 		stats = append(stats, m.error(fmt.Sprintf("−%d", change.Deletions)))
 	}
-	styledSummary := m.accent(summary)
+	styledSummary := m.renderToolDisplay(summary)
 	if len(stats) > 0 {
 		styledSummary += "  " + strings.Join(stats, " ")
 	} else {

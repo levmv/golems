@@ -140,6 +140,7 @@ func (m cyTUIModel) editorHeight() int {
 }
 
 func (m cyTUIModel) updateEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
+	follow := m.viewport.AtBottom()
 	var cmd tea.Cmd
 	if m.loginProvider != "" {
 		m.secret, cmd = m.secret.Update(msg)
@@ -147,7 +148,7 @@ func (m cyTUIModel) updateEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input, cmd = m.input.Update(msg)
 		m.syncCommandSuggestions()
 	}
-	m.refreshViewport(true)
+	m.refreshViewport(follow)
 	return m, cmd
 }
 
