@@ -10,11 +10,11 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/levmv/golems/pkg/filesearch"
 	"github.com/levmv/golems/pkg/golem"
 	"github.com/levmv/golems/pkg/llm"
 )
@@ -159,21 +159,27 @@ func (w *workspaceTools) grep(ctx context.Context, call llm.ToolCall) (golem.Too
 	if strings.TrimSpace(args.Pattern) == "" {
 		return golem.ToolResult{}, errors.New("pattern is required")
 	}
-	_, display, _, err := w.resolveExistingPath(args.Path)
+	_, display, err := w.resolvePath(args.Path)
 	if err != nil {
 		return golem.ToolResult{}, err
 	}
-	lines, truncated, err := w.runGrep(ctx, args.Pattern, args.Include, display)
+	lines, truncated, oversizedLines, err := w.runGrep(ctx, args.Pattern, args.Include, display)
 	if err != nil {
 		return golem.ToolResult{}, err
 	}
 	if len(lines) == 0 {
-		return golem.ToolResult{Content: "no matches\n"}, nil
+		if oversizedLines == 0 {
+			return golem.ToolResult{Content: "no matches\n"}, nil
+		}
+		return golem.ToolResult{Content: fmt.Sprintf("no matches\nskipped_oversized_lines: %d\n", oversizedLines)}, nil
 	}
 	var out strings.Builder
 	fmt.Fprintf(&out, "matches: %d\n", len(lines))
 	if truncated {
 		out.WriteString("truncated: true\n")
+	}
+	if oversizedLines > 0 {
+		fmt.Fprintf(&out, "skipped_oversized_lines: %d\n", oversizedLines)
 	}
 	out.WriteByte('\n')
 	out.WriteString(strings.Join(lines, "\n"))
@@ -181,40 +187,40 @@ func (w *workspaceTools) grep(ctx context.Context, call llm.ToolCall) (golem.Too
 	return golem.ToolResult{Content: out.String()}, nil
 }
 
-func (w *workspaceTools) runGrep(ctx context.Context, pattern, include, display string) ([]string, bool, error) {
-	rg, err := exec.LookPath("rg")
-	if err != nil {
-		return nil, false, errors.New("grep requires ripgrep (rg) in PATH")
+func (w *workspaceTools) runGrep(ctx context.Context, pattern, include, display string) ([]string, bool, int, error) {
+	if w.searcher == nil {
+		return nil, false, 0, errors.New("grep searcher is not initialized")
 	}
-	args := []string{"--line-number", "--no-heading", "--color=never", "--with-filename", "--hidden", "--max-columns=300", "--max-columns-preview"}
+	query := filesearch.SearchQuery{
+		Path:         display,
+		Pattern:      pattern,
+		PreviewBytes: 300,
+	}
 	if strings.TrimSpace(include) != "" {
-		args = append(args, "--glob", include)
+		query.Include = include
 	}
-	args = append(args, "--glob", "!**/.git/**")
-	args = append(args, "--", pattern, display)
-	command := exec.CommandContext(ctx, rg, args...)
-	command.Dir = w.root
-	command.Env = minimalToolEnv(w.root)
-	var capture cappedCapture
-	capture.limit = maxSearchOutput
-	command.Stdout = &capture
-	command.Stderr = &capture
-	err = command.Run()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, false, ctxErr
-			}
-			return nil, false, fmt.Errorf("ripgrep failed: %s", strings.TrimSpace(string(capture.data)))
+	var lines []string
+	usedBytes := 0
+	stats, err := w.searcher.Search(ctx, query, func(match filesearch.Match) error {
+		if len(lines) >= maxGrepMatches {
+			return filesearch.ErrStop
 		}
+		text := match.Text
+		if match.LineTruncated {
+			text += " [... omitted end of long line]"
+		}
+		line := fmt.Sprintf("%s:%d:%s", formatSearchPath(match.Path, display), match.Line, text)
+		if usedBytes+len(line)+1 > maxSearchOutput {
+			return filesearch.ErrStop
+		}
+		lines = append(lines, line)
+		usedBytes += len(line) + 1
+		return nil
+	})
+	if err != nil {
+		return nil, false, 0, err
 	}
-	lines := nonEmptyLines(string(capture.data))
-	truncated := capture.truncated || len(lines) > maxGrepMatches
-	if len(lines) > maxGrepMatches {
-		lines = lines[:maxGrepMatches]
-	}
-	return lines, truncated, nil
+	return lines, stats.Stopped, stats.OversizedLinesSkipped, nil
 }
 
 func (w *workspaceTools) glob(ctx context.Context, call llm.ToolCall) (golem.ToolResult, error) {
@@ -228,12 +234,9 @@ func (w *workspaceTools) glob(ctx context.Context, call llm.ToolCall) (golem.Too
 	if strings.TrimSpace(args.Pattern) == "" {
 		return golem.ToolResult{}, errors.New("pattern is required")
 	}
-	_, display, info, err := w.resolveExistingPath(args.Path)
+	_, display, err := w.resolvePath(args.Path)
 	if err != nil {
 		return golem.ToolResult{}, err
-	}
-	if !info.IsDir() {
-		return golem.ToolResult{}, fmt.Errorf("%s is not a directory", display)
 	}
 	paths, truncated, err := w.runGlob(ctx, args.Pattern, display)
 	if err != nil {
@@ -254,33 +257,34 @@ func (w *workspaceTools) glob(ctx context.Context, call llm.ToolCall) (golem.Too
 }
 
 func (w *workspaceTools) runGlob(ctx context.Context, pattern, display string) ([]string, bool, error) {
-	rg, err := exec.LookPath("rg")
-	if err != nil {
-		return nil, false, errors.New("glob requires ripgrep (rg) in PATH")
+	if w.searcher == nil {
+		return nil, false, errors.New("glob searcher is not initialized")
 	}
-	command := exec.CommandContext(ctx, rg, "--files", "--color=never", "--hidden", "--glob", pattern, "--glob", "!**/.git/**", "--", display)
-	command.Dir = w.root
-	command.Env = minimalToolEnv(w.root)
-	var capture cappedCapture
-	capture.limit = maxSearchOutput
-	command.Stdout = &capture
-	command.Stderr = &capture
-	err = command.Run()
-	if err != nil {
-		var exitErr *exec.ExitError
-		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, false, ctxErr
-			}
-			return nil, false, fmt.Errorf("ripgrep failed: %s", strings.TrimSpace(string(capture.data)))
+	var paths []string
+	usedBytes := 0
+	stats, err := w.searcher.Files(ctx, filesearch.FilesQuery{Path: display, Glob: pattern}, func(file filesearch.File) error {
+		if len(paths) >= maxGlobMatches {
+			return filesearch.ErrStop
 		}
+		path := formatSearchPath(file.Path, display)
+		if usedBytes+len(path)+1 > maxSearchOutput {
+			return filesearch.ErrStop
+		}
+		paths = append(paths, path)
+		usedBytes += len(path) + 1
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
 	}
-	paths := nonEmptyLines(string(capture.data))
-	truncated := capture.truncated || len(paths) > maxGlobMatches
-	if len(paths) > maxGlobMatches {
-		paths = paths[:maxGlobMatches]
+	return paths, stats.Stopped, nil
+}
+
+func formatSearchPath(path, queryPath string) string {
+	if queryPath == "." {
+		return "./" + path
 	}
-	return paths, truncated, nil
+	return path
 }
 
 func (w *workspaceTools) edit(_ context.Context, call llm.ToolCall) (golem.ToolResult, error) {
@@ -573,18 +577,6 @@ func formatWriteResult(operation string, newHash [32]byte) string {
 	return fmt.Sprintf("%s\nsha256: %x", operation, newHash)
 }
 
-func nonEmptyLines(text string) []string {
-	var lines []string
-	scanner := bufio.NewScanner(strings.NewReader(text))
-	scanner.Buffer(make([]byte, 64*1024), maxSearchOutput)
-	for scanner.Scan() {
-		if line := strings.TrimSpace(scanner.Text()); line != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
-}
-
 func minimalToolEnv(home string) []string {
 	// Start from an empty environment intentionally. Bash callers provide a
 	// per-workspace tool home, while this small allowlist keeps ordinary CLI
@@ -597,22 +589,4 @@ func minimalToolEnv(home string) []string {
 		}
 	}
 	return env
-}
-
-type cappedCapture struct {
-	data      []byte
-	limit     int
-	truncated bool
-}
-
-func (c *cappedCapture) Write(data []byte) (int, error) {
-	original := len(data)
-	remaining := c.limit - len(c.data)
-	if remaining > 0 {
-		c.data = append(c.data, data[:min(remaining, len(data))]...)
-	}
-	if len(data) > remaining {
-		c.truncated = true
-	}
-	return original, nil
 }

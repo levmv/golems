@@ -34,3 +34,40 @@ func TestCapabilityProfilesRemoveWholeToolClasses(t *testing.T) {
 		}
 	}
 }
+
+func TestLSIsOnlyExposedWithoutBash(t *testing.T) {
+	workspace, _, err := NewWorkspaceTools(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		profile string
+		want    bool
+	}{
+		{profile: "full", want: false},
+		{profile: "edit", want: true},
+		{profile: "read-only", want: true},
+	} {
+		found := false
+		workspaceForProfile := FilterWorkspaceToolsForProfile(workspace, test.profile)
+		for _, tool := range FilterForProfile(workspaceForProfile, test.profile) {
+			if tool.Definition.Function.Name == lsToolName {
+				found = true
+			}
+		}
+		if found != test.want {
+			t.Errorf("profile %s exposes ls=%v, want %v", test.profile, found, test.want)
+		}
+	}
+}
+
+func TestGenericProfileFilterDoesNotSpecialCaseToolNames(t *testing.T) {
+	run := func(context.Context, llm.ToolCall) (golem.ToolResult, error) { return golem.ToolResult{}, nil }
+	tool := golem.FunctionToolWithEffect(golem.ToolEffectRead, lsToolName, "external ls", jsonschema.Object(nil), run)
+	for _, profile := range []string{"full", "edit", "read-only"} {
+		filtered := FilterForProfile([]golem.Tool{tool}, profile)
+		if len(filtered) != 1 {
+			t.Errorf("profile %s removed an unrelated read tool named ls", profile)
+		}
+	}
+}

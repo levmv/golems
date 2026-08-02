@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ func TestWorkspaceToolsRegisterExpectedTools(t *testing.T) {
 	var names []string
 	for _, tool := range tools {
 		names = append(names, tool.Definition.Function.Name)
-		if tool.Definition.Function.Name == "read" || tool.Definition.Function.Name == "grep" || tool.Definition.Function.Name == "glob" {
+		if tool.Definition.Function.Name == "read" || tool.Definition.Function.Name == lsToolName || tool.Definition.Function.Name == "grep" || tool.Definition.Function.Name == "glob" {
 			if tool.Effect != golem.ToolEffectRead {
 				t.Fatalf("tool %s effect = %q, want read", tool.Definition.Function.Name, tool.Effect)
 			}
@@ -33,7 +34,7 @@ func TestWorkspaceToolsRegisterExpectedTools(t *testing.T) {
 			t.Fatalf("tool %s effect = %q, want write", tool.Definition.Function.Name, tool.Effect)
 		}
 	}
-	want := []string{"read", "grep", "glob", "edit", "write"}
+	want := []string{"read", "ls", "grep", "glob", "edit", "write"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", names, want)
 	}
@@ -56,6 +57,110 @@ func TestReadReturnsNumberedRangeAndHash(t *testing.T) {
 	}
 	if !regexp.MustCompile(`(?m)^sha256: [0-9a-f]{64}$`).MatchString(result.Content) {
 		t.Fatalf("read() hash missing: %q", result.Content)
+	}
+}
+
+func TestLSShowsUnfilteredEntryTypesAndSymlinkTargets(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, ".git", "HEAD"), "ref: refs/heads/main\n")
+	mustWriteFile(t, filepath.Join(root, ".hidden"), "hidden\n")
+	mustWriteFile(t, filepath.Join(root, ".gitignore"), "ignored/\n")
+	mustWriteFile(t, filepath.Join(root, "ignored", "backing.go"), "package ignored\n")
+	mustWriteFile(t, filepath.Join(root, "visible.go"), "package visible\n")
+	if err := os.Symlink("ignored", filepath.Join(root, "vendor-current")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "outside-link")); err != nil {
+		t.Skipf("outside symlink unavailable: %v", err)
+	}
+	ws := mustWorkspace(t, root)
+	result, err := ws.ls(context.Background(), toolCall(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`dir\t".git/"`,
+		`file\t".gitignore"`,
+		`file\t".hidden"`,
+		`dir\t"ignored/"`,
+		`symlink\t"outside-link" -> ` + strconv.Quote(outside),
+		`symlink\t"vendor-current" -> "ignored"`,
+		`file\t"visible.go"`,
+	} {
+		if !strings.Contains(result.Content, strings.ReplaceAll(want, `\t`, "\t")) {
+			t.Errorf("ls result missed %q:\n%s", want, result.Content)
+		}
+	}
+	if strings.Contains(result.Content, "backing.go") {
+		t.Fatalf("ls recursed into ignored directory or symlink:\n%s", result.Content)
+	}
+}
+
+func TestLSAllowsExplicitInRootSymlinkAndRejectsEscape(t *testing.T) {
+	root := t.TempDir()
+	mustWriteFile(t, filepath.Join(root, "backing", "target.go"), "package target\n")
+	if err := os.Symlink("backing", filepath.Join(root, "current")); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "outside")); err != nil {
+		t.Skipf("outside symlink unavailable: %v", err)
+	}
+	ws := mustWorkspace(t, root)
+	result, err := ws.ls(context.Background(), toolCall(`{"path":"current"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "file\t\"target.go\"") {
+		t.Fatalf("explicit in-root directory symlink result:\n%s", result.Content)
+	}
+	if _, err := ws.ls(context.Background(), toolCall(`{"path":"outside"}`)); err == nil || !strings.Contains(err.Error(), "escapes workspace root") {
+		t.Fatalf("escaping directory symlink error = %v", err)
+	}
+}
+
+func TestLSPaginatesDeterministically(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.go", "b.go", "c.go"} {
+		mustWriteFile(t, filepath.Join(root, name), name+"\n")
+	}
+	ws := mustWorkspace(t, root)
+	result, err := ws.ls(context.Background(), toolCall(`{"offset":2,"limit":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Content, "entries: 1") || !strings.Contains(result.Content, "truncated: true") || !strings.Contains(result.Content, `offset=3`) || !strings.Contains(result.Content, "file\t\"b.go\"") {
+		t.Fatalf("paginated ls result:\n%s", result.Content)
+	}
+	if strings.Contains(result.Content, `"a.go"`) || strings.Contains(result.Content, `"c.go"`) {
+		t.Fatalf("paginated ls leaked another page:\n%s", result.Content)
+	}
+}
+
+func TestSearchToolDescriptionsStateVisibilityAndEntryPolicy(t *testing.T) {
+	tools, _, err := NewWorkspaceTools(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptions := make(map[string]string)
+	for _, tool := range tools {
+		descriptions[tool.Definition.Function.Name] = tool.Definition.Function.Description
+	}
+	for _, term := range []string{"hidden", ".git", "binary", "invalid UTF-8", "symlink"} {
+		if !strings.Contains(descriptions["grep"], term) {
+			t.Errorf("grep description does not state %q policy: %q", term, descriptions["grep"])
+		}
+	}
+	for _, term := range []string{"hidden", "regular files", "symlink", ".git"} {
+		if !strings.Contains(descriptions["glob"], term) {
+			t.Errorf("glob description does not state %q policy: %q", term, descriptions["glob"])
+		}
+	}
+	for _, term := range []string{"without ignore filtering", "hidden", ".git", "symlink targets", "does not follow"} {
+		if !strings.Contains(descriptions[lsToolName], term) {
+			t.Errorf("ls description does not state %q policy: %q", term, descriptions[lsToolName])
+		}
 	}
 }
 
@@ -180,16 +285,18 @@ func TestGrepSearchesHiddenWorkspaceFilesButSkipsGitMetadata(t *testing.T) {
 	}
 }
 
-func TestSearchToolsFailClearlyWithoutRipgrep(t *testing.T) {
+func TestSearchToolsWorkWithEmptyPATH(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "visible.txt"), "text\n")
 	ws := mustWorkspace(t, root)
-	t.Setenv("PATH", t.TempDir())
-	if _, err := ws.grep(context.Background(), toolCall(`{"pattern":"text"}`)); err == nil || !strings.Contains(err.Error(), "requires ripgrep") {
-		t.Fatalf("grep() error = %v", err)
+	t.Setenv("PATH", "")
+	grep, err := ws.grep(context.Background(), toolCall(`{"pattern":"text"}`))
+	if err != nil || !strings.Contains(grep.Content, "visible.txt:1:text") {
+		t.Fatalf("grep() result = %q, error = %v", grep.Content, err)
 	}
-	if _, err := ws.glob(context.Background(), toolCall(`{"pattern":"**/*.txt"}`)); err == nil || !strings.Contains(err.Error(), "requires ripgrep") {
-		t.Fatalf("glob() error = %v", err)
+	glob, err := ws.glob(context.Background(), toolCall(`{"pattern":"**/*.txt"}`))
+	if err != nil || !strings.Contains(glob.Content, "visible.txt") {
+		t.Fatalf("glob() result = %q, error = %v", glob.Content, err)
 	}
 }
 

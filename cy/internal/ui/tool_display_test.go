@@ -20,6 +20,7 @@ func TestDescribeToolCallUsesBuiltInArguments(t *testing.T) {
 		want string
 	}{
 		{name: "read", tool: "read", args: `{"path":"cy/main.go","offset":201,"limit":50}`, want: "read  cy/main.go:201+50"},
+		{name: "list directory", tool: "ls", args: `{"path":"cy/internal","offset":201,"limit":50}`, want: "list  cy/internal:201"},
 		{name: "grep", tool: "grep", args: `{"pattern":"func \\(m \\*Model\\)","path":"cy","include":"*.go"}`, want: `grep  "func \\(m \\*Model\\)" · cy · *.go`},
 		{name: "glob", tool: "glob", args: `{"pattern":"**/*_test.go","path":"cy"}`, want: "glob  **/*_test.go · cy"},
 		{name: "edit", tool: "edit", args: `{"path":"cy/main.go","old_text":"before","new_text":"after"}`, want: "edit  cy/main.go"},

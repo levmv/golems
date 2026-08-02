@@ -9,14 +9,18 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/levmv/golems/pkg/filesearch"
 	"github.com/levmv/golems/pkg/golem"
 	"github.com/levmv/golems/pkg/jsonschema"
 	"github.com/levmv/golems/pkg/llm"
 )
 
 type workspaceTools struct {
-	root string
+	root     string
+	searcher *filesearch.Searcher
 }
+
+const lsToolName = "ls"
 
 // NewWorkspaceTools builds the file and search tools rooted at a canonical
 // workspace directory. The returned root is resolved and symlink-free.
@@ -47,19 +51,38 @@ func NewWorkspaceTools(root string) ([]golem.Tool, string, error) {
 		),
 		golem.FunctionToolWithEffect(
 			golem.ToolEffectRead,
+			lsToolName,
+			"List one directory without ignore filtering or recursion. Includes hidden and .git entries, reports file/directory/symlink types and raw symlink targets, and does not follow listed entries.",
+			jsonschema.Obj(
+				jsonschema.Optional("path", jsonschema.Str{Description: "Directory relative to the workspace root. Defaults to the root; an explicit in-root directory symlink is allowed."}),
+				jsonschema.Optional("offset", jsonschema.Int{
+					Description: "One-based first entry to return. Defaults to 1.",
+					Minimum:     new(1),
+				}),
+				jsonschema.Optional("limit", jsonschema.Int{
+					Description: "Maximum entries to return. Defaults to 200; capped at 1000.",
+					Default:     defaultListEntries,
+					Minimum:     new(1),
+					Maximum:     new(maxListEntries),
+				}),
+			).NoAdditionalProperties(),
+			ws.ls,
+		),
+		golem.FunctionToolWithEffect(
+			golem.ToolEffectRead,
 			"grep",
-			"Search UTF-8 repository text with a regular expression. Honors repository ignore files and caps results.",
+			"Regex-search UTF-8 repository files, including hidden files. Honors ignores; skips .git, binary/invalid UTF-8, discovered symlinks, and oversized lines (reported). Results are capped.",
 			jsonschema.Obj(
 				jsonschema.Required("pattern", jsonschema.Str{Description: "Regular expression to search for."}),
 				jsonschema.Optional("path", jsonschema.Str{Description: "File or directory relative to the workspace root. Defaults to the root."}),
-				jsonschema.Optional("include", jsonschema.Str{Description: "Optional ripgrep glob such as *.go or **/*_test.go."}),
+				jsonschema.Optional("include", jsonschema.Str{Description: "Optional file glob such as *.go or **/*_test.go."}),
 			).NoAdditionalProperties(),
 			ws.grep,
 		),
 		golem.FunctionToolWithEffect(
 			golem.ToolEffectRead,
 			"glob",
-			"Find repository paths matching a glob. Honors repository ignore files and caps results.",
+			"Find repository files by glob, including hidden files. Honors ignores; skips .git and discovered symlinks; returns regular files only. Results are capped.",
 			jsonschema.Obj(
 				jsonschema.Required("pattern", jsonschema.Str{Description: "Glob such as **/*.go."}),
 				jsonschema.Optional("path", jsonschema.Str{Description: "Directory relative to the workspace root. Defaults to the root."}),
@@ -111,7 +134,11 @@ func newWorkspaceToolset(root string) (*workspaceTools, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("workspace root is not a directory: %s", abs)
 	}
-	return &workspaceTools{root: abs}, nil
+	searcher, err := filesearch.New(abs, filesearch.Options{})
+	if err != nil {
+		return nil, err
+	}
+	return &workspaceTools{root: abs, searcher: searcher}, nil
 }
 
 func (w *workspaceTools) resolvePath(path string) (string, string, error) {

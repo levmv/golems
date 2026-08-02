@@ -252,7 +252,7 @@ func (a *sessionAgent) reloadTools() error {
 }
 
 func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, profile string) ([]golem.Tool, error) {
-	tools := append([]golem.Tool(nil), a.baseTools...)
+	tools := toolruntime.FilterWorkspaceToolsForProfile(a.baseTools, profile)
 	hnClient := hackernews.NewClient()
 	fetchBackends, err := a.webFetchBackends(hnClient)
 	if err != nil {

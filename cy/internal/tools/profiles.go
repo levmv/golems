@@ -53,3 +53,18 @@ func FilterForProfile(tools []golem.Tool, profile string) []golem.Tool {
 	}
 	return filtered
 }
+
+// FilterWorkspaceToolsForProfile applies visibility rules that are specific
+// to Cy's built-in workspace catalog, before unrelated tools are composed.
+func FilterWorkspaceToolsForProfile(tools []golem.Tool, profile string) []golem.Tool {
+	filtered := make([]golem.Tool, 0, len(tools))
+	for _, tool := range tools {
+		// Bash already provides richer directory inspection in full. Keep this
+		// small diagnostic primitive only where process execution is absent.
+		if profile == "full" && tool.Definition.Function.Name == lsToolName {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
+}

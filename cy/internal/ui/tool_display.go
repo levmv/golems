@@ -63,6 +63,19 @@ func describeToolCall(name, rawArguments string) compactToolCall {
 			GroupDir:  dir,
 			GroupItem: item,
 		}
+	case "ls":
+		var args struct {
+			Path   string `json:"path"`
+			Offset int    `json:"offset"`
+		}
+		if !decodeToolDisplayArgs(rawArguments, &args) {
+			return fallback
+		}
+		text := "list  " + cleanDisplayPath(args.Path)
+		if args.Offset > 1 {
+			text += fmt.Sprintf(":%d", args.Offset)
+		}
+		return compactToolCall{Text: text}
 	case "grep":
 		var args struct {
 			Pattern string `json:"pattern"`

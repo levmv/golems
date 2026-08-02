@@ -114,8 +114,8 @@ page fetching, and optional web search.
 | Profile | Available tools |
 | --- | --- |
 | `full` | Files, Bash/jobs, and available web tools |
-| `edit` | Read/write files and available web tools; no Bash |
-| `read-only` | Read/search and available web tools; no writes or Bash |
+| `edit` | Read/list/write files and available web tools; no Bash |
+| `read-only` | Read/search/list files and available web tools; no writes or Bash |
 
 File tools stay beneath the workspace root and reject escapes through absolute
 paths, `..`, or symlinks. Web fetching rejects credentials in URLs and
