@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -10,8 +9,6 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/levmv/golems/pkg/llm"
 )
-
-const maxExitTranscriptLines = 200
 
 func (m cyTUIModel) footerMetaLine() string {
 	parts := []string{}
@@ -37,9 +34,6 @@ func (m cyTUIModel) footerMetaLine() string {
 	}
 	if usage := compactUsage(currentUsage); usage != "" {
 		parts = append(parts, usage)
-	}
-	if !m.viewport.AtBottom() {
-		parts = append(parts, fmt.Sprintf("scroll %.0f%%", m.viewport.ScrollPercent()*100))
 	}
 	if pathIndex >= 0 {
 		const separator = " · "
@@ -75,7 +69,7 @@ func (m *cyTUIModel) finishTurnDuration(now time.Time) {
 	}
 	duration := m.turnElapsed(now)
 	m.turnStartedAt = time.Time{}
-	m.blocks = append(m.blocks, screenBlock{kind: screenBlockTurnDuration, turnDuration: duration})
+	m.appendBlock(screenBlock{kind: screenBlockTurnDuration, turnDuration: duration})
 }
 
 func formatTurnDuration(duration time.Duration) string {
@@ -183,23 +177,6 @@ func compactTokenCount(count int) string {
 		return fmt.Sprintf("%d%s", whole, suffix)
 	}
 	return fmt.Sprintf("%d.%d%s", whole, tenths, suffix)
-}
-
-func printExitTranscript(out io.Writer, model cyTUIModel) {
-	model.working = false
-	lines := model.renderTranscriptLines()
-	if len(lines) == 0 {
-		return
-	}
-	if len(lines) > maxExitTranscriptLines {
-		omitted := len(lines) - maxExitTranscriptLines + 1
-		tail := append([]string(nil), lines[len(lines)-(maxExitTranscriptLines-1):]...)
-		lines = append([]string{fmt.Sprintf("  … %d earlier transcript lines omitted", omitted)}, tail...)
-	}
-	fmt.Fprintln(out)
-	for _, line := range lines {
-		fmt.Fprintln(out, line)
-	}
 }
 
 func visibleLen(s string) int {

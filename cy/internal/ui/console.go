@@ -75,6 +75,14 @@ func (c *Console) PrintMarkdown(text string) {
 }
 
 func (c *Console) RenderMarkdownLines(text string) []string {
+	return c.renderMarkdownLinesAtWidth(text, 0)
+}
+
+func (c *Console) RenderMarkdownLinesAtWidth(text string, width int) []string {
+	return c.renderMarkdownLinesAtWidth(text, max(1, width))
+}
+
+func (c *Console) renderMarkdownLinesAtWidth(text string, width int) []string {
 	text = sanitizeTerminalText(text)
 	if text == "" {
 		return nil
@@ -85,7 +93,7 @@ func (c *Console) RenderMarkdownLines(text string) []string {
 	}
 	input := strings.Split(trimmed, "\n")
 	var fence markdownFence
-	return c.renderMarkdownLines(input, &fence)
+	return c.renderMarkdownLines(input, &fence, width)
 }
 
 type markdownFence struct {
@@ -131,7 +139,7 @@ func closesMarkdownFence(line string, fence markdownFence) bool {
 	return length >= fence.length && strings.TrimSpace(trimmed[length:]) == ""
 }
 
-func (c *Console) renderMarkdownLines(input []string, fence *markdownFence) []string {
+func (c *Console) renderMarkdownLines(input []string, fence *markdownFence, width int) []string {
 	out := make([]string, 0, len(input))
 	for i := 0; i < len(input); {
 		if fence.active() {
@@ -153,7 +161,7 @@ func (c *Console) renderMarkdownLines(input []string, fence *markdownFence) []st
 			for end < len(input) && strings.Contains(input[end], "|") && strings.TrimSpace(input[end]) != "" {
 				end++
 			}
-			out = append(out, c.renderTable(input[i:end])...)
+			out = append(out, c.renderTable(input[i:end], width)...)
 			i = end
 			continue
 		}
@@ -353,7 +361,7 @@ func (c *Console) renderMarkdownLine(line string) string {
 	return base + renderInlineMarkdownMarkers(line, base) + ansiReset + newline
 }
 
-func (c *Console) renderTable(lines []string) []string {
+func (c *Console) renderTable(lines []string, maxWidth int) []string {
 	rows := make([][]string, 0, len(lines)-1)
 	for i, line := range lines {
 		if i == 1 {
@@ -378,10 +386,11 @@ func (c *Console) renderTable(lines []string) []string {
 			}
 		}
 	}
+	widths = fitTableWidths(widths, maxWidth)
 
 	out := make([]string, 0, len(rows)+1)
 	for i, row := range rows {
-		out = append(out, c.renderTableRow(row, widths, i == 0))
+		out = append(out, c.renderTableRows(row, widths, i == 0)...)
 		if i == 0 {
 			out = append(out, c.muted(renderTableSeparator(widths)))
 		}
@@ -389,8 +398,45 @@ func (c *Console) renderTable(lines []string) []string {
 	return out
 }
 
-func (c *Console) renderTableRow(row []string, widths []int, header bool) string {
-	cells := make([]string, len(widths))
+func fitTableWidths(widths []int, maxWidth int) []int {
+	fitted := append([]int(nil), widths...)
+	if maxWidth <= 0 || len(fitted) == 0 {
+		return fitted
+	}
+	// "| " + N cells + " | " separators + " |" consumes 3*N+1
+	// columns in addition to the cell contents.
+	available := maxWidth - (3*len(fitted) + 1)
+	const minimumColumnWidth = 3
+	if available < len(fitted) {
+		return fitted
+	}
+	for totalWidths(fitted) > available {
+		widest := -1
+		for i, width := range fitted {
+			minimum := min(widths[i], minimumColumnWidth)
+			if width > minimum && (widest < 0 || width > fitted[widest]) {
+				widest = i
+			}
+		}
+		if widest < 0 {
+			break
+		}
+		fitted[widest]--
+	}
+	return fitted
+}
+
+func totalWidths(widths []int) int {
+	total := 0
+	for _, width := range widths {
+		total += width
+	}
+	return total
+}
+
+func (c *Console) renderTableRows(row []string, widths []int, header bool) []string {
+	wrappedCells := make([][]string, len(widths))
+	height := 1
 	for i := range widths {
 		cell := ""
 		if i < len(row) {
@@ -399,15 +445,31 @@ func (c *Console) renderTableRow(row []string, widths []int, header bool) string
 		if c.useStyle {
 			cell = renderInlineMarkdownMarkers(cell, "")
 		}
-		if pad := widths[i] - visibleLen(cell); pad > 0 {
-			cell += strings.Repeat(" ", pad)
+		wrappedCells[i] = wrapDisplayLine(cell, max(1, widths[i]))
+		if len(wrappedCells[i]) > height {
+			height = len(wrappedCells[i])
 		}
-		if header {
-			cell = c.style(cell, ansiBold+ansiCyan)
-		}
-		cells[i] = cell
 	}
-	return c.muted("|") + " " + strings.Join(cells, " "+c.muted("|")+" ") + " " + c.muted("|")
+
+	lines := make([]string, 0, height)
+	for lineIndex := 0; lineIndex < height; lineIndex++ {
+		cells := make([]string, len(widths))
+		for col := range widths {
+			cell := ""
+			if lineIndex < len(wrappedCells[col]) {
+				cell = wrappedCells[col][lineIndex]
+			}
+			if pad := widths[col] - visibleLen(cell); pad > 0 {
+				cell += strings.Repeat(" ", pad)
+			}
+			if header {
+				cell = c.style(cell, ansiBold+ansiCyan)
+			}
+			cells[col] = cell
+		}
+		lines = append(lines, c.muted("|")+" "+strings.Join(cells, " "+c.muted("|")+" ")+" "+c.muted("|"))
+	}
+	return lines
 }
 
 func (c *Console) markdownCellWidth(cell string) int {
@@ -420,10 +482,7 @@ func (c *Console) markdownCellWidth(cell string) int {
 func renderTableSeparator(widths []int) string {
 	parts := make([]string, len(widths))
 	for i, width := range widths {
-		if width < 3 {
-			width = 3
-		}
-		parts[i] = strings.Repeat("-", width)
+		parts[i] = strings.Repeat("-", max(1, width))
 	}
 	return "| " + strings.Join(parts, " | ") + " |"
 }

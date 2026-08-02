@@ -1,11 +1,14 @@
 package ui
 
 import (
+	"bytes"
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/levmv/golems/pkg/golem"
 )
 
@@ -150,6 +153,83 @@ func TestTUISuppressesDuplicateBackgroundCompletionNotice(t *testing.T) {
 	if len(model.blocks) != 1 {
 		t.Fatalf("duplicate completion was rendered: %#v", model.blocks)
 	}
+}
+
+func TestTUIFreezesOffscreenProcessAndAppendsCompletion(t *testing.T) {
+	var output bytes.Buffer
+	agent := &processStatusScreenAgent{
+		found: true,
+		status: processResultMeta{
+			Type: processResultMetaType, JobID: "job-123", Status: jobRunning, DurationMillis: 2000,
+		},
+	}
+	model := newCyTUIModel(context.Background(), agent, Config{}, ".", &output)
+	model.resize(80, 6)
+	model.clearTranscript()
+	model.appendBlock(screenBlock{
+		kind: screenBlockTool,
+		text: "$ long-running job",
+		processResult: &processResultMeta{
+			Type: processResultMetaType, JobID: "job-123", Status: jobRunning, DurationMillis: 1000,
+		},
+	})
+	for index := range 12 {
+		model.addBlock(screenBlockSystem, "later line "+strconv.Itoa(index))
+	}
+	model.refreshScreen()
+	if err := model.renderer.RenderFrame(model.inlineFrame(), model.width, model.height); err != nil {
+		t.Fatal(err)
+	}
+	model.transcriptDirty = false
+	if !model.blockAboveViewport(0) {
+		t.Fatal("running process block did not move above the managed viewport")
+	}
+
+	output.Reset()
+	model.refreshProcessResults()
+	model.refreshScreen()
+	if err := model.renderer.RenderFrame(model.inlineFrame(), model.width, model.height); err != nil {
+		t.Fatal(err)
+	}
+	if got := model.blocks[0].processResult.DurationMillis; got != 1000 {
+		t.Fatalf("offscreen duration changed to %d, want frozen value 1000", got)
+	}
+	if strings.Contains(output.String(), ansi.EraseEntireDisplay) {
+		t.Fatalf("offscreen duration update purged scrollback: %q", output.String())
+	}
+
+	zero := 0
+	agent.status = processResultMeta{
+		Type: processResultMetaType, JobID: "job-123", Status: jobCompleted, ExitCode: &zero, DurationMillis: 5000,
+	}
+	output.Reset()
+	previousBlocks := len(model.blocks)
+	model.refreshProcessResults()
+	model.refreshScreen()
+	if err := model.renderer.RenderFrame(model.inlineFrame(), model.width, model.height); err != nil {
+		t.Fatal(err)
+	}
+	if !model.blocks[0].processSuperseded || len(model.blocks) != previousBlocks+1 {
+		t.Fatalf("completion did not supersede and append: %#v", model.blocks)
+	}
+	completion := model.blocks[len(model.blocks)-1]
+	if completion.processResult == nil || completion.processResult.Status != jobCompleted {
+		t.Fatalf("appended completion = %#v", completion)
+	}
+	if strings.Contains(output.String(), ansi.EraseEntireDisplay) {
+		t.Fatalf("offscreen completion purged scrollback: %q", output.String())
+	}
+}
+
+type processStatusScreenAgent struct {
+	screenAgentStub
+
+	status processResultMeta
+	found  bool
+}
+
+func (a *processStatusScreenAgent) ProcessStatus(string) (processResultMeta, bool) {
+	return a.status, a.found
 }
 
 func TestTUICollapsesToolIterationLimitErrors(t *testing.T) {

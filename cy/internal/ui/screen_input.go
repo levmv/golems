@@ -140,7 +140,6 @@ func (m cyTUIModel) editorHeight() int {
 }
 
 func (m cyTUIModel) updateEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
-	follow := m.viewport.AtBottom()
 	var cmd tea.Cmd
 	if m.loginProvider != "" {
 		m.secret, cmd = m.secret.Update(msg)
@@ -148,7 +147,6 @@ func (m cyTUIModel) updateEditor(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input, cmd = m.input.Update(msg)
 		m.syncCommandSuggestions()
 	}
-	m.refreshViewport(follow)
 	return m, cmd
 }
 
@@ -168,7 +166,7 @@ func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			label := m.maintenance
 			m.cancelMaintenance()
 			m.addBlock(screenBlockSystem, "cancelling "+label)
-			m.refreshViewport(true)
+			m.refreshScreen()
 		}
 		return m, nil
 	}
@@ -182,35 +180,33 @@ func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.working {
 			m.cancelTurn()
 			m.addBlock(screenBlockSystem, "cancelling current turn")
-			m.refreshViewport(true)
+			m.refreshScreen()
 			return m, nil
 		}
+		m.quitting = true
 		return m, tea.Quit
 	case keyString == "ctrl+d" || keyIsCtrl(msg, 'd'):
 		if !m.working && strings.TrimSpace(m.editorValue()) == "" {
+			m.quitting = true
 			return m, tea.Quit
 		}
 		return m.updateEditor(editorCtrlKey('d'))
 	case isEnterKey(msg) && (hasShift || keyString == "shift+enter") && m.loginProvider == "":
 		m.input.InsertString("\n")
 		m.syncCommandSuggestions()
-		m.refreshViewport(true)
 		return m, nil
 	case isEnterKey(msg):
 		return m.submitInput()
 	case m.historyIndex >= len(m.history) && m.commandSuggestionsVisible() && ((!hasCtrl && (key.Code == tea.KeyUp || key.Code == tea.KeyKpUp || keyString == "up")) || keyIsCtrl(msg, 'p')):
 		m.moveCommandSuggestion(-1)
-		m.refreshViewport(true)
 		return m, nil
 	case m.historyIndex >= len(m.history) && m.commandSuggestionsVisible() && ((!hasCtrl && (key.Code == tea.KeyDown || key.Code == tea.KeyKpDown || keyString == "down")) || keyIsCtrl(msg, 'n')):
 		m.moveCommandSuggestion(1)
-		m.refreshViewport(true)
 		return m, nil
 	case m.commandSuggestionsVisible() && (key.Code == tea.KeyTab || keyString == "tab"):
 		m.input.SetValue(m.currentCommandSuggestion())
 		m.input.MoveToEnd()
 		m.syncCommandSuggestions()
-		m.refreshViewport(true)
 		return m, nil
 	case !hasCtrl && m.loginProvider == "" && (key.Code == tea.KeyUp || key.Code == tea.KeyKpUp || keyString == "up"):
 		if !m.editorAtFirstVisualLine() {
@@ -218,7 +214,6 @@ func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.historyPrevious()
 		m.syncCommandSuggestions()
-		m.refreshViewport(true)
 		return m, nil
 	case !hasCtrl && m.loginProvider == "" && (key.Code == tea.KeyDown || key.Code == tea.KeyKpDown || keyString == "down"):
 		if !m.editorAtLastVisualLine() {
@@ -226,17 +221,14 @@ func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		m.historyNext()
 		m.syncCommandSuggestions()
-		m.refreshViewport(true)
 		return m, nil
 	case keyIsCtrl(msg, 'p'):
 		m.historyPrevious()
 		m.syncCommandSuggestions()
-		m.refreshViewport(true)
 		return m, nil
 	case keyIsCtrl(msg, 'n'):
 		m.historyNext()
 		m.syncCommandSuggestions()
-		m.refreshViewport(true)
 		return m, nil
 	case keyString == "ctrl+u" || keyIsCtrl(msg, 'u'):
 		return m.updateEditor(editorCtrlKey('u'))
@@ -252,21 +244,6 @@ func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.updateEditor(editorCtrlKey('b'))
 	case keyString == "ctrl+f" || keyIsCtrl(msg, 'f'):
 		return m.updateEditor(editorCtrlKey('f'))
-	case key.Code == tea.KeyPgUp || key.Code == tea.KeyKpPgUp || keyString == "pgup":
-		m.viewport.PageUp()
-		return m, nil
-	case key.Code == tea.KeyPgDown || key.Code == tea.KeyKpPgDown || keyString == "pgdown":
-		m.viewport.PageDown()
-		return m, nil
-	case keyString == "ctrl+up" || hasCtrl && (key.Code == tea.KeyUp || key.Code == tea.KeyKpUp):
-		m.viewport.ScrollUp(1)
-		return m, nil
-	case keyString == "ctrl+down" || hasCtrl && (key.Code == tea.KeyDown || key.Code == tea.KeyKpDown):
-		m.viewport.ScrollDown(1)
-		return m, nil
-	case keyString == "ctrl+home" || hasCtrl && (key.Code == tea.KeyHome || key.Code == tea.KeyKpHome):
-		m.viewport.GotoTop()
-		return m, nil
 	case key.Code == tea.KeyEscape || key.Code == tea.KeyEsc || keyString == "esc":
 		if m.loginProvider != "" {
 			m.loginProvider = ""
@@ -275,25 +252,18 @@ func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.input.Placeholder = ""
 			m.configureCommandSuggestions()
 			m.addBlock(screenBlockSystem, "login cancelled")
-			m.refreshViewport(true)
+			m.refreshScreen()
 			return m, nil
 		}
 		if m.working {
 			m.cancelTurn()
 			m.restoreQueuedInput()
-			m.refreshViewport(true)
+			m.refreshScreen()
 			return m, nil
 		}
-		m.viewport.GotoBottom()
-		return m, nil
-	case keyString == "ctrl+end" || hasCtrl && (key.Code == tea.KeyEnd || key.Code == tea.KeyKpEnd):
-		m.viewport.GotoBottom()
 		return m, nil
 	}
 
-	if m.isViewportMsg(msg) {
-		return m.updateViewport(msg)
-	}
 	return m.updateEditor(msg)
 }
 
@@ -337,14 +307,14 @@ func (m cyTUIModel) submitInput() (tea.Model, tea.Cmd) {
 				}
 			}
 		}
-		m.refreshViewport(true)
+		m.refreshScreen()
 		return m, cmd
 	}
 	if m.working && strings.HasPrefix(strings.TrimSpace(input), "/") {
 		m.addBlock(screenBlockError, "commands are unavailable while Cy is working; wait for the turn to finish or cancel it")
 		m.input.SetValue(input)
 		m.input.CursorEnd()
-		m.refreshViewport(true)
+		m.refreshScreen()
 		return m, nil
 	}
 	m.input.Reset()
@@ -367,13 +337,14 @@ func (m cyTUIModel) submitInput() (tea.Model, tea.Cmd) {
 		} else {
 			m.addBlock(screenBlockSystem, "queued: "+preview(input, 120))
 		}
-		m.refreshViewport(true)
+		m.refreshScreen()
 		return m, nil
 	}
 	if handled, done, cmd := m.handleCommand(input); handled {
-		m.refreshViewport(true)
+		m.refreshScreen()
 		if done {
 			m.cancelTurn()
+			m.quitting = true
 			return m, tea.Quit
 		}
 		return m, cmd
@@ -381,7 +352,7 @@ func (m cyTUIModel) submitInput() (tea.Model, tea.Cmd) {
 
 	m.addBlock(screenBlockUser, input)
 	cmd := m.startTurn(input)
-	m.refreshViewport(true)
+	m.refreshScreen()
 	return m, cmd
 }
 

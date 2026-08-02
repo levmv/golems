@@ -24,6 +24,45 @@ func TestConsoleMarkdownTable(t *testing.T) {
 	}
 }
 
+func TestConsoleMarkdownTableFitsAndReflowsToWidth(t *testing.T) {
+	console := &Console{useStyle: false}
+	markdown := "| Name | Description |\n| --- | --- |\n| resize | a deliberately long table cell that must wrap inside the column |"
+
+	wide := console.RenderMarkdownLinesAtWidth(markdown, 80)
+	narrow := console.RenderMarkdownLinesAtWidth(markdown, 36)
+
+	if len(narrow) <= len(wide) {
+		t.Fatalf("narrow table lines = %d, wide = %d; want cell reflow", len(narrow), len(wide))
+	}
+	for _, line := range narrow {
+		if width := visibleLen(line); width > 36 {
+			t.Fatalf("narrow table line width = %d, want <= 36: %q", width, line)
+		}
+	}
+	if rendered := strings.Join(narrow, "\n"); !strings.Contains(rendered, "resize") || !strings.Contains(rendered, "inside") {
+		t.Fatalf("reflowed table lost content: %q", rendered)
+	}
+}
+
+func TestConsoleMarkdownTableShrinksColumnsBelowThreeWhenNeeded(t *testing.T) {
+	console := &Console{useStyle: false}
+	markdown := "| Description | X | Y |\n| --- | --- | --- |\n| abcdefghij | 1 | 2 |"
+
+	lines := console.RenderMarkdownLinesAtWidth(markdown, 17)
+
+	for _, line := range lines {
+		if width := visibleLen(line); width > 17 {
+			t.Fatalf("table line width = %d, want <= 17: %q", width, line)
+		}
+	}
+	rendered := strings.Join(lines, "\n")
+	for _, want := range []string{"abcde", "1", "2"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("narrow table lost %q: %q", want, rendered)
+		}
+	}
+}
+
 func TestConsoleStylesOnlyToolName(t *testing.T) {
 	console := &Console{useStyle: true}
 

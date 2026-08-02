@@ -19,19 +19,18 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 	case "/exit", "/quit", "/q":
 		return true, true, nil
 	case "/help":
-		m.addBlock(screenBlockInfo, "Type / to browse commands; use ↑/↓ to choose, Tab to complete, and Enter to run. Shift+Enter inserts a new line. While working: Enter queues input, Esc cancels and restores undelivered input, Ctrl+C cancels. Scroll: PgUp/PgDn, Ctrl+Up/Ctrl+Down, Ctrl+Home/Ctrl+End, or the mouse wheel. Drag transcript text to select and copy it.")
+		m.addBlock(screenBlockInfo, "Type / to browse commands; use ↑/↓ to choose, Tab to complete, and Enter to run. Shift+Enter inserts a new line. While working: Enter queues input, Esc cancels and restores undelivered input, Ctrl+C cancels. The transcript uses normal terminal scrollback: use the mouse wheel and terminal-native selection, copying, and context menu.")
 	case "/clear":
 		id, err := m.agent.ClearSession()
 		if err != nil {
 			m.addBlock(screenBlockError, "clear session: "+err.Error())
 			break
 		}
-		m.blocks = nil
-		m.transcriptSelection = transcriptSelection{}
+		m.resetTranscript()
 		m.addBlock(screenBlockSystem, "new session "+id)
 	case "/resume":
 		if len(fields) > 1 {
-			cmd = m.resumeSession(fields[1])
+			cmd = resumeSessionCmd(fields[1])
 			break
 		}
 		summaries, err := m.agent.ListSessions()
@@ -264,31 +263,26 @@ func (m cyTUIModel) handlePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Code == tea.KeyEscape || key.Code == tea.KeyEsc || msg.String() == "esc" || msg.String() == "ctrl+c":
 		m.closePicker()
-		m.refreshViewport(true)
 		return m, nil
 	case key.Code == tea.KeyUp || key.Code == tea.KeyKpUp || msg.String() == "up":
 		if m.picker.index > 0 {
 			m.picker.index--
 		}
-		m.refreshViewport(true)
 		return m, nil
 	case key.Code == tea.KeyDown || key.Code == tea.KeyKpDown || msg.String() == "down":
 		if m.picker.index+1 < len(m.picker.items) {
 			m.picker.index++
 		}
-		m.refreshViewport(true)
 		return m, nil
 	case m.picker.kind == pickerModel && (key.Code == tea.KeyLeft || key.Code == tea.KeyKpLeft || msg.String() == "left"):
 		m.cycleModelEffort(-1)
-		m.refreshViewport(true)
 		return m, nil
 	case m.picker.kind == pickerModel && (key.Code == tea.KeyRight || key.Code == tea.KeyKpRight || msg.String() == "right"):
 		m.cycleModelEffort(1)
-		m.refreshViewport(true)
 		return m, nil
 	case isEnterKey(msg):
 		cmd := m.selectPickerItem()
-		m.refreshViewport(true)
+		m.refreshScreen()
 		return m, cmd
 	}
 	return m, nil
@@ -300,7 +294,7 @@ func (m *cyTUIModel) selectPickerItem() tea.Cmd {
 	m.closePicker()
 	switch picker.kind {
 	case pickerSession:
-		return m.resumeSession(item.value)
+		return resumeSessionCmd(item.value)
 	case pickerModel:
 		if item.value == m.cfg.ModelURI && selectedModelEffort(item) == m.cfg.ReasoningEffort {
 			return nil
@@ -434,8 +428,7 @@ func (m *cyTUIModel) resumeSession(idOrPrefix string) tea.Cmd {
 	}
 	m.cfg.ModelURI = m.agent.CurrentModel()
 	m.cfg.ReasoningEffort = m.agent.CurrentReasoningEffort()
-	m.blocks = nil
-	m.transcriptSelection = transcriptSelection{}
+	m.continueTranscriptBelow()
 	m.addBlock(screenBlockSystem, "resumed session "+id)
 	m.appendHistoryBlocks()
 	if m.agent.SessionRepaired() {
@@ -443,4 +436,11 @@ func (m *cyTUIModel) resumeSession(idOrPrefix string) tea.Cmd {
 	}
 	m.refreshProcessResults()
 	return m.scheduleProcessPoll()
+}
+
+func resumeSessionCmd(idOrPrefix string) tea.Cmd {
+	// Resume on the next Bubble Tea message rather than inside submitInput. This
+	// gives the renderer one frame to erase the old picker/editor before
+	// continueTranscriptBelow releases the previous transcript to scrollback.
+	return func() tea.Msg { return resumeSessionMsg{idOrPrefix: idOrPrefix} }
 }

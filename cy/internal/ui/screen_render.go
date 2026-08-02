@@ -9,17 +9,20 @@ import (
 )
 
 func (m *cyTUIModel) renderTranscriptLines() []string {
+	lines, _ := m.renderTranscriptLinesFromDirty()
+	return lines
+}
+
+func (m *cyTUIModel) renderTranscriptLinesFromDirty() ([]string, int) {
 	styled := m.console != nil && m.console.useStyle
 	if m.renderCacheWidth != m.lineWidth() || m.renderCacheStyled != styled || len(m.renderCache) > len(m.blocks) {
 		m.renderCache = nil
 		m.renderCacheLines = nil
 		m.renderCacheWidth = m.lineWidth()
 		m.renderCacheStyled = styled
+		m.renderDirtyFrom = 0
 	}
-	common := 0
-	for common < len(m.renderCache) && common < len(m.blocks) && m.renderCache[common].block == m.blocks[common] {
-		common++
-	}
+	common := min(m.renderDirtyFrom, len(m.renderCache), len(m.blocks))
 	lineEnd := 0
 	if common > 0 {
 		lineEnd = m.renderCache[common-1].end
@@ -36,7 +39,8 @@ func (m *cyTUIModel) renderTranscriptLines() []string {
 		m.renderCacheLines = append(m.renderCacheLines, m.renderBlockLines(block, previous, havePrevious)...)
 		m.renderCache = append(m.renderCache, renderedScreenBlock{block: block, end: len(m.renderCacheLines)})
 	}
-	return m.renderCacheLines
+	m.renderDirtyFrom = len(m.blocks)
+	return m.renderCacheLines, lineEnd
 }
 
 func (m cyTUIModel) renderPicker() []string {
@@ -246,7 +250,6 @@ func (m cyTUIModel) renderUserBlock(text string) []string {
 	}
 	return append(lines, blank)
 }
-
 func (m cyTUIModel) contentWidth() int {
 	width := m.lineWidth() - transcriptGutter
 	if width < 1 {
@@ -272,7 +275,7 @@ func (m cyTUIModel) userBackgroundLine(text string, width int) string {
 func (m cyTUIModel) renderAssistantBlock(text string) []string {
 	lines := []string{m.rawMarkedLine(" ", "")}
 	marked := false
-	for _, line := range m.console.RenderMarkdownLines(text) {
+	for _, line := range m.console.RenderMarkdownLinesAtWidth(text, m.contentWidth()) {
 		marker := " "
 		if !marked && strings.TrimSpace(line) != "" {
 			marker = "•"

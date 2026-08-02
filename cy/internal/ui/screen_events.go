@@ -10,7 +10,22 @@ import (
 )
 
 func (m *cyTUIModel) addBlock(kind screenBlockKind, text string) {
-	m.blocks = append(m.blocks, screenBlock{kind: kind, text: sanitizeTerminalText(text)})
+	m.appendBlock(screenBlock{kind: kind, text: sanitizeTerminalText(text)})
+}
+
+func (m *cyTUIModel) appendBlock(block screenBlock) {
+	m.markBlockDirty(len(m.blocks))
+	m.blocks = append(m.blocks, block)
+}
+
+func (m *cyTUIModel) markBlockDirty(index int) {
+	// renderDirtyFrom is monotonic toward the earliest mutation until the next
+	// render. Every in-place screenBlock mutation must call this first; otherwise
+	// the block cache can preserve stale terminal lines indefinitely.
+	index = max(0, index)
+	if index < m.renderDirtyFrom {
+		m.renderDirtyFrom = index
+	}
 }
 
 func (m *cyTUIModel) addToolCallBlock(step golem.Step) {
@@ -18,13 +33,14 @@ func (m *cyTUIModel) addToolCallBlock(step golem.Step) {
 	if display.GroupKey != "" && len(m.blocks) > 0 {
 		last := &m.blocks[len(m.blocks)-1]
 		if last.kind == screenBlockTool && last.toolGroupKey == display.GroupKey {
+			m.markBlockDirty(len(m.blocks) - 1)
 			items := append(splitCompactToolItems(last.toolGroupItems), display.GroupItem)
 			last.toolGroupItems = strings.Join(items, compactToolItemSeparator)
 			last.text = sanitizeTerminalText(formatReadGroup(display.GroupDir, items))
 			return
 		}
 	}
-	m.blocks = append(m.blocks, screenBlock{
+	m.appendBlock(screenBlock{
 		kind:          screenBlockTool,
 		text:          sanitizeTerminalText(display.Text),
 		toolName:      step.ToolName,
@@ -41,12 +57,13 @@ func (m *cyTUIModel) applyFileChangeResult(toolCallID string, change fileChangeM
 	for index := len(m.blocks) - 1; index >= 0; index-- {
 		block := &m.blocks[index]
 		if block.kind == screenBlockTool && toolCallID != "" && block.toolCallID == toolCallID {
+			m.markBlockDirty(index)
 			block.text = sanitizeTerminalText(text)
 			block.fileChange = &change
 			return
 		}
 	}
-	m.blocks = append(m.blocks, screenBlock{
+	m.appendBlock(screenBlock{
 		kind:       screenBlockTool,
 		text:       sanitizeTerminalText(text),
 		toolCallID: toolCallID,
@@ -58,6 +75,7 @@ func (m *cyTUIModel) applyProcessResult(toolCallID string, result processResultM
 	for index := len(m.blocks) - 1; index >= 0; index-- {
 		block := &m.blocks[index]
 		if block.kind == screenBlockTool && toolCallID != "" && block.toolCallID == toolCallID {
+			m.markBlockDirty(index)
 			block.processResult = &result
 			return
 		}
@@ -66,7 +84,7 @@ func (m *cyTUIModel) applyProcessResult(toolCallID string, result processResultM
 	if result.JobID == "" {
 		text = "process"
 	}
-	m.blocks = append(m.blocks, screenBlock{
+	m.appendBlock(screenBlock{
 		kind:          screenBlockTool,
 		text:          sanitizeTerminalText(text),
 		toolCallID:    toolCallID,
@@ -83,6 +101,7 @@ func (m *cyTUIModel) updatePendingToolDurations(now time.Time) bool {
 		}
 		elapsed := max(int64(0), now.Sub(block.toolStartedAt).Milliseconds())
 		if block.toolElapsedMillis != elapsed {
+			m.markBlockDirty(index)
 			block.toolElapsedMillis = elapsed
 			changed = true
 		}
@@ -111,20 +130,61 @@ func (m *cyTUIModel) failPendingProcess(step golem.Step) {
 }
 
 func (m *cyTUIModel) refreshProcessResults() {
-	for index := range m.blocks {
+	blockCount := len(m.blocks)
+	for index := range blockCount {
 		block := &m.blocks[index]
-		if block.processResult == nil || !processRunning(block.processResult.Status) || block.processResult.JobID == "" {
+		if block.processResult == nil ||
+			block.processSuperseded ||
+			!processRunning(block.processResult.Status) ||
+			block.processResult.JobID == "" {
 			continue
 		}
-		if latest, found := m.agent.ProcessStatus(block.processResult.JobID); found {
-			block.processResult = &latest
+		latest, found := m.agent.ProcessStatus(block.processResult.JobID)
+		if !found {
+			continue
 		}
+		if !m.blockAboveViewport(index) {
+			if *block.processResult != latest {
+				m.markBlockDirty(index)
+				block.processResult = &latest
+			}
+			continue
+		}
+		if processRunning(latest.Status) {
+			// Native scrollback cannot be edited. Freeze elapsed time once
+			// the running row has left the visible terminal instead of
+			// purging scrollback on every process poll.
+			continue
+		}
+
+		block.processSuperseded = true
+		if m.processCompletionRepresented(latest.JobID) {
+			continue
+		}
+		completion := screenBlock{
+			kind:          screenBlockTool,
+			text:          block.text,
+			toolName:      block.toolName,
+			toolCallID:    block.toolCallID,
+			processResult: &latest,
+		}
+		m.appendBlock(completion)
 	}
+}
+
+func (m *cyTUIModel) blockAboveViewport(index int) bool {
+	// renderCache endpoints and renderer viewport coordinates refer to the same
+	// logical transcript rows. A block ending at viewportTop is fully immutable
+	// terminal scrollback and must no longer be updated in place.
+	if m.renderer == nil || index < 0 || index >= len(m.renderCache) {
+		return false
+	}
+	return m.renderCache[index].end <= m.renderer.previousViewportTop
 }
 
 func (m *cyTUIModel) hasRunningProcesses() bool {
 	for _, block := range m.blocks {
-		if block.processResult != nil && processRunning(block.processResult.Status) {
+		if block.processResult != nil && !block.processSuperseded && processRunning(block.processResult.Status) {
 			return true
 		}
 	}
@@ -179,8 +239,9 @@ func (m *cyTUIModel) appendAssistant(delta string) {
 		return
 	}
 	if len(m.blocks) == 0 || m.blocks[len(m.blocks)-1].kind != screenBlockAssistant {
-		m.blocks = append(m.blocks, screenBlock{kind: screenBlockAssistant})
+		m.appendBlock(screenBlock{kind: screenBlockAssistant})
 	}
+	m.markBlockDirty(len(m.blocks) - 1)
 	m.blocks[len(m.blocks)-1].text += delta
 }
 
@@ -224,11 +285,12 @@ func (m *cyTUIModel) applyStreamEvent(ev golem.StreamEvent) {
 		if ev.RetryKey != "" && len(m.blocks) > 0 {
 			last := &m.blocks[len(m.blocks)-1]
 			if last.kind == screenBlockError && last.retryKey == ev.RetryKey {
+				m.markBlockDirty(len(m.blocks) - 1)
 				last.text = text
 				break
 			}
 		}
-		m.blocks = append(m.blocks, screenBlock{kind: screenBlockError, text: text, retryKey: ev.RetryKey})
+		m.appendBlock(screenBlock{kind: screenBlockError, text: text, retryKey: ev.RetryKey})
 	case golem.EventStatus:
 		if !m.processCompletionAlreadyVisible(ev.Text) {
 			m.addBlock(screenBlockSystem, ev.Text)
@@ -238,6 +300,7 @@ func (m *cyTUIModel) applyStreamEvent(ev golem.StreamEvent) {
 			break
 		}
 		if len(m.blocks) > 0 && m.blocks[len(m.blocks)-1].kind == screenBlockAssistant {
+			m.markBlockDirty(len(m.blocks) - 1)
 			m.blocks = m.blocks[:len(m.blocks)-1]
 		}
 		m.addBlock(screenBlockSystem, "discarded partial model attempt")
@@ -252,17 +315,31 @@ func (m *cyTUIModel) finishTurnChanges() {
 }
 
 func (m *cyTUIModel) processCompletionAlreadyVisible(text string) bool {
-	fields := strings.Fields(text)
-	if len(fields) < 4 || fields[0] != "Background" || fields[1] != "job" || fields[3] != "completed:" {
+	jobID := backgroundCompletionJobID(text)
+	if jobID == "" {
 		return false
 	}
-	jobID := fields[2]
+	return m.processCompletionRepresented(jobID)
+}
+
+func (m *cyTUIModel) processCompletionRepresented(jobID string) bool {
 	for _, block := range m.blocks {
 		if block.processResult != nil && block.processResult.JobID == jobID && !processRunning(block.processResult.Status) {
 			return true
 		}
+		if block.kind == screenBlockSystem && backgroundCompletionJobID(block.text) == jobID {
+			return true
+		}
 	}
 	return false
+}
+
+func backgroundCompletionJobID(text string) string {
+	fields := strings.Fields(text)
+	if len(fields) < 4 || fields[0] != "Background" || fields[1] != "job" || fields[3] != "completed:" {
+		return ""
+	}
+	return fields[2]
 }
 
 func (m *cyTUIModel) cancelTurn() {

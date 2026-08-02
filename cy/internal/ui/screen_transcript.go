@@ -3,7 +3,6 @@ package ui
 import (
 	"strings"
 
-	tea "charm.land/bubbletea/v2"
 	"github.com/levmv/golems/pkg/golem"
 	"github.com/levmv/golems/pkg/llm"
 )
@@ -63,52 +62,12 @@ func (m *cyTUIModel) historyNext() {
 	m.input.CursorEnd()
 }
 
-func (m *cyTUIModel) isViewportMsg(msg tea.Msg) bool {
-	switch msg := msg.(type) {
-	case tea.KeyPressMsg:
-		switch msg.String() {
-		case "pgup", "pgdown", "ctrl+up", "ctrl+down", "ctrl+home", "ctrl+end":
-			return true
-		}
-	case tea.MouseWheelMsg:
-		return true
-	}
-	return false
-}
-
-func (m cyTUIModel) updateViewport(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	m.viewport, cmd = m.viewport.Update(msg)
-	return m, cmd
-}
-
 func (m *cyTUIModel) resize(width, height int) {
 	m.width = width
 	m.height = height
-	lineWidth := m.lineWidth()
-	m.viewport.SetWidth(lineWidth)
 	m.input.MaxHeight = min(composerMaxRows, max(1, height-screenFixedRows-1))
 	m.input.SetWidth(m.contentWidth())
 	m.secret.SetWidth(m.contentWidth())
-	m.syncViewportHeight()
-}
-
-func (m *cyTUIModel) syncViewportHeight() {
-	if m.height <= 0 {
-		return
-	}
-	contentHeight := m.height - screenFixedRows - m.composerHeight()
-	if contentHeight < 1 {
-		contentHeight = 1
-	}
-	m.viewport.SetHeight(contentHeight)
-}
-
-func (m cyTUIModel) composerHeight() int {
-	if m.picker.active() {
-		return len(m.renderPicker())
-	}
-	return m.editorHeight() + len(m.renderCommandSuggestions())
 }
 
 func (m cyTUIModel) lineWidth() int {
@@ -123,15 +82,46 @@ func (m cyTUIModel) lineWidth() int {
 	return lineWidth
 }
 
-func (m *cyTUIModel) refreshViewport(follow bool) {
+func (m *cyTUIModel) refreshScreen() {
+	// There are two suffix caches by design: renderCache maps source blocks to
+	// transcript lines, while transcriptDirtyFrom tells inlineRenderer which
+	// normalized terminal rows may have changed. Preserving both prefixes keeps
+	// editor and streaming updates independent of total session length.
 	m.renderPending = false
-	m.syncViewportHeight()
-	lines := m.renderTranscriptLines()
-	if padding := m.viewport.Height() - len(lines); padding > 0 {
-		lines = append(make([]string, padding), lines...)
+	lines, dirtyFrom := m.renderTranscriptLinesFromDirty()
+	if dirtyFrom == len(m.transcriptLines) && len(lines) == len(m.transcriptLines) {
+		return
 	}
-	m.viewport.SetContentLines(lines)
-	if follow || m.viewport.PastBottom() {
-		m.viewport.GotoBottom()
+	dirtyFrom = min(dirtyFrom, len(m.transcriptLines), len(lines))
+	m.transcriptLines = append(m.transcriptLines[:dirtyFrom], lines[dirtyFrom:]...)
+	if !m.transcriptDirty || dirtyFrom < m.transcriptDirtyFrom {
+		m.transcriptDirtyFrom = dirtyFrom
 	}
+	m.transcriptDirty = true
+}
+
+func (m *cyTUIModel) resetTranscript() {
+	// /clear is explicitly destructive: invalidate first so the next frame
+	// removes both the visible screen and terminal scrollback.
+	m.renderer.Invalidate()
+	m.clearTranscript()
+}
+
+func (m *cyTUIModel) continueTranscriptBelow() {
+	// /resume differs from /clear. The completed transcript becomes unmanaged
+	// native scrollback, only its interactive suffix is erased, and the resumed
+	// session starts as a new source-backed frame below it. A later resize can
+	// rebuild only this new managed frame.
+	m.renderer.AppendFrameAfter(len(m.transcriptLines))
+	m.clearTranscript()
+}
+
+func (m *cyTUIModel) clearTranscript() {
+	m.blocks = nil
+	m.transcriptLines = nil
+	m.renderCache = nil
+	m.renderCacheLines = nil
+	m.renderDirtyFrom = 0
+	m.transcriptDirty = true
+	m.transcriptDirtyFrom = 0
 }

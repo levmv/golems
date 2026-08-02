@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -10,7 +9,6 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/levmv/golems/cy/internal/engine"
 	"github.com/levmv/golems/cy/internal/session"
@@ -18,19 +16,41 @@ import (
 	"github.com/levmv/golems/pkg/llm"
 )
 
-func TestTUIRefreshViewportFollowsBottom(t *testing.T) {
-	model := cyTUIModel{
-		console:  &Console{useStyle: false},
-		viewport: viewport.New(viewport.WithWidth(40), viewport.WithHeight(3)),
-	}
-	for i := 0; i < 10; i++ {
-		model.blocks = append(model.blocks, screenBlock{kind: screenBlockSystem, text: "line"})
-	}
+func (m cyTUIModel) frameView() tea.View {
+	frame := m.inlineFrame()
+	parts := append([]string(nil), frame.transcript...)
+	parts = append(parts, frame.dynamic...)
+	view := tea.NewView(strings.Join(parts, "\n"))
+	view.Cursor = frame.cursor
+	return view
+}
 
-	model.refreshViewport(true)
+func TestTUIKeepsFullSourceBackedTranscript(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.resize(40, 6)
+	model.blocks = nil
+	for i := 0; i < 6; i++ {
+		model.addBlock(screenBlockSystem, fmt.Sprintf("line %d", i))
+	}
+	model.refreshScreen()
 
-	if !model.viewport.AtBottom() {
-		t.Fatalf("viewport is not at bottom after follow refresh; offset=%d", model.viewport.YOffset())
+	visible := strings.Join(model.transcriptLines, "\n")
+	if !strings.Contains(visible, "line 0") || !strings.Contains(visible, "line 5") {
+		t.Fatalf("source-backed transcript = %q, want all lines", visible)
+	}
+}
+
+func TestTUIViewDoesNotMaterializeTranscript(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.resize(80, 24)
+	model.addBlock(screenBlockAssistant, "large transcript sentinel")
+	model.refreshScreen()
+
+	if view := model.View(); view.Content != "" || view.Cursor != nil {
+		t.Fatalf("Bubble Tea view materialized the custom-rendered frame: %#v", view)
+	}
+	if rendered := model.frameView().Content; !strings.Contains(rendered, "large transcript sentinel") {
+		t.Fatalf("explicit frame view missed transcript: %q", rendered)
 	}
 }
 
@@ -38,39 +58,54 @@ func TestTUITextDeltasRenderAtFrameBoundary(t *testing.T) {
 	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
 	model.resize(40, 12)
 	model.blocks = []screenBlock{{kind: screenBlockAssistant, text: "before"}}
-	model.refreshViewport(true)
+	model.refreshScreen()
 
 	updated, _ := model.Update(agentStreamMsg{event: golem.StreamEvent{Kind: golem.EventTextDelta, Text: " after"}})
 	got := updated.(cyTUIModel)
 	if !got.renderPending {
 		t.Fatal("text delta did not schedule a transcript frame")
 	}
-	if strings.Contains(got.viewport.GetContent(), "before after") {
-		t.Fatal("text delta rebuilt the viewport before the frame boundary")
+	if strings.Contains(strings.Join(got.transcriptLines, "\n"), "before after") {
+		t.Fatal("text delta rebuilt the live transcript before the frame boundary")
 	}
 
 	updated, _ = got.Update(transcriptRenderMsg{})
 	got = updated.(cyTUIModel)
-	if got.renderPending || !strings.Contains(got.viewport.GetContent(), "before after") {
-		t.Fatalf("frame did not flush text delta: pending=%v content=%q", got.renderPending, got.viewport.GetContent())
+	if got.renderPending || !strings.Contains(strings.Join(got.transcriptLines, "\n"), "before after") {
+		t.Fatalf("frame did not flush text delta: pending=%v content=%q", got.renderPending, got.transcriptLines)
+	}
+}
+
+func TestTUIRefreshTracksDirtyTranscriptSuffix(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.resize(80, 24)
+	model.clearTranscript()
+	model.addBlock(screenBlockSystem, "stable prefix")
+	model.addBlock(screenBlockAssistant, "old tail")
+	model.refreshScreen()
+	prefixLines := model.renderCache[0].end
+	model.transcriptDirty = false
+
+	model.markBlockDirty(1)
+	model.blocks[1].text = "new tail"
+	model.refreshScreen()
+
+	if !model.transcriptDirty || model.transcriptDirtyFrom != prefixLines {
+		t.Fatalf("dirty transcript starts at line %d (changed=%v), want %d", model.transcriptDirtyFrom, model.transcriptDirty, prefixLines)
+	}
+	if got := strings.Join(model.transcriptLines, "\n"); !strings.Contains(got, "stable prefix") || !strings.Contains(got, "new tail") || strings.Contains(got, "old tail") {
+		t.Fatalf("updated transcript = %q", got)
 	}
 }
 
 func TestTUILongInputWrapsAndGrowsComposer(t *testing.T) {
 	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
 	model.resize(24, 14)
-	initialViewportHeight := model.viewport.Height()
 	model.input.SetValue(strings.Repeat("long message ", 8))
-	model.refreshViewport(true)
+	model.refreshScreen()
 
 	if model.input.Height() <= 1 {
 		t.Fatalf("composer height = %d, want wrapped multi-line input", model.input.Height())
-	}
-	if got, want := model.viewport.Height(), model.height-screenFixedRows-model.input.Height(); got != want {
-		t.Fatalf("viewport height = %d, want %d", got, want)
-	}
-	if model.viewport.Height() >= initialViewportHeight {
-		t.Fatalf("viewport did not make room for composer: before=%d after=%d", initialViewportHeight, model.viewport.Height())
 	}
 	for _, line := range strings.Split(model.input.View(), "\n") {
 		if visibleLen(line) > model.lineWidth() {
@@ -79,11 +114,21 @@ func TestTUILongInputWrapsAndGrowsComposer(t *testing.T) {
 	}
 }
 
-func TestTUIViewEnablesMouseWheelEvents(t *testing.T) {
+func TestTUIWidthChangeReflowsManagedMarkdown(t *testing.T) {
 	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.blocks = []screenBlock{{
+		kind: screenBlockAssistant,
+		text: "| Name | Description |\n| --- | --- |\n| resize | a deliberately long table cell that must be laid out again |",
+	}}
 	model.resize(80, 24)
-	if mode := model.View().MouseMode; mode != tea.MouseModeCellMotion {
-		t.Fatalf("mouse mode = %v, want wheel event capture", mode)
+	model.refreshScreen()
+	wide := strings.Join(model.transcriptLines, "\n")
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 36, Height: 24})
+	got := updated.(cyTUIModel)
+	narrow := strings.Join(got.transcriptLines, "\n")
+	if narrow == wide || len(strings.Split(narrow, "\n")) <= len(strings.Split(wide, "\n")) {
+		t.Fatalf("markdown was not re-rendered for the new width:\nwide:\n%s\n\nnarrow:\n%s", wide, narrow)
 	}
 }
 
@@ -93,12 +138,12 @@ func TestTUIWorkingIndicatorUsesRowAboveEditor(t *testing.T) {
 	model.working = true
 	model.turnStartedAt = time.Now().Add(-3 * time.Second)
 	model.input.SetValue("draft")
-	model.refreshViewport(true)
+	model.refreshScreen()
 
-	lines := strings.Split(model.View().Content, "\n")
-	workingRow := model.viewport.Height()
+	lines := strings.Split(model.frameView().Content, "\n")
+	workingRow := len(model.transcriptLines)
 	if workingRow+1 >= len(lines) {
-		t.Fatalf("view has %d lines, want working and editor rows after viewport height %d", len(lines), workingRow)
+		t.Fatalf("view has %d lines, want working and editor rows after transcript row %d", len(lines), workingRow)
 	}
 	if !strings.Contains(lines[workingRow], "Working (3s • esc to interrupt)") {
 		t.Fatalf("row above editor = %q, want working indicator", lines[workingRow])
@@ -117,128 +162,6 @@ func TestTUIShowsJournalRepairNotice(t *testing.T) {
 	transcript := strings.Join(model.renderTranscriptLines(), "\n")
 	if !strings.Contains(transcript, "repaired an incomplete session journal tail") {
 		t.Fatalf("transcript missed journal repair notice: %q", transcript)
-	}
-}
-
-func TestTUIMouseWheelScrollsTranscriptInsteadOfInputHistory(t *testing.T) {
-	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
-	model.viewport = viewport.New(viewport.WithWidth(40), viewport.WithHeight(2))
-	model.viewport.MouseWheelEnabled = true
-	model.viewport.SetContentLines([]string{"one", "two", "three", "four"})
-	model.viewport.GotoBottom()
-	model.history = []string{"history"}
-	model.historyIndex = len(model.history)
-
-	updated, _ := model.Update(tea.MouseWheelMsg{Button: tea.MouseWheelUp})
-	got := updated.(cyTUIModel)
-	if got.input.Value() != "" || got.historyIndex != len(got.history) {
-		t.Fatalf("wheel changed input history: value=%q index=%d", got.input.Value(), got.historyIndex)
-	}
-	if got.viewport.AtBottom() {
-		t.Fatalf("wheel did not scroll transcript; offset=%d", got.viewport.YOffset())
-	}
-}
-
-func TestTUINonWheelMouseEventsPreserveTranscriptScroll(t *testing.T) {
-	events := []struct {
-		name string
-		msg  tea.Msg
-	}{
-		{name: "motion", msg: tea.MouseMotionMsg{X: 2, Y: 1}},
-		{name: "click", msg: tea.MouseClickMsg{X: 2, Y: 1, Button: tea.MouseLeft}},
-		{name: "release", msg: tea.MouseReleaseMsg{X: 2, Y: 1, Button: tea.MouseLeft}},
-	}
-
-	for _, event := range events {
-		t.Run(event.name, func(t *testing.T) {
-			model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
-			model.viewport = viewport.New(viewport.WithWidth(40), viewport.WithHeight(2))
-			model.viewport.SetContentLines([]string{"one", "two", "three", "four"})
-			model.viewport.GotoBottom()
-			model.viewport.ScrollUp(1)
-			before := model.viewport.YOffset()
-
-			updated, cmd := model.Update(event.msg)
-			got := updated.(cyTUIModel)
-			if cmd != nil {
-				t.Fatalf("mouse event returned command: %v", cmd)
-			}
-			if got.viewport.YOffset() != before {
-				t.Fatalf("viewport offset = %d, want %d", got.viewport.YOffset(), before)
-			}
-		})
-	}
-}
-
-func TestTUIMouseDragSelectsAndCopiesTranscript(t *testing.T) {
-	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
-	model.viewport = viewport.New(viewport.WithWidth(20), viewport.WithHeight(2))
-	model.viewport.SetContentLines([]string{"\x1b[36mhello\x1b[0m world", "second line"})
-
-	updated, _ := model.Update(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
-	got := updated.(cyTUIModel)
-	updated, _ = got.Update(tea.MouseMotionMsg{X: 5, Y: 0, Button: tea.MouseLeft})
-	got = updated.(cyTUIModel)
-	if selected := got.selectedTranscriptText(); selected != "hello" {
-		t.Fatalf("selected text while dragging = %q, want hello", selected)
-	}
-	if rendered := got.transcriptViewportView(); strings.Contains(rendered, "\x1b[7m") || strings.Contains(rendered, ";7m") ||
-		!strings.Contains(rendered, "\x1b[97;44m") && !strings.Contains(rendered, ";44m") {
-		t.Fatalf("drag selection does not use the configured selection colors: %q", rendered)
-	}
-
-	updated, cmd := got.Update(tea.MouseReleaseMsg{X: 5, Y: 0, Button: tea.MouseLeft})
-	got = updated.(cyTUIModel)
-	if cmd == nil {
-		t.Fatal("mouse release did not copy selected text")
-	}
-	if copied := fmt.Sprint(cmd()); copied != "hello" {
-		t.Fatalf("clipboard content = %q, want hello", copied)
-	}
-	if got.transcriptSelection.dragging || !got.transcriptSelection.hasRange() {
-		t.Fatalf("selection after release = %#v", got.transcriptSelection)
-	}
-}
-
-func TestTUIClipboardMessagePreservesTranscriptScroll(t *testing.T) {
-	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
-	model.resize(40, 8)
-	model.blocks = nil
-	for i := 0; i < 10; i++ {
-		model.addBlock(screenBlockSystem, fmt.Sprintf("line %d", i))
-	}
-	model.refreshViewport(true)
-	model.viewport.ScrollUp(1)
-	before := model.viewport.YOffset()
-
-	updated, _ := model.Update(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
-	updated, _ = updated.(cyTUIModel).Update(tea.MouseMotionMsg{X: 3, Y: 0, Button: tea.MouseLeft})
-	updated, cmd := updated.(cyTUIModel).Update(tea.MouseReleaseMsg{X: 3, Y: 0, Button: tea.MouseLeft})
-	if cmd == nil {
-		t.Fatal("mouse release did not return clipboard command")
-	}
-	updated, _ = updated.(cyTUIModel).Update(cmd())
-	got := updated.(cyTUIModel)
-	if got.viewport.YOffset() != before {
-		t.Fatalf("clipboard message changed viewport offset from %d to %d", before, got.viewport.YOffset())
-	}
-}
-
-func TestTUIMouseSelectionUsesScrolledTranscriptCoordinates(t *testing.T) {
-	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
-	model.viewport = viewport.New(viewport.WithWidth(20), viewport.WithHeight(2))
-	model.viewport.SetContentLines([]string{"first", "second", "third"})
-	model.viewport.GotoBottom()
-	before := model.viewport.YOffset()
-
-	updated, _ := model.Update(tea.MouseClickMsg{X: 0, Y: 0, Button: tea.MouseLeft})
-	updated, _ = updated.(cyTUIModel).Update(tea.MouseMotionMsg{X: 3, Y: 1, Button: tea.MouseLeft})
-	got := updated.(cyTUIModel)
-	if selected := got.selectedTranscriptText(); selected != "second\nthi" {
-		t.Fatalf("selected scrolled text = %q", selected)
-	}
-	if got.viewport.YOffset() != before {
-		t.Fatalf("selection changed viewport offset from %d to %d", before, got.viewport.YOffset())
 	}
 }
 
@@ -294,8 +217,8 @@ func TestTUISlashShowsAndNavigatesCommandSuggestions(t *testing.T) {
 	if transcript := strings.Join(got.renderTranscriptLines(), "\n"); strings.Contains(transcript, "/help") {
 		t.Fatalf("command suggestions leaked into transcript: %q", transcript)
 	}
-	lines := strings.Split(got.View().Content, "\n")
-	gapRow := got.viewport.Height()
+	lines := strings.Split(got.frameView().Content, "\n")
+	gapRow := len(got.transcriptLines)
 	inputRow := gapRow + 1
 	menuRow := inputRow + got.input.Height()
 	if gapRow >= len(lines) || strings.TrimSpace(lines[gapRow]) != "" {
@@ -339,13 +262,13 @@ func TestTUIResumePickerReplacesComposerWithoutHeader(t *testing.T) {
 		{value: "first-session", label: "Investigate flaky tests", description: "4m ago"},
 		{value: "second-session", label: "Refactor tool runner", description: "1h ago"},
 	}}
-	model.refreshViewport(true)
+	model.refreshScreen()
 
 	transcript := strings.Join(model.renderTranscriptLines(), "\n")
 	if strings.Contains(transcript, "Investigate flaky tests") || strings.Contains(transcript, "Refactor tool runner") {
 		t.Fatalf("resume picker leaked into transcript: %q", transcript)
 	}
-	view := model.View()
+	view := model.frameView()
 	if view.Cursor != nil {
 		t.Fatal("resume picker left the editor cursor visible")
 	}
@@ -413,7 +336,7 @@ func TestTUIMissingCredentialOpensProviderPicker(t *testing.T) {
 		t.Fatalf("selected login provider = %#v, want deepseek", item)
 	}
 	model.resize(80, 24)
-	view := model.View()
+	view := model.frameView()
 	if strings.Contains(view.Content, "Choose login provider") || strings.Contains(view.Content, "select a provider") {
 		t.Fatalf("login picker kept redundant hints: %q", view.Content)
 	}
@@ -421,7 +344,7 @@ func TestTUIMissingCredentialOpensProviderPicker(t *testing.T) {
 		t.Fatalf("login picker kept input cursor: %#v", view.Cursor)
 	}
 	lines := strings.Split(view.Content, "\n")
-	if pickerRow := model.viewport.Height() + 1; pickerRow >= len(lines) || !strings.Contains(lines[pickerRow], "deepseek") {
+	if pickerRow := len(model.transcriptLines) + 1; pickerRow >= len(lines) || !strings.Contains(lines[pickerRow], "deepseek") {
 		t.Fatalf("login picker did not replace editor at row %d: %q", pickerRow, lines)
 	}
 
@@ -552,7 +475,7 @@ func TestTUIModelCommandOpensPickerAndSwitchesSelection(t *testing.T) {
 	if transcript := strings.Join(got.renderTranscriptLines(), "\n"); strings.Contains(transcript, "openrouter/~moonshotai/kimi-latest") {
 		t.Fatalf("model picker leaked into transcript: %q", transcript)
 	}
-	view := got.View()
+	view := got.frameView()
 	rendered := view.Content
 	if !strings.Contains(rendered, "openrouter/~moonshotai/kimi-latest  current") {
 		t.Fatalf("model picker missed current marker: %q", rendered)
@@ -564,7 +487,7 @@ func TestTUIModelCommandOpensPickerAndSwitchesSelection(t *testing.T) {
 		t.Fatalf("model picker kept input cursor: %#v", view.Cursor)
 	}
 	lines := strings.Split(rendered, "\n")
-	if pickerRow := got.viewport.Height() + 1; pickerRow >= len(lines) || !strings.Contains(lines[pickerRow], "deepseek/deepseek-v4-flash") {
+	if pickerRow := len(got.transcriptLines) + 1; pickerRow >= len(lines) || !strings.Contains(lines[pickerRow], "deepseek/deepseek-v4-flash") {
 		t.Fatalf("model picker did not replace editor at row %d: %q", pickerRow, lines)
 	}
 
@@ -597,13 +520,13 @@ func TestTUIModelPickerCyclesReasoningEffort(t *testing.T) {
 
 	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := updated.(cyTUIModel)
-	if rendered := got.View().Content; !strings.Contains(rendered, "effort: default") {
+	if rendered := got.frameView().Content; !strings.Contains(rendered, "effort: default") {
 		t.Fatalf("model picker missed default effort: %q", rendered)
 	}
 
 	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyRight})
 	got = updated.(cyTUIModel)
-	if rendered := got.View().Content; !strings.Contains(rendered, "effort: high") || !strings.Contains(rendered, uri+"  current") {
+	if rendered := got.frameView().Content; !strings.Contains(rendered, "effort: high") || !strings.Contains(rendered, uri+"  current") {
 		t.Fatalf("model picker did not cycle effort while retaining current model: %q", rendered)
 	}
 	updated, cmd := got.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -664,7 +587,7 @@ func TestTUIProfileCommandOpensPickerAndSwitchesSelection(t *testing.T) {
 		t.Fatalf("profile picker leaked into transcript: %q", transcript)
 	}
 	got.console.useStyle = false
-	view := got.View()
+	view := got.frameView()
 	if !strings.Contains(view.Content, "› edit  current  read, write, and available web · no Bash") {
 		t.Fatalf("profile picker missed selected current profile: %q", view.Content)
 	}
@@ -672,7 +595,7 @@ func TestTUIProfileCommandOpensPickerAndSwitchesSelection(t *testing.T) {
 		t.Fatalf("profile picker kept input cursor: %#v", view.Cursor)
 	}
 	lines := strings.Split(view.Content, "\n")
-	if pickerRow := got.viewport.Height() + 1; pickerRow >= len(lines) || !strings.Contains(lines[pickerRow], "read-only  read, search, and available web · no writes") {
+	if pickerRow := len(got.transcriptLines) + 1; pickerRow >= len(lines) || !strings.Contains(lines[pickerRow], "read-only  read, search, and available web · no writes") {
 		t.Fatalf("profile picker did not replace editor at row %d: %q", pickerRow, lines)
 	}
 
@@ -709,24 +632,6 @@ func TestTUIHotkeysFallbackToRussianLayout(t *testing.T) {
 	got := updated.(cyTUIModel).input.Value()
 	if got != "second" {
 		t.Fatalf("input value = %q, want second", got)
-	}
-}
-
-func TestTUICtrlDownScrollsViewportInsteadOfHistory(t *testing.T) {
-	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
-	model.viewport = viewport.New(viewport.WithWidth(40), viewport.WithHeight(2))
-	model.viewport.SetContentLines([]string{"one", "two", "three", "four"})
-	model.history = []string{"history"}
-	model.historyIndex = 0
-	model.input.SetValue("draft")
-
-	updated, _ := model.Update(tea.KeyPressMsg{Mod: tea.ModCtrl, Code: tea.KeyDown})
-	got := updated.(cyTUIModel)
-	if got.input.Value() != "draft" {
-		t.Fatalf("input value = %q, want draft", got.input.Value())
-	}
-	if got.viewport.YOffset() == 0 {
-		t.Fatalf("viewport offset = %d, want scrolled", got.viewport.YOffset())
 	}
 }
 
@@ -1032,6 +937,20 @@ type repairedScreenAgent struct{ screenAgentStub }
 
 func (repairedScreenAgent) SessionRepaired() bool { return true }
 
+type resumeScreenAgent struct {
+	screenAgentStub
+	resumed string
+}
+
+func (a *resumeScreenAgent) ResumeSession(idOrPrefix string) (string, error) {
+	a.resumed = idOrPrefix
+	return "resolved-session", nil
+}
+
+func (a *resumeScreenAgent) SessionHistory() ([]llm.Message, error) {
+	return []llm.Message{{Role: llm.RoleUser, Content: "hey"}}, nil
+}
+
 type queueScreenAgent struct {
 	screenAgentStub
 	queued []string
@@ -1195,42 +1114,47 @@ func TestTUIRepeatedRetryUpdatesPreviousBlock(t *testing.T) {
 	}
 }
 
-func TestPrintExitTranscriptWritesBlocks(t *testing.T) {
-	var out bytes.Buffer
-	model := cyTUIModel{
-		console: &Console{out: &out, useStyle: false},
-		blocks: []screenBlock{
-			{kind: screenBlockSystem, text: "system"},
-			{kind: screenBlockUser, text: "hello"},
-			{kind: screenBlockAssistant, text: "done"},
-		},
-	}
+func TestTUIQuitStopsRenderer(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.resize(80, 24)
+	model.resetTranscript()
+	model.addBlock(screenBlockSystem, "last message")
+	model.refreshScreen()
 
-	printExitTranscript(&out, model)
-
-	got := out.String()
-	if !strings.Contains(got, "system") || !strings.Contains(got, "› hello") || !strings.Contains(got, "done") {
-		t.Fatalf("exit transcript missed content: %q", got)
+	updated, cmd := model.Update(tea.KeyPressMsg{Mod: tea.ModCtrl, Code: 'c'})
+	got := updated.(cyTUIModel)
+	if cmd == nil || !got.quitting || !got.renderer.stopped {
+		t.Fatalf("quit state: cmd=%v quitting=%v stopped=%v", cmd, got.quitting, got.renderer.stopped)
 	}
 }
 
-func TestPrintExitTranscriptKeepsBoundedTail(t *testing.T) {
-	var out bytes.Buffer
-	model := cyTUIModel{
-		console: &Console{out: &out, useStyle: false},
-		width:   80,
+func TestTUIResumeStagesCleanOldFrameBeforeAppendingSession(t *testing.T) {
+	agent := &resumeScreenAgent{}
+	model := newCyTUIModel(context.Background(), agent, Config{}, ".", nil)
+	model.resize(80, 24)
+	model.addBlock(screenBlockAssistant, "old answer")
+	model.refreshScreen()
+	oldBlockCount := len(model.blocks)
+
+	handled, done, cmd := model.handleCommand("/resume target-prefix")
+	if !handled || done || cmd == nil {
+		t.Fatalf("resume command state: handled=%v done=%v cmd=%v", handled, done, cmd)
 	}
-	for index := 0; index < maxExitTranscriptLines+20; index++ {
-		model.blocks = append(model.blocks, screenBlock{kind: screenBlockSystem, text: fmt.Sprintf("line-%03d", index)})
+	if agent.resumed != "" || len(model.blocks) != oldBlockCount {
+		t.Fatalf("resume ran before the old frame could render cleanly: resumed=%q blocks=%d", agent.resumed, len(model.blocks))
 	}
 
-	printExitTranscript(&out, model)
-
-	got := out.String()
-	if !strings.Contains(got, "earlier transcript lines omitted") || strings.Contains(got, "line-000") {
-		t.Fatalf("bounded exit transcript = %q", got)
+	msg, ok := cmd().(resumeSessionMsg)
+	if !ok || msg.idOrPrefix != "target-prefix" {
+		t.Fatalf("resume command message = %#v", msg)
 	}
-	if !strings.Contains(got, fmt.Sprintf("line-%03d", maxExitTranscriptLines+19)) {
-		t.Fatalf("bounded exit transcript missed newest line: %q", got)
+	updated, _ := model.update(msg)
+	got := updated.(cyTUIModel)
+	if agent.resumed != "target-prefix" {
+		t.Fatalf("resumed prefix = %q", agent.resumed)
+	}
+	rendered := strings.Join(got.transcriptLines, "\n")
+	if strings.Contains(rendered, "old answer") || !strings.Contains(rendered, "resumed session resolved-session") || !strings.Contains(rendered, "hey") {
+		t.Fatalf("resumed transcript = %q", rendered)
 	}
 }

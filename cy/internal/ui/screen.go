@@ -12,9 +12,9 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/term"
 	"github.com/levmv/golems/cy/internal/engine"
 	"github.com/levmv/golems/pkg/golem"
 )
@@ -53,6 +53,7 @@ type screenBlock struct {
 	turnDuration      time.Duration
 	fileChange        *fileChangeMeta
 	processResult     *processResultMeta
+	processSuperseded bool
 }
 
 type agentStreamMsg struct {
@@ -72,6 +73,10 @@ type modelSwitchDoneMsg struct {
 	uri    string
 	effort string
 	err    error
+}
+
+type resumeSessionMsg struct {
+	idOrPrefix string
 }
 
 type processPollMsg struct{}
@@ -138,10 +143,9 @@ type cyTUIModel struct {
 	root    string
 	console *Console
 
-	viewport viewport.Model
-	input    textarea.Model
-	secret   textinput.Model
-	spinner  spinner.Model
+	input   textarea.Model
+	secret  textinput.Model
+	spinner spinner.Model
 
 	blocks              []screenBlock
 	width               int
@@ -160,24 +164,29 @@ type cyTUIModel struct {
 	renderCacheLines    []string
 	renderCacheWidth    int
 	renderCacheStyled   bool
+	renderDirtyFrom     int
 	loginProvider       string
 	loginSwitchModel    bool
 	turnChangedPaths    []string
 	processPollPending  bool
 	renderPending       bool
-	transcriptSelection transcriptSelection
+	transcriptLines     []string
+	transcriptDirty     bool
+	transcriptDirtyFrom int
+	quitting            bool
+	renderer            *inlineRenderer
+	renderErr           error
 
 	commandSuggestions        []string
 	commandSuggestionIndex    int
 	commandSuggestionsEnabled bool
 
-	mutedStyle               lipgloss.Style
-	selectionStyle           lipgloss.Style
-	transcriptSelectionStyle lipgloss.Style
-	accentStyle              lipgloss.Style
-	errorStyle               lipgloss.Style
-	successStyle             lipgloss.Style
-	userStyle                lipgloss.Style
+	mutedStyle     lipgloss.Style
+	selectionStyle lipgloss.Style
+	accentStyle    lipgloss.Style
+	errorStyle     lipgloss.Style
+	successStyle   lipgloss.Style
+	userStyle      lipgloss.Style
 }
 
 func CanUseScreen(in io.Reader, out io.Writer) (*os.File, *os.File, bool) {
@@ -189,17 +198,71 @@ func CanUseScreen(in io.Reader, out io.Writer) (*os.File, *os.File, bool) {
 	return inFile, outFile, isTerminalFile(inFile) && isTerminalFile(outFile)
 }
 
-func RunScreen(ctx context.Context, agent Agent, cfg Config, root string, in *os.File, out *os.File) error {
-	model := newCyTUIModel(ctx, agent, cfg, root, out)
-	program := tea.NewProgram(model, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx))
-	finalModel, err := program.Run()
-	if tui, ok := finalModel.(cyTUIModel); ok {
-		printExitTranscript(out, tui)
+func RunScreen(ctx context.Context, agent Agent, cfg Config, root string, in *os.File, out *os.File) (returnErr error) {
+	// WithoutRenderer also disables Bubble Tea's terminal initialization. Cy
+	// owns rendering, so it must own raw mode and restore it after renderer.Stop
+	// has returned the cursor and keyboard protocols to their normal state.
+	terminalState, err := term.MakeRaw(in.Fd())
+	if err != nil {
+		return fmt.Errorf("enter terminal raw mode: %w", err)
 	}
+	defer func() {
+		if err := term.Restore(in.Fd(), terminalState); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("restore terminal: %w", err))
+		}
+	}()
+
+	model := newCyTUIModel(ctx, agent, cfg, root, out)
+	defer func() {
+		if err := model.renderer.Stop(); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("stop terminal renderer: %w", err))
+		}
+	}()
+	width, height, err := term.GetSize(out.Fd())
+	if err != nil {
+		return fmt.Errorf("get terminal size: %w", err)
+	}
+	model.resize(width, height)
+	model.refreshScreen()
+	if err := model.renderer.RenderFrame(model.inlineFrame(), width, height); err != nil {
+		return fmt.Errorf("render terminal: %w", err)
+	}
+	model.transcriptDirty = false
+
+	program := tea.NewProgram(model, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx), tea.WithoutRenderer())
+	resizeCtx, stopResizeWatcher := context.WithCancel(ctx)
+	defer stopResizeWatcher()
+	go watchTerminalSize(resizeCtx, program, out, width, height)
+
+	finalModel, err := program.Run()
 	if errors.Is(err, tea.ErrInterrupted) {
 		return context.Canceled
 	}
+	if final, ok := finalModel.(cyTUIModel); ok && final.renderErr != nil {
+		return final.renderErr
+	}
 	return err
+}
+
+func watchTerminalSize(ctx context.Context, program *tea.Program, out *os.File, width, height int) {
+	// Bubble Tea does not retain ttyOutput when WithoutRenderer is active, so
+	// its SIGWINCH path cannot query a size. Polling keeps this portable while
+	// still coalescing bursts of resize events into authoritative redraws.
+	ticker := time.NewTicker(75 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			nextWidth, nextHeight, err := term.GetSize(out.Fd())
+			if err != nil || nextWidth <= 0 || nextHeight <= 0 || nextWidth == width && nextHeight == height {
+				continue
+			}
+			width, height = nextWidth, nextHeight
+			program.Send(tea.WindowSizeMsg{Width: width, Height: height})
+		}
+	}
 }
 
 func newComposerInput() textarea.Model {
@@ -249,33 +312,28 @@ func newCyTUIModel(ctx context.Context, agent screenAgent, cfg Config, root stri
 	input := newComposerInput()
 	secret := newSecretInput()
 
-	vp := viewport.New()
-	vp.FillHeight = true
-	vp.MouseWheelEnabled = true
-
 	spin := spinner.New(spinner.WithSpinner(spinner.Line))
 
 	m := cyTUIModel{
-		ctx:                      ctx,
-		agent:                    agent,
-		cfg:                      cfg,
-		root:                     root,
-		console:                  console,
-		viewport:                 vp,
-		input:                    input,
-		secret:                   secret,
-		spinner:                  spin,
-		historyIndex:             0,
-		mutedStyle:               lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		selectionStyle:           lipgloss.NewStyle().Bold(true),
-		transcriptSelectionStyle: lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("4")),
-		accentStyle:              lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true),
-		errorStyle:               lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
-		successStyle:             lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
-		userStyle:                lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Background(lipgloss.Color("254")),
+		ctx:            ctx,
+		agent:          agent,
+		cfg:            cfg,
+		root:           root,
+		console:        console,
+		input:          input,
+		secret:         secret,
+		spinner:        spin,
+		renderer:       newInlineRenderer(out),
+		historyIndex:   0,
+		mutedStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
+		selectionStyle: lipgloss.NewStyle().Bold(true),
+		accentStyle:    lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true),
+		errorStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
+		successStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
+		userStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Background(lipgloss.Color("254")),
 	}
 	m.configureCommandSuggestions()
-	m.blocks = append(m.blocks, screenBlock{kind: screenBlockBanner})
+	m.appendBlock(screenBlock{kind: screenBlockBanner})
 	if cfg.SecuritySummary != "" {
 		m.addBlock(screenBlockSystem, cfg.SecuritySummary)
 	}
@@ -285,7 +343,7 @@ func newCyTUIModel(ctx context.Context, agent screenAgent, cfg Config, root stri
 	}
 	m.refreshProcessResults()
 	m.openLoginPicker(true)
-	m.refreshViewport(true)
+	m.refreshScreen()
 	return m
 }
 
@@ -294,21 +352,40 @@ func (m cyTUIModel) Init() tea.Cmd {
 }
 
 func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updated, cmd := m.update(msg)
+	next, ok := updated.(cyTUIModel)
+	if !ok {
+		return updated, cmd
+	}
+	if next.quitting {
+		if err := next.renderer.Stop(); err != nil {
+			next.renderErr = fmt.Errorf("stop terminal renderer: %w", err)
+		}
+		return next, cmd
+	}
+	if err := next.renderer.RenderFrame(next.inlineFrame(), next.width, next.height); err != nil {
+		next.renderErr = fmt.Errorf("render terminal: %w", err)
+		next.quitting = true
+		_ = next.renderer.Stop()
+		return next, tea.Quit
+	}
+	next.transcriptDirty = false
+	return next, cmd
+}
+
+func (m cyTUIModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		wasBottom := m.viewport.AtBottom()
-		m.transcriptSelection = transcriptSelection{}
+		// WithoutRenderer makes Bubble Tea emit an initial zero-sized message;
+		// the real initial size and subsequent changes are managed by RunScreen.
+		if msg.Width <= 0 || msg.Height <= 0 {
+			return m, nil
+		}
 		m.resize(msg.Width, msg.Height)
-		m.refreshViewport(wasBottom)
+		m.refreshScreen()
 		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
-	case tea.MouseClickMsg:
-		return m.handleTranscriptMouseClick(msg)
-	case tea.MouseMotionMsg:
-		return m.handleTranscriptMouseMotion(msg)
-	case tea.MouseReleaseMsg:
-		return m.handleTranscriptMouseRelease(msg)
 	case spinner.TickMsg:
 		if !m.working && m.maintenance == "" {
 			return m, nil
@@ -316,7 +393,7 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		if m.updatePendingToolDurations(time.Now()) {
-			m.refreshViewport(m.viewport.AtBottom())
+			m.refreshScreen()
 		}
 		return m, cmd
 	case agentStreamMsg:
@@ -325,10 +402,9 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(waitAgentMsg(m.events), m.scheduleTranscriptRender())
 		}
 		m.renderPending = false
-		m.refreshViewport(m.viewport.AtBottom())
+		m.refreshScreen()
 		return m, tea.Batch(waitAgentMsg(m.events), m.scheduleProcessPoll())
 	case agentDoneMsg:
-		wasBottom := m.viewport.AtBottom()
 		m.renderPending = false
 		m.working = false
 		m.turnCancel = nil
@@ -340,20 +416,19 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if input, ok := m.claimQueuedInput(); ok {
 			m.addBlock(screenBlockUser, input)
 			cmd := m.startTurn(input)
-			m.refreshViewport(true)
+			m.refreshScreen()
 			return m, cmd
 		}
-		m.refreshViewport(wasBottom)
+		m.refreshScreen()
 		return m, m.scheduleProcessPoll()
 	case transcriptRenderMsg:
 		if !m.renderPending {
 			return m, nil
 		}
 		m.renderPending = false
-		m.refreshViewport(m.viewport.AtBottom())
+		m.refreshScreen()
 		return m, nil
 	case compactDoneMsg:
-		wasBottom := m.viewport.AtBottom()
 		m.finishMaintenance()
 		if msg.err != nil {
 			if errors.Is(msg.err, context.Canceled) {
@@ -364,10 +439,9 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.addBlock(screenBlockSystem, "compacted; "+compactContextStatus(msg.report))
 		}
-		m.refreshViewport(wasBottom)
+		m.refreshScreen()
 		return m, nil
 	case modelSwitchDoneMsg:
-		wasBottom := m.viewport.AtBottom()
 		m.finishMaintenance()
 		if msg.err != nil {
 			m.addBlock(screenBlockError, "model: "+msg.err.Error())
@@ -380,18 +454,18 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.addBlock(screenBlockSystem, label)
 		}
-		m.refreshViewport(wasBottom)
+		m.refreshScreen()
 		return m, nil
+	case resumeSessionMsg:
+		cmd := m.resumeSession(msg.idOrPrefix)
+		m.refreshScreen()
+		return m, cmd
 	case processPollMsg:
 		m.processPollPending = false
-		wasBottom := m.viewport.AtBottom()
 		m.refreshProcessResults()
-		m.refreshViewport(wasBottom)
+		m.refreshScreen()
 		return m, m.scheduleProcessPoll()
 	default:
-		if m.isViewportMsg(msg) {
-			return m.updateViewport(msg)
-		}
 		if _, ok := msg.(tea.MouseMsg); ok {
 			return m, nil
 		}
@@ -400,34 +474,40 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m cyTUIModel) View() tea.View {
-	if m.width <= 0 || m.height <= 0 {
-		v := tea.NewView("Cy")
-		v.AltScreen = true
-		return v
-	}
+	// The inline renderer owns terminal output. Bubble Tea still calls View
+	// after every Update even with WithoutRenderer, so materializing the full
+	// transcript here would make ordinary input and stream events O(history).
+	return tea.NewView("")
+}
 
+func (m cyTUIModel) inlineFrame() inlineFrame {
+	transcript := m.transcriptLines
 	footerMeta := strings.Repeat(" ", transcriptGutter) + truncateANSI(m.footerMetaLine(), m.contentWidth())
-	parts := []string{m.transcriptViewportView(), m.workingIndicatorLine()}
+	dynamic := []string{m.workingIndicatorLine()}
 	if m.picker.active() {
-		parts = append(parts, m.renderPicker()...)
+		dynamic = append(dynamic, m.renderPicker()...)
 	} else if m.maintenance != "" {
-		parts = append(parts, strings.Repeat(" ", transcriptGutter)+m.muted(m.spinner.View()+" "+m.maintenance))
+		dynamic = append(dynamic, strings.Repeat(" ", transcriptGutter)+m.muted(m.spinner.View()+" "+m.maintenance))
 	} else {
-		parts = append(parts, m.markedEditorView())
-		parts = append(parts, m.renderCommandSuggestions()...)
+		dynamic = append(dynamic, m.markedEditorView())
+		dynamic = append(dynamic, m.renderCommandSuggestions()...)
 	}
-	parts = append(parts, "", footerMeta)
-	content := strings.Join(parts, "\n")
+	dynamic = append(dynamic, "", footerMeta)
 
-	v := tea.NewView(content)
-	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
+	var cursor *tea.Cursor
 	if !m.picker.active() && m.maintenance == "" {
-		if cursor := m.editorCursor(); cursor != nil {
+		if editorCursor := m.editorCursor(); editorCursor != nil {
+			cursorCopy := *editorCursor
+			cursor = &cursorCopy
 			cursor.Position.X += transcriptGutter
-			cursor.Position.Y += m.viewport.Height() + 1
-			v.Cursor = cursor
+			cursor.Position.Y += len(transcript) + 1
 		}
 	}
-	return v
+	return inlineFrame{
+		transcript:          transcript,
+		dynamic:             dynamic,
+		cursor:              cursor,
+		transcriptChanged:   m.transcriptDirty,
+		transcriptDirtyFrom: m.transcriptDirtyFrom,
+	}
 }
