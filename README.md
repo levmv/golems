@@ -11,8 +11,8 @@ Chat-bot with evolving personality. Multiple bots. History. Context-compaction. 
 **Brevity**  
 Summarization for web pages
 
-**Cy**  
-CLI coding agent
+**[Cy](cy/README.md)**  
+CLI coding agent. 
 
 **Chore**  
 ?

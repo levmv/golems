@@ -182,6 +182,11 @@ func TestListReturnsCurrentWorkspaceWithPromptTitle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer other.Close()
+	empty, err := Create(CreateOptions{Home: home, Workspace: "/current", Model: "fake/empty"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer empty.Close()
 	current, err := Create(CreateOptions{Home: home, Workspace: "/current", Model: "fake/current"})
 	if err != nil {
 		t.Fatal(err)

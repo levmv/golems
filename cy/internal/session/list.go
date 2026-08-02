@@ -21,8 +21,10 @@ type Summary struct {
 const maxSessionRecordBytes = 10 * 1024 * 1024
 
 // List reads only enough of each journal to find its workspace and first user
-// prompt. File modification time supplies the picker timestamp; replay is
-// reserved for the session the user actually opens.
+// prompt. Journals without a submitted prompt are omitted, matching the normal
+// ClosePruningEmpty path after an interrupted process leaves one behind. File
+// modification time supplies the picker timestamp; replay is reserved for the
+// session the user actually opens.
 func List(home, currentWorkspace string) ([]Summary, error) {
 	home, err := resolveHome(home)
 	if err != nil {
@@ -90,12 +92,13 @@ func summarizeJournal(id, path, currentWorkspace string) (Summary, bool) {
 			continue
 		}
 		message, err := DecodePayload[UserMessage](record)
-		if err == nil {
-			summary.Title = titleFromContent(message.Content)
+		if err != nil {
+			return summary, false
 		}
-		break
+		summary.Title = titleFromContent(message.Content)
+		return summary, true
 	}
-	return summary, true
+	return summary, false
 }
 
 func titleFromContent(content string) string {

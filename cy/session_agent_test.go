@@ -153,7 +153,7 @@ func TestSessionAgentSwitchModelPersistsJournalAndDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer agent.Close()
-	if err := agent.SwitchModel("ollama/local-model"); err != nil {
+	if err := agent.SwitchModelWithEffort("ollama/local-model", ""); err != nil {
 		t.Fatal(err)
 	}
 	state, err := journal.Replay()
@@ -262,8 +262,8 @@ func TestSessionAgentSwitchDoesNotMutateRuntimeWhenDefaultCannotBeSaved(t *testi
 	if err := os.WriteFile(stateHome, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := agent.SwitchModel("ollama/local-model"); err == nil {
-		t.Fatal("SwitchModel() succeeded with an unwritable state store")
+	if err := agent.SwitchModelWithEffort("ollama/local-model", ""); err == nil {
+		t.Fatal("SwitchModelWithEffort() succeeded with an unwritable state store")
 	}
 	if got := agent.CurrentModel(); got != "fake/model" {
 		t.Fatalf("model changed after persistence failure: %q", got)
@@ -441,6 +441,10 @@ func TestSessionAgentListsAndResumesOnlyCurrentWorkspace(t *testing.T) {
 	cfg := Config{Home: home, RootDir: root, ModelURI: "fake/model"}
 	initial, err := session.Create(session.CreateOptions{Home: home, Workspace: root, Model: cfg.ModelURI})
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initial.Append(session.RecordUserMessage, session.UserMessage{RunID: "run", Content: "current workspace session"}); err != nil {
+		_ = initial.Close()
 		t.Fatal(err)
 	}
 	agent, err := newSessionAgent(cfg, &runTurnFakeModel{}, root, nil, initial, nil)

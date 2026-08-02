@@ -71,6 +71,9 @@ func createSessionAt(t *testing.T, home, workspace string, updatedAt time.Time) 
 		t.Fatal(err)
 	}
 	id := journal.ID()
+	if _, err := journal.Append(session.RecordUserMessage, session.UserMessage{RunID: "run", Content: "prompt"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := journal.Close(); err != nil {
 		t.Fatal(err)
 	}

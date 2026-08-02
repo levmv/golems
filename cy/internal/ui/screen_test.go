@@ -504,7 +504,7 @@ func TestTUIBareLogoutOffersStoredCredentials(t *testing.T) {
 	if got.picker.kind != pickerLogout || len(got.picker.items) != 1 || got.picker.items[0].value != "deepseek" {
 		t.Fatalf("logout picker = %#v", got.picker)
 	}
-	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	if control.logoutProvider != "deepseek" {
 		t.Fatalf("logged out provider = %q", control.logoutProvider)
 	}

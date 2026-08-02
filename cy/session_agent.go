@@ -116,10 +116,6 @@ func (a *sessionAgent) Logout(provider string) error {
 	return nil
 }
 
-func (a *sessionAgent) SwitchModel(uri string) error {
-	return a.SwitchModelWithEffort(uri, defaultReasoningEffort)
-}
-
 func (a *sessionAgent) SwitchModelWithEffort(uri, effort string) error {
 	uri = strings.TrimSpace(uri)
 	if uri == "" {

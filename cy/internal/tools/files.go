@@ -518,13 +518,7 @@ func atomicReplace(path string, content []byte, mode os.FileMode, expected *[32]
 	if err := os.Rename(tempPath, path); err != nil {
 		return fmt.Errorf("replace file: %w", err)
 	}
-	dirHandle, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	err = dirHandle.Sync()
-	_ = dirHandle.Close()
-	if err != nil {
+	if err := syncParentDir(dir); err != nil {
 		return fmt.Errorf("sync file directory: %w", err)
 	}
 	ok = true
@@ -592,6 +586,10 @@ func nonEmptyLines(text string) []string {
 }
 
 func minimalToolEnv(home string) []string {
+	// Start from an empty environment intentionally. Bash callers provide a
+	// per-workspace tool home, while this small allowlist keeps ordinary CLI
+	// tools usable without leaking provider keys or other credential carriers.
+	// This reduces accidental exposure; it is not a sandbox boundary.
 	env := []string{"HOME=" + home}
 	for _, key := range []string{"PATH", "LANG", "LC_ALL", "TZ", "TMPDIR"} {
 		if value, ok := os.LookupEnv(key); ok {
