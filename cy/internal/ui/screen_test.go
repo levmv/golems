@@ -528,7 +528,7 @@ func TestTUIModelCommandOpensPickerAndSwitchesSelection(t *testing.T) {
 
 	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
 	got := updated.(cyTUIModel)
-	if got.picker.kind != pickerModel || len(got.picker.items) != 3 || got.picker.index != 1 {
+	if got.picker.kind != pickerModel || len(got.picker.items) != 4 || got.picker.index != 1 {
 		t.Fatalf("model picker = %#v", got.picker)
 	}
 	if transcript := strings.Join(got.renderTranscriptLines(), "\n"); strings.Contains(transcript, "openrouter/~moonshotai/kimi-latest") {
@@ -563,6 +563,34 @@ func TestTUIModelCommandOpensPickerAndSwitchesSelection(t *testing.T) {
 	}
 	if got.picker.active() {
 		t.Fatalf("model picker remained open: %#v", got.picker)
+	}
+}
+
+func TestTUIModelPickerAcceptsCustomURI(t *testing.T) {
+	control := &authPickerAgent{models: []string{"openrouter/free"}}
+	model := newCyTUIModel(context.Background(), control, Config{ModelURI: "openrouter/free"}, ".", nil)
+	model.resize(80, 24)
+	model.openModelPicker()
+	model.picker.index = len(model.picker.items) - 1
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(cyTUIModel)
+	if cmd != nil || got.picker.active() || got.input.Value() != "/model " {
+		t.Fatalf("custom model entry state: cmd=%v picker=%#v input=%q", cmd, got.picker, got.input.Value())
+	}
+
+	const uri = "openrouter/example/new-model"
+	got.input.SetValue("/model " + uri)
+	got.input.MoveToEnd()
+	updated, cmd = got.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got = updated.(cyTUIModel)
+	if cmd == nil || got.maintenance != "switching model" {
+		t.Fatalf("custom model switch did not start: maintenance=%q cmd=%v", got.maintenance, cmd)
+	}
+	updated, _ = got.Update(cmd())
+	got = updated.(cyTUIModel)
+	if control.switchedModel != uri || got.cfg.ModelURI != uri {
+		t.Fatalf("custom model switch = %q, cfg model = %q", control.switchedModel, got.cfg.ModelURI)
 	}
 }
 
@@ -619,13 +647,13 @@ func TestTUIModelPickerShowsEffortOnlyForFocusedModel(t *testing.T) {
 	model.openModelPicker()
 
 	lines := model.renderPicker()
-	if len(lines) != 2 || !strings.Contains(lines[0], "effort: default") || strings.Contains(lines[1], "effort:") {
+	if len(lines) != 3 || !strings.Contains(lines[0], "effort: default") || strings.Contains(lines[1], "effort:") || strings.Contains(lines[2], "effort:") {
 		t.Fatalf("initial model effort labels = %q", lines)
 	}
 
 	updated, _ := model.handlePickerKey(tea.KeyPressMsg{Code: tea.KeyDown})
 	lines = updated.(cyTUIModel).renderPicker()
-	if len(lines) != 2 || strings.Contains(lines[0], "effort:") || !strings.Contains(lines[1], "effort: default") {
+	if len(lines) != 3 || strings.Contains(lines[0], "effort:") || !strings.Contains(lines[1], "effort: default") || strings.Contains(lines[2], "effort:") {
 		t.Fatalf("moved model effort labels = %q", lines)
 	}
 }

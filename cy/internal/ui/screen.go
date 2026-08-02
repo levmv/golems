@@ -126,6 +126,7 @@ type pickerItem struct {
 	section       string
 	credentialURL string
 	current       bool
+	custom        bool
 	efforts       []string
 	effortIndex   int
 }

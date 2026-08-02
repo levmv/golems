@@ -157,7 +157,7 @@ func (m *cyTUIModel) openModelPicker() {
 		m.addBlock(screenBlockError, "model: no models available")
 		return
 	}
-	items := make([]pickerItem, 0, len(models))
+	items := make([]pickerItem, 0, len(models)+1)
 	selected := 0
 	for index, uri := range models {
 		efforts := m.agent.ReasoningEfforts(uri)
@@ -181,6 +181,7 @@ func (m *cyTUIModel) openModelPicker() {
 			selected = index
 		}
 	}
+	items = append(items, pickerItem{label: "Enter model URI…", description: "provider/model", custom: true})
 	m.openPicker(pickerModel, items, selected, false)
 }
 
@@ -296,6 +297,12 @@ func (m *cyTUIModel) selectPickerItem() tea.Cmd {
 	case pickerSession:
 		return resumeSessionCmd(item.value)
 	case pickerModel:
+		if item.custom {
+			m.input.SetValue("/model ")
+			m.input.MoveToEnd()
+			m.syncCommandSuggestions()
+			return nil
+		}
 		if item.value == m.cfg.ModelURI && selectedModelEffort(item) == m.cfg.ReasoningEffort {
 			return nil
 		}
