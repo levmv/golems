@@ -77,9 +77,9 @@ Type `/` for command completion or `/help` for the full command list.
 | `/usage`, `/context` | Show token use and context budget |
 | `/compact [focus]` | Compact the current context |
 
-Shift+Enter inserts a newline. Enter while Cy is working queues the input for
-the next model boundary. Escape cancels active work; Ctrl+C cancels active work
-or exits when idle.
+Use Shift+Enter, Alt+Enter, or Ctrl+J to insert a newline. Enter while Cy is
+working queues the input for the next model boundary. Escape cancels active work;
+Ctrl+C cancels active work or exits when idle.
 
 Cy uses the normal terminal buffer, so scrolling, selection, and copying remain
 native. Resizing the terminal or running `/clear` rebuilds the current frame

@@ -11,7 +11,7 @@ import (
 func commandSuggestionCatalog() []string {
 	commands := make([]string, 0, len(tuiCommands))
 	for _, command := range tuiCommands {
-		commands = append(commands, command.name)
+		commands = append(commands, command.name())
 	}
 	return commands
 }
@@ -156,6 +156,13 @@ func isEnterKey(msg tea.KeyPressMsg) bool {
 		keyString == "enter" || keyString == "shift+enter" || keyString == "alt+enter"
 }
 
+func isNewlineShortcut(msg tea.KeyPressMsg) bool {
+	key := msg.Key()
+	keyString := msg.String()
+	modifiedEnter := isEnterKey(msg) && (key.Mod&(tea.ModShift|tea.ModAlt) != 0 || keyString == "shift+enter" || keyString == "alt+enter")
+	return modifiedEnter || keyString == "ctrl+j" || keyIsCtrl(msg, 'j')
+}
+
 func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.picker.active() {
 		return m.handlePickerKey(msg)
@@ -172,7 +179,6 @@ func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.Key()
 	keyString := msg.String()
 	hasCtrl := key.Mod&tea.ModCtrl != 0
-	hasShift := key.Mod&tea.ModShift != 0
 
 	switch {
 	case keyString == "ctrl+c" || keyIsCtrl(msg, 'c'):
@@ -190,7 +196,7 @@ func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		return m.updateEditor(editorCtrlKey('d'))
-	case isEnterKey(msg) && (hasShift || keyString == "shift+enter") && m.loginProvider == "":
+	case isNewlineShortcut(msg) && m.loginProvider == "":
 		m.input.InsertString("\n")
 		m.syncCommandSuggestions()
 		return m, nil

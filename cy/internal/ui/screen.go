@@ -91,22 +91,27 @@ type transcriptRenderMsg struct{}
 type themeQueryTimeoutMsg struct{}
 
 type tuiCommand struct {
-	name        string
+	usage       string
 	description string
 }
 
 var tuiCommands = []tuiCommand{
-	{name: "/help", description: "show commands and keyboard shortcuts"},
-	{name: "/clear", description: "start a new session"},
-	{name: "/resume", description: "choose or resume a previous session"},
-	{name: "/usage", description: "show token usage"},
-	{name: "/context", description: "show context budget"},
-	{name: "/compact", description: "compact context, optionally with a focus"},
-	{name: "/login", description: "manage provider credentials"},
-	{name: "/logout", description: "remove a stored provider credential"},
-	{name: "/model", description: "list or switch models"},
-	{name: "/profile", description: "show or switch the capability profile"},
-	{name: "/exit", description: "exit Cy"},
+	{usage: "/help", description: "show commands and keyboard shortcuts"},
+	{usage: "/clear", description: "start a new session"},
+	{usage: "/resume [id-or-prefix]", description: "choose or resume a previous session"},
+	{usage: "/usage", description: "show token usage"},
+	{usage: "/context", description: "show context budget"},
+	{usage: "/compact [focus]", description: "compact context, optionally with a focus"},
+	{usage: "/login [provider]", description: "manage provider credentials"},
+	{usage: "/logout [provider]", description: "remove a stored provider credential"},
+	{usage: "/model [provider/model]", description: "list or switch models"},
+	{usage: "/profile [profile]", description: "show or switch the capability profile"},
+	{usage: "/exit", description: "exit Cy"},
+}
+
+func (c tuiCommand) name() string {
+	name, _, _ := strings.Cut(c.usage, " ")
+	return name
 }
 
 type pickerKind int

@@ -147,7 +147,7 @@ func (m cyTUIModel) commandSuggestionCapacity() int {
 
 func commandDescription(name string) string {
 	for _, command := range tuiCommands {
-		if command.name == name {
+		if command.name() == name {
 			return command.description
 		}
 	}

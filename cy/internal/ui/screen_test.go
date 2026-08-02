@@ -168,25 +168,31 @@ func TestTUIShowsJournalRepairNotice(t *testing.T) {
 	}
 }
 
-func TestTUIShiftEnterInsertsNewlineWithoutSubmitting(t *testing.T) {
-	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
-	model.resize(40, 16)
-	model.input.SetValue("first line")
-	model.input.MoveToEnd()
+func TestTUINewlineShortcutsDoNotSubmit(t *testing.T) {
+	shortcuts := []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{name: "Shift+Enter", key: tea.KeyPressMsg{Mod: tea.ModShift, Code: tea.KeyEnter}},
+		{name: "Alt+Enter", key: tea.KeyPressMsg{Mod: tea.ModAlt, Code: tea.KeyEnter}},
+		{name: "Ctrl+J", key: tea.KeyPressMsg{Mod: tea.ModCtrl, Code: 'j', BaseCode: 'j'}},
+	}
+	for _, shortcut := range shortcuts {
+		t.Run(shortcut.name, func(t *testing.T) {
+			model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+			model.resize(40, 16)
+			model.input.SetValue("first line")
+			model.input.MoveToEnd()
 
-	updated, cmd := model.Update(tea.KeyPressMsg{Mod: tea.ModShift, Code: tea.KeyEnter})
-	got := updated.(cyTUIModel)
-	if cmd != nil {
-		t.Fatal("Shift+Enter unexpectedly started a turn")
-	}
-	if got.input.Value() != "first line\n" {
-		t.Fatalf("input = %q, want explicit newline", got.input.Value())
-	}
-	if got.working {
-		t.Fatal("Shift+Enter unexpectedly marked the model working")
-	}
-	if got.input.Height() != 2 {
-		t.Fatalf("composer height = %d, want 2", got.input.Height())
+			updated, cmd := model.Update(shortcut.key)
+			got := updated.(cyTUIModel)
+			if cmd != nil || got.working {
+				t.Fatalf("shortcut submitted input: working=%v cmd=%v", got.working, cmd)
+			}
+			if got.input.Value() != "first line\n" || got.input.Height() != 2 {
+				t.Fatalf("composer = %q, height %d", got.input.Value(), got.input.Height())
+			}
+		})
 	}
 }
 
@@ -253,8 +259,14 @@ func TestTUIEnterRunsSelectedCommandSuggestion(t *testing.T) {
 	if got.input.Value() != "" {
 		t.Fatalf("input after selected command = %q, want empty", got.input.Value())
 	}
-	if last := got.blocks[len(got.blocks)-1].text; !strings.Contains(last, "Type / to browse commands") {
-		t.Fatalf("selected /help did not run: %q", last)
+	help := got.blocks[len(got.blocks)-1].text
+	for _, command := range tuiCommands {
+		if !strings.Contains(help, command.usage) {
+			t.Fatalf("/help missed %q: %q", command.usage, help)
+		}
+	}
+	if !strings.Contains(help, "Ctrl+J") {
+		t.Fatalf("/help missed newline fallback: %q", help)
 	}
 }
 

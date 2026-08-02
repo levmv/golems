@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -19,7 +20,7 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 	case "/exit", "/quit", "/q":
 		return true, true, nil
 	case "/help":
-		m.addBlock(screenBlockInfo, "Type / to browse commands; use ↑/↓ to choose, Tab to complete, and Enter to run. Shift+Enter inserts a new line. While working: Enter queues input, Esc cancels and restores undelivered input, Ctrl+C cancels. The transcript uses normal terminal scrollback: use the mouse wheel and terminal-native selection, copying, and context menu.")
+		m.addBlock(screenBlockInfo, tuiHelpText())
 	case "/clear":
 		id, err := m.agent.ClearSession()
 		if err != nil {
@@ -120,6 +121,40 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 		m.addBlock(screenBlockError, "unknown command: "+fields[0])
 	}
 	return true, false, cmd
+}
+
+func tuiHelpText() string {
+	commandWidth := 0
+	for _, command := range tuiCommands {
+		commandWidth = max(commandWidth, len(command.usage))
+	}
+	var help strings.Builder
+	help.WriteString("Commands\n")
+	for _, command := range tuiCommands {
+		fmt.Fprintf(&help, "  %-*s  %s\n", commandWidth, command.usage, command.description)
+	}
+
+	shortcuts := []struct {
+		keys        string
+		description string
+	}{
+		{keys: "Enter", description: "send input; queue it while Cy is working"},
+		{keys: "Shift+Enter / Alt+Enter / Ctrl+J", description: "insert a newline"},
+		{keys: "Up/Down", description: "navigate commands or input history"},
+		{keys: "Tab", description: "complete the selected command"},
+		{keys: "Esc", description: "cancel active work and restore queued input"},
+		{keys: "Ctrl+C", description: "cancel active work; exit when idle"},
+	}
+	shortcutWidth := 0
+	for _, shortcut := range shortcuts {
+		shortcutWidth = max(shortcutWidth, len(shortcut.keys))
+	}
+	help.WriteString("\nKeys\n")
+	for _, shortcut := range shortcuts {
+		fmt.Fprintf(&help, "  %-*s  %s\n", shortcutWidth, shortcut.keys, shortcut.description)
+	}
+	help.WriteString("\nTerminal scrolling, selection, and copying remain native.")
+	return help.String()
 }
 
 func (m *cyTUIModel) openModelPicker() {
