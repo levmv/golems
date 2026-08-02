@@ -359,7 +359,7 @@ func newCyTUIModel(ctx context.Context, agent screenAgent, cfg Config, root stri
 	if cfg.SecuritySummary != "" {
 		m.addBlock(screenBlockSystem, cfg.SecuritySummary)
 	}
-	m.appendHistoryBlocks()
+	m.loadSessionHistory()
 	if m.agent.SessionRepaired() {
 		m.addBlock(screenBlockSystem, "repaired an incomplete session journal tail")
 	}

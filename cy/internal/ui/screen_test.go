@@ -836,6 +836,28 @@ func TestTUIHistoryRestoresBlankAfterCommandPrompt(t *testing.T) {
 	}
 }
 
+func TestTUIRestoresInputHistoryFromSession(t *testing.T) {
+	model := newCyTUIModel(context.Background(), &resumeScreenAgent{}, Config{}, ".", nil)
+
+	if len(model.history) != 1 || model.history[0] != "hey" || model.historyIndex != len(model.history) {
+		t.Fatalf("restored input history = %#v at %d", model.history, model.historyIndex)
+	}
+}
+
+func TestTUIClearResetsInputHistory(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.history = []string{"old prompt"}
+	model.historyIndex = len(model.history)
+	model.savedInput = "draft"
+	model.input.SetValue("/clear")
+
+	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(cyTUIModel)
+	if len(got.history) != 0 || got.historyIndex != 0 || got.savedInput != "" {
+		t.Fatalf("input history after clear = %#v at %d, saved %q", got.history, got.historyIndex, got.savedInput)
+	}
+}
+
 func TestTUIArrowHistoryUsesSoftWrappedVisualBoundaries(t *testing.T) {
 	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
 	model.resize(20, 16)
@@ -1291,6 +1313,8 @@ func TestTUIResumeStagesCleanOldFrameBeforeAppendingSession(t *testing.T) {
 	model := newCyTUIModel(context.Background(), agent, Config{}, ".", nil)
 	model.resize(80, 24)
 	model.addBlock(screenBlockAssistant, "old answer")
+	model.history = []string{"old prompt"}
+	model.historyIndex = len(model.history)
 	model.refreshScreen()
 	oldBlockCount := len(model.blocks)
 
@@ -1314,5 +1338,8 @@ func TestTUIResumeStagesCleanOldFrameBeforeAppendingSession(t *testing.T) {
 	rendered := strings.Join(got.transcriptLines, "\n")
 	if strings.Contains(rendered, "old answer") || !strings.Contains(rendered, "resumed session resolved-session") || !strings.Contains(rendered, "hey") {
 		t.Fatalf("resumed transcript = %q", rendered)
+	}
+	if len(got.history) != 1 || got.history[0] != "hey" || got.historyIndex != len(got.history) {
+		t.Fatalf("resumed input history = %#v at %d", got.history, got.historyIndex)
 	}
 }

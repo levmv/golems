@@ -319,15 +319,12 @@ func (m cyTUIModel) submitInput() (tea.Model, tea.Cmd) {
 	}
 	m.input.Reset()
 	m.configureCommandSuggestions()
-	m.historyIndex = len(m.history)
-	m.savedInput = ""
 	if input == "" {
+		m.historyIndex = len(m.history)
+		m.savedInput = ""
 		return m, nil
 	}
-	if len(m.history) == 0 || m.history[len(m.history)-1] != input {
-		m.history = append(m.history, input)
-	}
-	m.historyIndex = len(m.history)
+	m.rememberInput(input)
 
 	if m.working {
 		if err := m.agent.QueueInput(input); err != nil {

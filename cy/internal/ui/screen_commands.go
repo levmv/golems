@@ -28,6 +28,7 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 			break
 		}
 		m.resetTranscript()
+		m.resetInputHistory()
 		m.addBlock(screenBlockSystem, "new session "+id)
 	case "/resume":
 		if len(fields) > 1 {
@@ -528,7 +529,7 @@ func (m *cyTUIModel) resumeSession(idOrPrefix string) tea.Cmd {
 	m.cfg.ReasoningEffort = m.agent.CurrentReasoningEffort()
 	m.continueTranscriptBelow()
 	m.addBlock(screenBlockSystem, "resumed session "+id)
-	m.appendHistoryBlocks()
+	m.loadSessionHistory()
 	if m.agent.SessionRepaired() {
 		m.addBlock(screenBlockSystem, "repaired an incomplete session journal tail")
 	}

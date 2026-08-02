@@ -7,7 +7,11 @@ import (
 	"github.com/levmv/golems/pkg/llm"
 )
 
-func (m *cyTUIModel) appendHistoryBlocks() {
+func (m *cyTUIModel) loadSessionHistory() {
+	// Input history belongs to the active session. Reset it before reading so a
+	// failed resume cannot leave prompts from the previous session available via
+	// Up/Ctrl-P.
+	m.resetInputHistory()
 	history, err := m.agent.SessionHistory()
 	if err != nil {
 		m.addBlock(screenBlockError, "history: "+err.Error())
@@ -16,6 +20,7 @@ func (m *cyTUIModel) appendHistoryBlocks() {
 	for _, message := range history {
 		switch message.Role {
 		case llm.RoleUser:
+			m.rememberInput(message.Content)
 			m.addBlock(screenBlockUser, message.Content)
 		case llm.RoleAI:
 			if strings.TrimSpace(message.Content) != "" {
@@ -32,6 +37,23 @@ func (m *cyTUIModel) appendHistoryBlocks() {
 			}
 		}
 	}
+}
+
+func (m *cyTUIModel) rememberInput(input string) {
+	if strings.TrimSpace(input) == "" {
+		return
+	}
+	if len(m.history) == 0 || m.history[len(m.history)-1] != input {
+		m.history = append(m.history, input)
+	}
+	m.historyIndex = len(m.history)
+	m.savedInput = ""
+}
+
+func (m *cyTUIModel) resetInputHistory() {
+	m.history = nil
+	m.historyIndex = 0
+	m.savedInput = ""
 }
 
 func (m *cyTUIModel) historyPrevious() {
