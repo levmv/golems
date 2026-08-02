@@ -43,6 +43,7 @@ func runMain() (returnErr error) {
 	jsonOutput := flag.Bool("json", cfg.JSON, "emit one versioned JSON result on stdout")
 	profile := flag.String("profile", cfg.CapabilityProfile, "capability profile: full, edit, or read-only")
 	sandbox := flag.String("sandbox", cfg.SandboxPolicy, "Bash sandbox policy: auto, require, or off")
+	theme := flag.String("theme", cfg.TerminalTheme, "terminal theme: auto, light, or dark")
 	showVersion := flag.Bool("version", false, "print the Cy version and exit")
 	flag.Parse()
 	setFlags := make(map[string]bool)
@@ -63,6 +64,10 @@ func runMain() (returnErr error) {
 	}
 	cfg.CapabilityProfile = normalizedProfile
 	cfg.SandboxPolicy, err = normalizeSandboxPolicy(*sandbox)
+	if err != nil {
+		return err
+	}
+	cfg.TerminalTheme, err = normalizeTerminalTheme(*theme)
 	if err != nil {
 		return err
 	}
@@ -212,6 +217,7 @@ func runMain() (returnErr error) {
 		CapabilityProfile: cfg.CapabilityProfile,
 		SecuritySummary:   cfg.Security.Compact(),
 		Providers:         loginProviderCatalog(),
+		TerminalTheme:     cfg.TerminalTheme,
 	}, root, inFile, outFile)
 }
 

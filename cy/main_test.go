@@ -49,6 +49,26 @@ func TestApplyResumedConfigRestoresReasoningEffortWithModel(t *testing.T) {
 	}
 }
 
+func TestNormalizeTerminalTheme(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: "", want: "auto"},
+		{input: " AUTO ", want: "auto"},
+		{input: "LIGHT", want: "light"},
+		{input: "dark", want: "dark"},
+	} {
+		got, err := normalizeTerminalTheme(test.input)
+		if err != nil || got != test.want {
+			t.Fatalf("normalizeTerminalTheme(%q) = %q, %v; want %q", test.input, got, err, test.want)
+		}
+	}
+	if _, err := normalizeTerminalTheme("sepia"); err == nil {
+		t.Fatal("normalizeTerminalTheme accepted an unknown theme")
+	}
+}
+
 func TestRunPrintTurnJSONWritesOneFinalResult(t *testing.T) {
 	agent := sessionTaggedAgent{agentRunner: printTurnAgent(t), id: "saved-session"}
 	var stdout, stderr bytes.Buffer

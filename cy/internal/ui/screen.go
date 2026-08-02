@@ -20,11 +20,18 @@ import (
 )
 
 const (
-	screenFixedRows  = 3 // spacing above/below the composer and status line
-	composerMaxRows  = 8
-	transcriptGutter = 2
-	userMarker       = "›"
-	transcriptFrame  = 33 * time.Millisecond
+	screenFixedRows   = 3 // spacing above/below the composer and status line
+	composerMaxRows   = 8
+	transcriptGutter  = 2
+	userMarker        = "›"
+	transcriptFrame   = 33 * time.Millisecond
+	themeQueryTimeout = 150 * time.Millisecond
+)
+
+const (
+	terminalThemeAuto  = "auto"
+	terminalThemeLight = "light"
+	terminalThemeDark  = "dark"
 )
 
 type screenBlockKind int
@@ -81,6 +88,7 @@ type resumeSessionMsg struct {
 
 type processPollMsg struct{}
 type transcriptRenderMsg struct{}
+type themeQueryTimeoutMsg struct{}
 
 type tuiCommand struct {
 	name        string
@@ -176,6 +184,8 @@ type cyTUIModel struct {
 	quitting            bool
 	renderer            *inlineRenderer
 	renderErr           error
+	themePending        bool
+	darkTheme           bool
 
 	commandSuggestions        []string
 	commandSuggestionIndex    int
@@ -224,10 +234,12 @@ func RunScreen(ctx context.Context, agent Agent, cfg Config, root string, in *os
 	}
 	model.resize(width, height)
 	model.refreshScreen()
-	if err := model.renderer.RenderFrame(model.inlineFrame(), width, height); err != nil {
-		return fmt.Errorf("render terminal: %w", err)
+	if !model.themePending {
+		if err := model.renderer.RenderFrame(model.inlineFrame(), width, height); err != nil {
+			return fmt.Errorf("render terminal: %w", err)
+		}
+		model.transcriptDirty = false
 	}
-	model.transcriptDirty = false
 
 	program := tea.NewProgram(model, tea.WithInput(in), tea.WithOutput(out), tea.WithContext(ctx), tea.WithoutRenderer())
 	resizeCtx, stopResizeWatcher := context.WithCancel(ctx)
@@ -313,25 +325,27 @@ func newCyTUIModel(ctx context.Context, agent screenAgent, cfg Config, root stri
 	secret := newSecretInput()
 
 	spin := spinner.New(spinner.WithSpinner(spinner.Line))
+	requestedTheme := strings.ToLower(strings.TrimSpace(cfg.TerminalTheme))
+	if requestedTheme == "" {
+		requestedTheme = terminalThemeLight
+	}
+	darkTheme := requestedTheme == terminalThemeDark
 
 	m := cyTUIModel{
-		ctx:            ctx,
-		agent:          agent,
-		cfg:            cfg,
-		root:           root,
-		console:        console,
-		input:          input,
-		secret:         secret,
-		spinner:        spin,
-		renderer:       newInlineRenderer(out),
-		historyIndex:   0,
-		mutedStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("8")),
-		selectionStyle: lipgloss.NewStyle().Bold(true),
-		accentStyle:    lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true),
-		errorStyle:     lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
-		successStyle:   lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
-		userStyle:      lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Background(lipgloss.Color("254")),
+		ctx:          ctx,
+		agent:        agent,
+		cfg:          cfg,
+		root:         root,
+		console:      console,
+		input:        input,
+		secret:       secret,
+		spinner:      spin,
+		renderer:     newInlineRenderer(out),
+		historyIndex: 0,
+		themePending: requestedTheme == terminalThemeAuto,
+		darkTheme:    darkTheme,
 	}
+	m.applyTerminalTheme(darkTheme)
 	m.configureCommandSuggestions()
 	m.appendBlock(screenBlock{kind: screenBlockBanner})
 	if cfg.SecuritySummary != "" {
@@ -348,6 +362,14 @@ func newCyTUIModel(ctx context.Context, agent screenAgent, cfg Config, root stri
 }
 
 func (m cyTUIModel) Init() tea.Cmd {
+	if m.themePending {
+		// Wait for OSC 11 before drawing the first frame. Recoloring after a long
+		// resumed transcript has entered scrollback would require erasing it.
+		return tea.Batch(
+			tea.RequestBackgroundColor,
+			tea.Tick(themeQueryTimeout, func(time.Time) tea.Msg { return themeQueryTimeoutMsg{} }),
+		)
+	}
 	return nil
 }
 
@@ -363,6 +385,9 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return next, cmd
 	}
+	if next.themePending {
+		return next, cmd
+	}
 	if err := next.renderer.RenderFrame(next.inlineFrame(), next.width, next.height); err != nil {
 		next.renderErr = fmt.Errorf("render terminal: %w", err)
 		next.quitting = true
@@ -375,6 +400,20 @@ func (m cyTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m cyTUIModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.BackgroundColorMsg:
+		if !m.themePending {
+			return m, nil
+		}
+		m.themePending = false
+		m.applyTerminalTheme(msg.IsDark())
+		m.refreshScreen()
+		return m, nil
+	case themeQueryTimeoutMsg:
+		// OSC 11 is widely supported but optional and may be filtered by a
+		// multiplexer. Keep the existing light palette as the auto fallback;
+		// --theme/CY_THEME provides a deterministic override.
+		m.themePending = false
+		return m, nil
 	case tea.WindowSizeMsg:
 		// WithoutRenderer makes Bubble Tea emit an initial zero-sized message;
 		// the real initial size and subsequent changes are managed by RunScreen.

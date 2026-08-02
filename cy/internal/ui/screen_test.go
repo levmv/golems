@@ -1,15 +1,18 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image/color"
 	"strings"
 	"testing"
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/levmv/golems/cy/internal/engine"
 	"github.com/levmv/golems/cy/internal/session"
 	"github.com/levmv/golems/pkg/golem"
@@ -297,6 +300,62 @@ func TestTUIPickerBoldsFocusedItem(t *testing.T) {
 	}
 	if !strings.Contains(lines[1], model.selectionStyle.Render("Focused item")) {
 		t.Fatalf("focused item is not bold: %q", lines[1])
+	}
+}
+
+func TestTUIDarkThemeUsesDarkUserPanelAndBrightStatuses(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{TerminalTheme: terminalThemeDark}, ".", nil)
+	if !model.darkTheme || model.themePending {
+		t.Fatalf("dark theme state: dark=%v pending=%v", model.darkTheme, model.themePending)
+	}
+
+	wantUser := lipgloss.NewStyle().
+		Foreground(lipgloss.ANSIColor(252)).
+		Background(lipgloss.ANSIColor(236)).
+		Render(" user ")
+	if got := model.userStyle.Render(" user "); got != wantUser {
+		t.Fatalf("dark user style = %q, want %q", got, wantUser)
+	}
+	wantError := lipgloss.NewStyle().Foreground(lipgloss.ANSIColor(9)).Render("error")
+	if got := model.errorStyle.Render("error"); got != wantError {
+		t.Fatalf("dark error style = %q, want %q", got, wantError)
+	}
+}
+
+func TestTUIAutoThemeWaitsForBackgroundBeforeFirstFrame(t *testing.T) {
+	var output bytes.Buffer
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{TerminalTheme: terminalThemeAuto}, ".", &output)
+	model.resize(80, 24)
+	model.refreshScreen()
+
+	updated, _ := model.Update(tea.KeyPressMsg{Code: 'x', Text: "x"})
+	got := updated.(cyTUIModel)
+	if !got.themePending || got.renderer.started || output.Len() != 0 {
+		t.Fatalf("auto theme rendered before detection: pending=%v started=%v output=%q", got.themePending, got.renderer.started, output.String())
+	}
+
+	updated, _ = got.Update(tea.BackgroundColorMsg{Color: color.Black})
+	got = updated.(cyTUIModel)
+	if got.themePending || !got.darkTheme || !got.renderer.started || output.Len() == 0 {
+		t.Fatalf("detected theme state: pending=%v dark=%v started=%v output=%q", got.themePending, got.darkTheme, got.renderer.started, output.String())
+	}
+}
+
+func TestTUIAutoThemeFallsBackToLight(t *testing.T) {
+	var output bytes.Buffer
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{TerminalTheme: terminalThemeAuto}, ".", &output)
+	model.resize(80, 24)
+	model.refreshScreen()
+
+	updated, _ := model.Update(themeQueryTimeoutMsg{})
+	got := updated.(cyTUIModel)
+	if got.themePending || got.darkTheme || !got.renderer.started || output.Len() == 0 {
+		t.Fatalf("fallback theme state: pending=%v dark=%v started=%v output=%q", got.themePending, got.darkTheme, got.renderer.started, output.String())
+	}
+
+	updated, _ = got.Update(tea.BackgroundColorMsg{Color: color.Black})
+	if got = updated.(cyTUIModel); got.darkTheme {
+		t.Fatal("a late OSC 11 response changed the fallback theme")
 	}
 }
 

@@ -21,6 +21,7 @@ type Config struct {
 	CapabilityProfile string
 	SecuritySummary   string
 	Providers         []string
+	TerminalTheme     string
 }
 
 func (c Config) providers() []string {
