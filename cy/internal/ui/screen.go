@@ -536,7 +536,7 @@ func (m cyTUIModel) inlineFrame() inlineFrame {
 	} else if m.maintenance != "" {
 		dynamic = append(dynamic, strings.Repeat(" ", transcriptGutter)+m.muted(m.spinner.View()+" "+m.maintenance))
 	} else {
-		dynamic = append(dynamic, m.markedEditorView())
+		dynamic = append(dynamic, m.markedEditorLines()...)
 		dynamic = append(dynamic, m.renderCommandSuggestions()...)
 	}
 	dynamic = append(dynamic, "", footerMeta)

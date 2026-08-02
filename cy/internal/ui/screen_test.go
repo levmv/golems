@@ -115,6 +115,70 @@ func TestTUILongInputWrapsAndGrowsComposer(t *testing.T) {
 			t.Fatalf("wrapped input line width = %d, limit = %d: %q", visibleLen(line), model.lineWidth(), line)
 		}
 	}
+	for index, line := range model.inlineFrame().dynamic {
+		if strings.Contains(line, "\n") {
+			t.Fatalf("dynamic row %d contains an embedded newline: %q", index, line)
+		}
+	}
+}
+
+func TestTUIMultilinePasteKeepsRendererRowsAligned(t *testing.T) {
+	var output bytes.Buffer
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", &output)
+	model.resize(32, 14)
+	model.clearTranscript()
+	for index := range 20 {
+		model.addBlock(screenBlockSystem, fmt.Sprintf("transcript line %d", index))
+	}
+	model.refreshScreen()
+	if err := model.renderer.RenderFrame(model.inlineFrame(), model.width, model.height); err != nil {
+		t.Fatalf("render initial frame: %v", err)
+	}
+	model.transcriptDirty = false
+	output.Reset()
+
+	updated, _ := model.Update(tea.PasteMsg{Content: "alpha\nbeta\ngamma"})
+	got := updated.(cyTUIModel)
+	if got.input.Value() != "alpha\nbeta\ngamma" {
+		t.Fatalf("pasted value = %q", got.input.Value())
+	}
+	if rendered := output.String(); strings.Contains(rendered, "\x1b[2J") || strings.Contains(rendered, "\x1b[3J") {
+		t.Fatalf("paste triggered a full-screen clear: %q", rendered)
+	}
+	assertEditorFrameRows(t, got, "gamma")
+
+	backspace := tea.KeyPressMsg{Code: tea.KeyBackspace}
+	for range len("gamma") + 1 {
+		updated, _ = got.Update(backspace)
+		got = updated.(cyTUIModel)
+	}
+	if got.input.Value() != "alpha\nbeta" {
+		t.Fatalf("value after deleting the last line = %q", got.input.Value())
+	}
+	assertEditorFrameRows(t, got, "beta")
+}
+
+func assertEditorFrameRows(t *testing.T, model cyTUIModel, cursorLine string) {
+	t.Helper()
+	frame := model.inlineFrame()
+	for index, line := range frame.dynamic {
+		if strings.Contains(line, "\n") {
+			t.Fatalf("dynamic row %d contains an embedded newline: %q", index, line)
+		}
+	}
+	if frame.cursor == nil {
+		t.Fatal("frame has no editor cursor")
+	}
+	dynamicCursorRow := frame.cursor.Position.Y - len(frame.transcript)
+	if dynamicCursorRow < 0 || dynamicCursorRow >= len(frame.dynamic) {
+		t.Fatalf("cursor row %d is outside %d dynamic rows", dynamicCursorRow, len(frame.dynamic))
+	}
+	if line := frame.dynamic[dynamicCursorRow]; !strings.Contains(line, cursorLine) {
+		t.Fatalf("cursor points at dynamic row %q, want row containing %q", line, cursorLine)
+	}
+	if len(model.renderer.previousDynamic) != len(frame.dynamic) {
+		t.Fatalf("renderer retained %d dynamic rows, frame has %d", len(model.renderer.previousDynamic), len(frame.dynamic))
+	}
 }
 
 func TestTUIWidthChangeReflowsManagedMarkdown(t *testing.T) {
@@ -789,7 +853,7 @@ func TestTUIHotkeysFallbackToRussianLayout(t *testing.T) {
 	}
 }
 
-func TestTUIArrowHistoryOnlyAtEditorBoundariesAndRestoresBlankDraft(t *testing.T) {
+func TestTUIArrowHistoryStartsOnlyFromBlankEditor(t *testing.T) {
 	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
 	model.resize(40, 16)
 	model.history = []string{"older prompt"}
@@ -801,6 +865,11 @@ func TestTUIArrowHistoryOnlyAtEditorBoundariesAndRestoresBlankDraft(t *testing.T
 	got := updated.(cyTUIModel)
 	if got.input.Value() != "first line\nsecond line" || got.historyIndex != len(got.history) {
 		t.Fatalf("Up inside editor opened history: value=%q index=%d", got.input.Value(), got.historyIndex)
+	}
+	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	got = updated.(cyTUIModel)
+	if got.input.Value() != "first line\nsecond line" || got.historyIndex != len(got.history) {
+		t.Fatalf("Up at the top replaced a non-empty draft: value=%q index=%d", got.input.Value(), got.historyIndex)
 	}
 
 	got.input.Reset()
@@ -836,6 +905,25 @@ func TestTUIHistoryRestoresBlankAfterCommandPrompt(t *testing.T) {
 	}
 }
 
+func TestTUICtrlPEntersHistoryFromNonEmptyDraft(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.history = []string{"older prompt"}
+	model.historyIndex = len(model.history)
+	model.input.SetValue("current draft")
+
+	updated, _ := model.Update(editorCtrlKey('p'))
+	got := updated.(cyTUIModel)
+	if got.input.Value() != "older prompt" || got.savedInput != "current draft" {
+		t.Fatalf("Ctrl-P did not preserve the draft: value=%q saved=%q", got.input.Value(), got.savedInput)
+	}
+
+	updated, _ = got.Update(editorCtrlKey('n'))
+	got = updated.(cyTUIModel)
+	if got.input.Value() != "current draft" || got.historyIndex != len(got.history) {
+		t.Fatalf("Ctrl-N did not restore the draft: value=%q index=%d", got.input.Value(), got.historyIndex)
+	}
+}
+
 func TestTUIRestoresInputHistoryFromSession(t *testing.T) {
 	model := newCyTUIModel(context.Background(), &resumeScreenAgent{}, Config{}, ".", nil)
 
@@ -858,7 +946,7 @@ func TestTUIClearResetsInputHistory(t *testing.T) {
 	}
 }
 
-func TestTUIArrowHistoryUsesSoftWrappedVisualBoundaries(t *testing.T) {
+func TestTUIArrowHistoryDoesNotReplaceSoftWrappedDraft(t *testing.T) {
 	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
 	model.resize(20, 16)
 	model.history = []string{"older prompt"}
@@ -874,8 +962,9 @@ func TestTUIArrowHistoryUsesSoftWrappedVisualBoundaries(t *testing.T) {
 
 	got.input.MoveToBegin()
 	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyUp})
-	if value := updated.(cyTUIModel).input.Value(); value != "older prompt" {
-		t.Fatalf("Up from first visual row = %q, want history", value)
+	got = updated.(cyTUIModel)
+	if value := got.input.Value(); value != strings.Repeat("wrapped ", 8) || got.historyIndex != len(got.history) {
+		t.Fatalf("Up from first visual row replaced draft: value=%q index=%d", value, got.historyIndex)
 	}
 }
 

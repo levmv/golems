@@ -9,6 +9,26 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+type countingBuffer struct {
+	bytes.Buffer
+	writes int
+}
+
+func (b *countingBuffer) Write(value []byte) (int, error) {
+	b.writes++
+	return b.Buffer.Write(value)
+}
+
+func (b *countingBuffer) WriteString(value string) (int, error) {
+	b.writes++
+	return b.Buffer.WriteString(value)
+}
+
+func (b *countingBuffer) reset() {
+	b.Buffer.Reset()
+	b.writes = 0
+}
+
 func TestInlineRendererFirstFrameDoesNotClearExistingTerminalHistory(t *testing.T) {
 	var output bytes.Buffer
 	renderer := newInlineRenderer(&output)
@@ -77,6 +97,32 @@ func TestInlineRendererUpdatesVisibleSuffixWithoutReplayingPrefix(t *testing.T) 
 	}
 	if strings.Contains(got, ansi.EraseEntireDisplay) {
 		t.Fatalf("visible suffix update purged scrollback: %q", got)
+	}
+}
+
+func TestInlineRendererCommitsChangedContentAndCursorTogether(t *testing.T) {
+	var output countingBuffer
+	renderer := newInlineRenderer(&output)
+	first := tea.NewView("history\n› draft\n\nfooter")
+	first.Cursor = tea.NewCursor(7, 1)
+	if err := renderer.Render(first, 80, 24); err != nil {
+		t.Fatal(err)
+	}
+
+	output.reset()
+	next := tea.NewView("history\n› drafts\n\nfooter")
+	next.Cursor = tea.NewCursor(8, 1)
+	if err := renderer.Render(next, 80, 24); err != nil {
+		t.Fatal(err)
+	}
+	if output.writes != 1 {
+		t.Fatalf("changed frame used %d terminal writes, want 1: %q", output.writes, output.String())
+	}
+	got := output.String()
+	cursorPosition := strings.LastIndex(got, ansi.CursorHorizontalAbsolute(9))
+	syncEnd := strings.LastIndex(got, ansi.ResetModeSynchronizedOutput)
+	if cursorPosition < 0 || syncEnd < 0 || cursorPosition > syncEnd {
+		t.Fatalf("cursor position was not committed inside synchronized output: %q", got)
 	}
 }
 

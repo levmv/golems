@@ -112,7 +112,10 @@ func (m cyTUIModel) editorView() string {
 	return m.input.View()
 }
 
-func (m cyTUIModel) markedEditorView() string {
+// markedEditorLines returns exactly one item per terminal row. The inline
+// renderer uses slice indices for row accounting and cursor positioning, so an
+// embedded newline here would desynchronize its model of the screen.
+func (m cyTUIModel) markedEditorLines() []string {
 	lines := strings.Split(strings.TrimSuffix(m.editorView(), "\n"), "\n")
 	for index, line := range lines {
 		marker := " "
@@ -121,7 +124,7 @@ func (m cyTUIModel) markedEditorView() string {
 		}
 		lines[index] = m.renderMarkedLine(marker, line, m.mutedStyle)
 	}
-	return strings.Join(lines, "\n")
+	return lines
 }
 
 func (m cyTUIModel) editorCursor() *tea.Cursor {
@@ -214,7 +217,9 @@ func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.syncCommandSuggestions()
 		return m, nil
 	case !hasCtrl && m.loginProvider == "" && (key.Code == tea.KeyUp || key.Code == tea.KeyKpUp || keyString == "up"):
-		if !m.editorAtFirstVisualLine() {
+		// Arrow keys must not replace a non-empty draft. Ctrl-P remains the
+		// explicit way to enter history without clearing the editor first.
+		if !m.editorAtFirstVisualLine() || (m.historyIndex >= len(m.history) && strings.TrimSpace(m.input.Value()) != "") {
 			return m.updateEditor(msg)
 		}
 		m.historyPrevious()

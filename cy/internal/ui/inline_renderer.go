@@ -221,13 +221,16 @@ func (r *inlineRenderer) fullRender(lines rendererFrame, cursor *tea.Cursor, wid
 		}
 		buffer.WriteString(lines.line(index))
 	}
+	renderCursorRow := max(0, lines.len()-1)
+	viewportTop := max(0, lines.len()-height)
+	hardwareCursorRow := appendCursorPosition(&buffer, cursor, lines.len(), renderCursorRow)
 	buffer.WriteString(ansi.ResetModeSynchronizedOutput)
 	if err := r.write(buffer.String()); err != nil {
 		return err
 	}
 
-	r.adoptFrame(lines, width, height, max(0, lines.len()-1), max(0, lines.len()-height))
-	return r.positionCursor(cursor, lines.len())
+	r.adoptFrame(lines, width, height, hardwareCursorRow, viewportTop)
+	return nil
 }
 
 func (r *inlineRenderer) differentialRender(lines rendererFrame, cursor *tea.Cursor, width, height, firstChanged, lastChanged int) error {
@@ -299,13 +302,15 @@ func (r *inlineRenderer) differentialRender(lines rendererFrame, cursor *tea.Cur
 		}
 		buffer.WriteString(ansi.CursorUp(extraLines))
 	}
+	viewportTop = max(previousViewportTop, finalCursorRow-height+1)
+	hardwareCursorRow = appendCursorPosition(&buffer, cursor, lines.len(), finalCursorRow)
 	buffer.WriteString(ansi.ResetModeSynchronizedOutput)
 	if err := r.write(buffer.String()); err != nil {
 		return err
 	}
 
-	r.adoptFrame(lines, width, height, finalCursorRow, max(previousViewportTop, finalCursorRow-height+1))
-	return r.positionCursor(cursor, lines.len())
+	r.adoptFrame(lines, width, height, hardwareCursorRow, viewportTop)
+	return nil
 }
 
 // Invalidate makes the next frame authoritative. This is used when /clear
@@ -392,27 +397,36 @@ func (r *inlineRenderer) renderDeletion(lines rendererFrame, cursor *tea.Cursor,
 		}
 	}
 	buffer.WriteString(ansi.CursorUp(extraLines))
+	hardwareCursorRow := appendCursorPosition(&buffer, cursor, lines.len(), targetRow)
 	buffer.WriteString(ansi.ResetModeSynchronizedOutput)
 	if err := r.write(buffer.String()); err != nil {
 		return err
 	}
 
-	r.adoptFrame(lines, width, height, targetRow, viewportTop)
-	return r.positionCursor(cursor, lines.len())
+	r.adoptFrame(lines, width, height, hardwareCursorRow, viewportTop)
+	return nil
 }
 
 func (r *inlineRenderer) positionCursor(cursor *tea.Cursor, totalLines int) error {
+	var buffer strings.Builder
+	hardwareCursorRow := appendCursorPosition(&buffer, cursor, totalLines, r.hardwareCursorRow)
+	if err := r.write(buffer.String()); err != nil {
+		return err
+	}
+	r.hardwareCursorRow = hardwareCursorRow
+	return nil
+}
+
+func appendCursorPosition(buffer *strings.Builder, cursor *tea.Cursor, totalLines, currentRow int) int {
 	if cursor == nil || totalLines == 0 {
-		return r.write(ansi.ResetModeTextCursorEnable)
+		buffer.WriteString(ansi.ResetModeTextCursorEnable)
+		return currentRow
 	}
 	targetRow := min(max(0, cursor.Y), totalLines-1)
-	targetColumn := max(0, cursor.X)
-	var buffer strings.Builder
-	writeVerticalMove(&buffer, targetRow-r.hardwareCursorRow)
-	buffer.WriteString(ansi.CursorHorizontalAbsolute(targetColumn + 1))
+	writeVerticalMove(buffer, targetRow-currentRow)
+	buffer.WriteString(ansi.CursorHorizontalAbsolute(max(0, cursor.X) + 1))
 	buffer.WriteString(ansi.SetModeTextCursorEnable)
-	r.hardwareCursorRow = targetRow
-	return r.write(buffer.String())
+	return targetRow
 }
 
 func (r *inlineRenderer) Stop() error {
