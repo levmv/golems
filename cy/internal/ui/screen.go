@@ -102,8 +102,8 @@ var tuiCommands = []tuiCommand{
 	{name: "/usage", description: "show token usage"},
 	{name: "/context", description: "show context budget"},
 	{name: "/compact", description: "compact context, optionally with a focus"},
-	{name: "/login", description: "choose a provider and enter an API key"},
-	{name: "/logout", description: "remove a provider credential"},
+	{name: "/login", description: "manage provider credentials"},
+	{name: "/logout", description: "remove a stored provider credential"},
 	{name: "/model", description: "list or switch models"},
 	{name: "/profile", description: "show or switch the capability profile"},
 	{name: "/exit", description: "exit Cy"},
@@ -117,25 +117,27 @@ const (
 	pickerModel
 	pickerProfile
 	pickerLogin
+	pickerLogout
 )
 
 type pickerItem struct {
-	value         string
-	label         string
-	description   string
-	section       string
-	credentialURL string
-	current       bool
-	custom        bool
-	efforts       []string
-	effortIndex   int
+	value            string
+	label            string
+	description      string
+	section          string
+	credentialURL    string
+	credentialSource string
+	current          bool
+	custom           bool
+	efforts          []string
+	effortIndex      int
 }
 
 type pickerState struct {
-	kind        pickerKind
-	items       []pickerItem
-	index       int
-	loginSwitch bool
+	kind         pickerKind
+	items        []pickerItem
+	index        int
+	startupLogin bool
 }
 
 func (p pickerState) active() bool { return p.kind != pickerNone && len(p.items) > 0 }

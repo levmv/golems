@@ -443,6 +443,61 @@ func TestTUIInitialLoginSelectionSwitchesProviderModel(t *testing.T) {
 	}
 }
 
+func TestTUIStartupPickerUsesConfiguredProvider(t *testing.T) {
+	control := &authPickerAgent{
+		statuses: []providerStatus{
+			{Name: "deepseek", Source: "none"},
+			{Name: "openrouter", Source: "environment override"},
+		},
+		models: []string{"deepseek/deepseek-v4-flash", "openrouter/test-model"},
+	}
+	model := newCyTUIModel(context.Background(), control, Config{ModelURI: "deepseek/deepseek-v4-flash"}, ".", nil)
+	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	updated, cmd := updated.(cyTUIModel).Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(cyTUIModel)
+	if got.loginProvider != "" || control.loginProvider != "" || got.maintenance != "switching model" || cmd == nil {
+		t.Fatalf("configured provider selection = login %q/%q, maintenance %q, cmd %v", got.loginProvider, control.loginProvider, got.maintenance, cmd)
+	}
+	updated, _ = got.Update(cmd())
+	got = updated.(cyTUIModel)
+	if control.switchedModel != "openrouter/test-model" || got.cfg.ModelURI != "openrouter/test-model" {
+		t.Fatalf("model switch = %q, cfg model = %q", control.switchedModel, got.cfg.ModelURI)
+	}
+}
+
+func TestTUILoginDoesNotReplaceEnvironmentOverride(t *testing.T) {
+	control := &authPickerAgent{statuses: []providerStatus{{Name: "deepseek", Source: "environment override"}}}
+	model := newCyTUIModel(context.Background(), control, Config{ModelURI: "deepseek/deepseek-v4-flash"}, ".", nil)
+	model.input.SetValue("/login")
+	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	updated, _ = updated.(cyTUIModel).Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(cyTUIModel)
+	if got.loginProvider != "" || control.loginProvider != "" {
+		t.Fatalf("environment login opened key input: model=%q agent=%q", got.loginProvider, control.loginProvider)
+	}
+	if last := got.blocks[len(got.blocks)-1]; last.kind != screenBlockSystem {
+		t.Fatalf("environment login result = %#v", last)
+	}
+}
+
+func TestTUIBareLogoutOffersStoredCredentials(t *testing.T) {
+	control := &authPickerAgent{statuses: []providerStatus{
+		{Name: "deepseek", Source: "auth store", Category: "Model providers"},
+		{Name: "openrouter", Source: "environment override", Category: "Model providers"},
+	}}
+	model := newCyTUIModel(context.Background(), control, Config{ModelURI: "openrouter/test-model"}, ".", nil)
+	model.input.SetValue("/logout")
+	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(cyTUIModel)
+	if got.picker.kind != pickerLogout || len(got.picker.items) != 1 || got.picker.items[0].value != "deepseek" {
+		t.Fatalf("logout picker = %#v", got.picker)
+	}
+	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if control.logoutProvider != "deepseek" {
+		t.Fatalf("logged out provider = %q", control.logoutProvider)
+	}
+}
+
 func TestTUILoginPickerGroupsModelsAndServices(t *testing.T) {
 	control := &authPickerAgent{statuses: []providerStatus{
 		{Name: "deepseek", Source: "auth store", Category: "Model providers", Description: "model provider"},
@@ -1080,6 +1135,7 @@ type authPickerAgent struct {
 	statuses       []providerStatus
 	models         []string
 	loginProvider  string
+	logoutProvider string
 	switchedModel  string
 	switchedEffort string
 	currentEffort  string
@@ -1110,7 +1166,10 @@ func (a *authPickerAgent) Login(provider, _ string) error {
 	return nil
 }
 
-func (a *authPickerAgent) Logout(string) error { return nil }
+func (a *authPickerAgent) Logout(provider string) error {
+	a.logoutProvider = provider
+	return nil
+}
 func (a *authPickerAgent) SwitchModelWithEffort(uri, effort string) error {
 	a.switchedModel = uri
 	a.switchedEffort = effort

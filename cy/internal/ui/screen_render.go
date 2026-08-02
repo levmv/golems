@@ -155,9 +155,9 @@ func commandDescription(name string) string {
 	case strings.HasPrefix(name, "/profile "):
 		return "switch capability profile"
 	case strings.HasPrefix(name, "/login "):
-		return "authenticate this provider"
+		return "manage this provider credential"
 	case strings.HasPrefix(name, "/logout "):
-		return "remove this provider credential"
+		return "remove this stored provider credential"
 	case strings.HasPrefix(name, "/model "):
 		return ""
 	}

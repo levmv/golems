@@ -2,7 +2,6 @@ package ui
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"time"
 
@@ -299,12 +298,7 @@ func (m cyTUIModel) submitInput() (tea.Model, tea.Cmd) {
 		} else {
 			m.addBlock(screenBlockSystem, "logged in to "+provider)
 			if switchModel && modelProvider(m.cfg.ModelURI) != provider {
-				modelURI := firstProviderModel(m.agent.KnownModels(), provider)
-				if modelURI == "" {
-					m.addBlock(screenBlockError, fmt.Sprintf("login: no model is known for %s", provider))
-				} else {
-					cmd = m.startModelSwitch(modelURI, "")
-				}
+				cmd = m.startProviderModelSwitch(provider)
 			}
 		}
 		m.refreshScreen()

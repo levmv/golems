@@ -55,7 +55,7 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 		if len(items) == 0 {
 			m.addBlock(screenBlockSystem, "no other sessions")
 		} else {
-			m.openPicker(pickerSession, items, 0, false)
+			m.openPicker(pickerSession, items, 0)
 		}
 	case "/usage":
 		usage, err := m.agent.SessionUsage()
@@ -83,21 +83,22 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 			break
 		}
 		provider := strings.ToLower(fields[1])
-		if !m.isLoginProvider(provider) {
+		status, ok, err := m.providerStatus(provider)
+		if err != nil {
+			m.addBlock(screenBlockError, "login: "+err.Error())
+			break
+		}
+		if !ok {
 			m.addBlock(screenBlockError, "login: unsupported provider "+provider)
 			break
 		}
-		m.beginLogin(provider, false, m.providerCredentialURL(provider))
+		cmd = m.startProviderLogin(provider, status.Source, status.CredentialURL, false)
 	case "/logout":
-		if len(fields) < 2 {
-			m.addBlock(screenBlockError, "usage: /logout <provider>")
+		if len(fields) == 1 {
+			m.openLogoutPicker()
 			break
 		}
-		if err := m.agent.Logout(fields[1]); err != nil {
-			m.addBlock(screenBlockError, "logout: "+err.Error())
-		} else {
-			m.addBlock(screenBlockSystem, "logged out of "+fields[1])
-		}
+		m.logoutProvider(fields[1])
 	case "/model":
 		if len(fields) == 1 {
 			m.openModelPicker()
@@ -119,16 +120,6 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 		m.addBlock(screenBlockError, "unknown command: "+fields[0])
 	}
 	return true, false, cmd
-}
-
-func (m *cyTUIModel) isLoginProvider(provider string) bool {
-	provider = strings.ToLower(strings.TrimSpace(provider))
-	for _, known := range m.cfg.providers() {
-		if provider == known {
-			return true
-		}
-	}
-	return false
 }
 
 func (m *cyTUIModel) openModelPicker() {
@@ -182,7 +173,7 @@ func (m *cyTUIModel) openModelPicker() {
 		}
 	}
 	items = append(items, pickerItem{label: "Enter model URI…", description: "provider/model", custom: true})
-	m.openPicker(pickerModel, items, selected, false)
+	m.openPicker(pickerModel, items, selected)
 }
 
 func (m *cyTUIModel) openProfilePicker() {
@@ -197,10 +188,10 @@ func (m *cyTUIModel) openProfilePicker() {
 			selected = len(items) - 1
 		}
 	}
-	m.openPicker(pickerProfile, items, selected, false)
+	m.openPicker(pickerProfile, items, selected)
 }
 
-func (m *cyTUIModel) openLoginPicker(onlyIfMissing bool) {
+func (m *cyTUIModel) openLoginPicker(startup bool) {
 	statuses, err := m.agent.ProviderStatuses()
 	if err != nil {
 		m.addBlock(screenBlockError, "login: "+err.Error())
@@ -211,7 +202,7 @@ func (m *cyTUIModel) openLoginPicker(onlyIfMissing bool) {
 	currentMissing := false
 	items := make([]pickerItem, 0, len(statuses))
 	for _, status := range statuses {
-		if onlyIfMissing && status.Category != "" && status.Category != "Model providers" {
+		if startup && status.Category != "" && status.Category != "Model providers" {
 			continue
 		}
 		if status.Name == currentProvider {
@@ -231,30 +222,58 @@ func (m *cyTUIModel) openLoginPicker(onlyIfMissing bool) {
 			description += " · current model"
 		}
 		items = append(items, pickerItem{
-			value:         status.Name,
-			label:         status.Name,
-			description:   description,
-			section:       status.Category,
-			credentialURL: status.CredentialURL,
-			current:       status.Name == currentProvider,
+			value:            status.Name,
+			label:            status.Name,
+			description:      description,
+			section:          status.Category,
+			credentialURL:    status.CredentialURL,
+			credentialSource: status.Source,
+			current:          status.Name == currentProvider,
 		})
 	}
-	if onlyIfMissing && !currentMissing {
+	if startup && !currentMissing {
 		return
 	}
 	if len(items) == 0 {
-		if !onlyIfMissing {
+		if !startup {
 			m.addBlock(screenBlockError, "login: no providers available")
 		}
 		return
 	}
 
-	m.openPicker(pickerLogin, items, selected, onlyIfMissing)
-
+	m.openPicker(pickerLogin, items, selected)
+	m.picker.startupLogin = startup
 }
 
-func (m *cyTUIModel) openPicker(kind pickerKind, items []pickerItem, selected int, loginSwitch bool) {
-	m.picker = pickerState{kind: kind, items: items, index: min(max(0, selected), len(items)-1), loginSwitch: loginSwitch}
+func (m *cyTUIModel) openLogoutPicker() {
+	statuses, err := m.agent.ProviderStatuses()
+	if err != nil {
+		m.addBlock(screenBlockError, "logout: "+err.Error())
+		return
+	}
+	items := make([]pickerItem, 0, len(statuses))
+	for _, status := range statuses {
+		// Environment overrides are configured, but Cy cannot remove them. Keep
+		// this picker limited to credentials the selected action can delete.
+		if status.Source != "auth store" {
+			continue
+		}
+		items = append(items, pickerItem{
+			value:       status.Name,
+			label:       status.Name,
+			description: status.Description,
+			section:     status.Category,
+		})
+	}
+	if len(items) == 0 {
+		m.addBlock(screenBlockSystem, "no stored credentials")
+		return
+	}
+	m.openPicker(pickerLogout, items, 0)
+}
+
+func (m *cyTUIModel) openPicker(kind pickerKind, items []pickerItem, selected int) {
+	m.picker = pickerState{kind: kind, items: items, index: min(max(0, selected), len(items)-1)}
 	m.input.Reset()
 	m.disableCommandSuggestions()
 }
@@ -318,7 +337,9 @@ func (m *cyTUIModel) selectPickerItem() tea.Cmd {
 			m.addBlock(screenBlockSystem, "profile: "+m.cfg.CapabilityProfile)
 		}
 	case pickerLogin:
-		m.beginLogin(item.value, picker.loginSwitch, item.credentialURL)
+		return m.startProviderLogin(item.value, item.credentialSource, item.credentialURL, picker.startupLogin)
+	case pickerLogout:
+		m.logoutProvider(item.value)
 	}
 	return nil
 }
@@ -357,7 +378,7 @@ func (m *cyTUIModel) closePicker() {
 	m.configureCommandSuggestions()
 }
 
-func (m *cyTUIModel) beginLogin(provider string, switchModel bool, credentialURL string) {
+func (m *cyTUIModel) beginLogin(provider string, switchModel bool, credentialURL string, replace bool) {
 	m.loginProvider = provider
 	m.loginSwitchModel = switchModel
 	m.secret.Reset()
@@ -365,23 +386,40 @@ func (m *cyTUIModel) beginLogin(provider string, switchModel bool, credentialURL
 	m.secret.Placeholder = provider + " API key"
 	m.disableCommandSuggestions()
 	message := "enter " + provider + " API key (input is hidden)"
+	if replace {
+		message = "enter a new " + provider + " API key (input is hidden)"
+	}
 	if credentialURL != "" {
 		message += "; create or manage keys at " + credentialURL
 	}
 	m.addBlock(screenBlockSystem, message)
 }
 
-func (m *cyTUIModel) providerCredentialURL(provider string) string {
+func (m *cyTUIModel) startProviderLogin(provider, source, credentialURL string, startup bool) tea.Cmd {
+	// The startup picker solves a missing credential for the current model. A
+	// configured alternative is ready to use and only needs a model switch.
+	if startup && source != "none" {
+		return m.startProviderModelSwitch(provider)
+	}
+	if source == "environment override" {
+		m.addBlock(screenBlockSystem, provider+" is supplied by an environment override")
+		return nil
+	}
+	m.beginLogin(provider, startup, credentialURL, source == "auth store")
+	return nil
+}
+
+func (m *cyTUIModel) providerStatus(provider string) (providerStatus, bool, error) {
 	statuses, err := m.agent.ProviderStatuses()
 	if err != nil {
-		return ""
+		return providerStatus{}, false, err
 	}
 	for _, status := range statuses {
 		if status.Name == provider {
-			return status.CredentialURL
+			return status, true, nil
 		}
 	}
-	return ""
+	return providerStatus{}, false, nil
 }
 
 func compactCmd(ctx context.Context, agent screenAgent, focus string) tea.Cmd {
@@ -396,6 +434,24 @@ func (m *cyTUIModel) startModelSwitch(uri, effort string) tea.Cmd {
 	m.maintenance = "switching model"
 	m.maintenanceCancel = nil
 	return switchModelCmd(m.agent, uri, effort)
+}
+
+func (m *cyTUIModel) startProviderModelSwitch(provider string) tea.Cmd {
+	modelURI := firstProviderModel(m.agent.KnownModels(), provider)
+	if modelURI == "" {
+		m.addBlock(screenBlockError, "model: no model is known for "+provider)
+		return nil
+	}
+	return m.startModelSwitch(modelURI, "")
+}
+
+func (m *cyTUIModel) logoutProvider(provider string) {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if err := m.agent.Logout(provider); err != nil {
+		m.addBlock(screenBlockError, "logout: "+err.Error())
+	} else {
+		m.addBlock(screenBlockSystem, "logged out of "+provider)
+	}
 }
 
 func switchModelCmd(agent screenAgent, uri, effort string) tea.Cmd {
