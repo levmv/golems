@@ -109,7 +109,7 @@ Applicable `AGENTS.md` instructions are still loaded separately.
 ## Tools and profiles
 
 Cy exposes workspace search and file editing, managed Bash processes, public
-page fetching, Hacker News feeds and threads, and optional web search.
+page fetching, and optional web search.
 
 | Profile | Available tools |
 | --- | --- |

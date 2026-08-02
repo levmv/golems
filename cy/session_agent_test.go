@@ -76,7 +76,7 @@ func TestConfiguredToolsIncludeFetchAndCredentialedSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolNames(tools); strings.Join(got, ",") != "web_fetch,hacker_news" {
+	if got := toolNames(tools); strings.Join(got, ",") != "web_fetch" {
 		t.Fatalf("tools without search credential = %v", got)
 	}
 	if err := store.SetAPIKey("tavily", "tvly-test-key"); err != nil {
@@ -86,7 +86,7 @@ func TestConfiguredToolsIncludeFetchAndCredentialedSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := toolNames(tools); strings.Join(got, ",") != "web_fetch,hacker_news,web_search" {
+	if got := toolNames(tools); strings.Join(got, ",") != "web_fetch,web_search" {
 		t.Fatalf("tools with search credential = %v", got)
 	}
 }

@@ -29,9 +29,6 @@ func TestDescribeToolCallUsesBuiltInArguments(t *testing.T) {
 		{name: "job", tool: "job", args: `{"action":"output","job_id":"job-123"}`, want: "job  output job-123"},
 		{name: "web search", tool: "web_search", args: `{"query":"Go durable agents"}`, want: `web  "Go durable agents"`},
 		{name: "web fetch", tool: "web_fetch", args: `{"url":"https://example.com/docs?q=private#part"}`, want: "fetch  https://example.com/docs?…"},
-		{name: "Hacker News feed", tool: "hacker_news", args: `{"view":"top","limit":10}`, want: "hn  top · 10"},
-		{name: "Hacker News search", tool: "hacker_news", args: `{"view":"search","query":"SQLite replication","limit":10}`, want: `hn  search "SQLite replication"`},
-		{name: "Hacker News thread", tool: "hacker_news", args: `{"view":"thread","item":"123"}`, want: "hn  thread 123"},
 	}
 
 	for _, test := range tests {

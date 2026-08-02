@@ -147,25 +147,6 @@ func describeToolCall(name, rawArguments string) compactToolCall {
 			return fallback
 		}
 		return compactToolCall{Text: "fetch  " + compactURL(args.URL)}
-	case "hacker_news":
-		var args struct {
-			View  string `json:"view"`
-			Limit int    `json:"limit"`
-			Item  string `json:"item"`
-			Query string `json:"query"`
-		}
-		if !decodeToolDisplayArgs(rawArguments, &args) {
-			return fallback
-		}
-		text := "hn  " + compactSingleLine(args.View, 24)
-		if strings.TrimSpace(args.Query) != "" {
-			text += " " + quoteToolValue(args.Query, 120)
-		} else if strings.TrimSpace(args.Item) != "" {
-			text += " " + compactSingleLine(args.Item, 100)
-		} else if args.Limit > 0 {
-			text += fmt.Sprintf(" · %d", args.Limit)
-		}
-		return compactToolCall{Text: strings.TrimSpace(text)}
 	default:
 		return fallback
 	}

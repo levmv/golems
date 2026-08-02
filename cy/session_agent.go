@@ -259,7 +259,6 @@ func (a *sessionAgent) toolsForProfile(processes *toolruntime.ProcessManager, pr
 		return nil, err
 	}
 	tools = append(tools, webfetch.NewTool(fetchBackends...))
-	tools = append(tools, hackernews.NewTool(hnClient))
 	credentials := make([]websearch.Credential, 0, len(serviceCatalog))
 	for _, service := range serviceCatalog {
 		if !service.search {
