@@ -36,6 +36,7 @@ func runMain() (returnErr error) {
 	cfg := LoadConfig()
 
 	modelURI := flag.String("model", cfg.ModelURI, "model URI in provider/model format")
+	systemPrompt := flag.String("system-prompt", cfg.SystemPrompt, "replace the built-in system prompt")
 	rootDir := flag.String("root", cfg.RootDir, "workspace root for file and search tools")
 	home := flag.String("home", cfg.Home, "Cy home directory (defaults to CY_HOME or ~/.cy)")
 	verbose := flag.Bool("v", false, "show progress and usage in one-shot mode")
@@ -58,6 +59,7 @@ func runMain() (returnErr error) {
 		return nil
 	}
 	cfg.ModelURI = strings.TrimSpace(*modelURI)
+	cfg.SystemPrompt = *systemPrompt
 	cfg.RootDir = *rootDir
 	cfg.Home = *home
 	cfg.Verbose = *verbose

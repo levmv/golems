@@ -92,6 +92,7 @@ Flags override environment variables, which override saved defaults.
 | Flag | Environment | Purpose |
 | --- | --- | --- |
 | `--model` | `CY_MODEL` | Model URI in `provider/model` form |
+| `--system-prompt` | `CY_SYSTEM_PROMPT` | Replace the built-in system prompt |
 | `--root` | `CY_ROOT` | Workspace available to tools |
 | `--home` | `CY_HOME` | Credentials, sessions, and tool state |
 | `--profile` | `CY_PROFILE` | `full`, `edit`, or `read-only` |
@@ -101,6 +102,9 @@ Flags override environment variables, which override saved defaults.
 Run `cy --help` for all flags. `CY_COLOR=always|never` controls ANSI styling;
 `NO_COLOR` disables it. In `auto` theme mode, Cy queries the terminal
 background and falls back to the light palette when no answer is available.
+
+`--system-prompt` replaces the built-in prompt for the current invocation.
+Applicable `AGENTS.md` instructions are still loaded separately.
 
 ## Tools and profiles
 

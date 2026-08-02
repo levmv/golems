@@ -338,6 +338,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		Model:              model,
 		Session:            journal,
 		ModelURI:           cfg.ModelURI,
+		SystemPrompt:       cfg.SystemPrompt,
 		InstructionPrompts: instructionPrompts,
 		ContextWindow:      spec.ContextWindow,
 		ContextEstimated:   spec.Estimated,

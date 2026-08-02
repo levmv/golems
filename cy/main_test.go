@@ -24,6 +24,13 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestLoadConfigReadsSystemPrompt(t *testing.T) {
+	t.Setenv("CY_SYSTEM_PROMPT", "custom system prompt")
+	if got := LoadConfig().SystemPrompt; got != "custom system prompt" {
+		t.Fatalf("SystemPrompt = %q", got)
+	}
+}
+
 func TestApplyResumedConfigHonorsExplicitEnvironment(t *testing.T) {
 	t.Setenv("CY_MODEL", "openai/from-env")
 	t.Setenv("CY_ROOT", "/from-env")
