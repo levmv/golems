@@ -600,7 +600,7 @@ func (a *sessionAgent) requireModelCredential() error {
 		return err
 	}
 	if token == "" {
-		return fmt.Errorf("%s API key is empty for model %q; use /login %s", provider, uri, provider)
+		return missingProviderCredentialError(provider, uri)
 	}
 	return nil
 }

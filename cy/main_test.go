@@ -114,23 +114,6 @@ type sessionTaggedAgent struct {
 
 func (a sessionTaggedAgent) SessionID() string { return a.id }
 
-func TestParseInvocationResume(t *testing.T) {
-	id, remaining, err := parseInvocation([]string{"resume", "01234567", "continue", "now"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "01234567" || strings.Join(remaining, " ") != "continue now" {
-		t.Fatalf("id=%q remaining=%q", id, remaining)
-	}
-}
-
-func TestParseInvocationRequiresResumeID(t *testing.T) {
-	_, _, err := parseInvocation([]string{"resume"})
-	if err == nil || !strings.Contains(err.Error(), "requires") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 func TestBuildModelRejectsIncompleteURI(t *testing.T) {
 	for _, uri := range []string{"ollama", "ollama/", "/model"} {
 		if _, err := buildModel(Config{ModelURI: uri}, nil, false); err == nil {
@@ -139,18 +122,10 @@ func TestBuildModelRejectsIncompleteURI(t *testing.T) {
 	}
 }
 
-func TestBuildModelMissingCredentialSuggestsLogin(t *testing.T) {
+func TestBuildModelRequiresCredentialWhenSelected(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "")
-	_, err := buildModel(Config{ModelURI: "deepseek/deepseek-v4-flash"}, nil, true)
-	if err == nil || !strings.Contains(err.Error(), "use /login deepseek") {
-		t.Fatalf("missing credential error = %v, want login guidance", err)
-	}
-}
-
-func TestControlLoginRejectsUnknownProviderBeforePrompt(t *testing.T) {
-	handled, err := handleControlInvocation([]string{"login", "unknown"}, Config{}, nil)
-	if !handled || err == nil || !strings.Contains(err.Error(), "unsupported login provider") {
-		t.Fatalf("handleControlInvocation() handled=%v err=%v", handled, err)
+	if _, err := buildModel(Config{ModelURI: "deepseek/deepseek-v4-flash"}, nil, true); err == nil {
+		t.Fatal("buildModel() accepted a selected model without credentials")
 	}
 }
 

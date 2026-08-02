@@ -45,6 +45,11 @@ func runMain() (returnErr error) {
 	sandbox := flag.String("sandbox", cfg.SandboxPolicy, "Bash sandbox policy: auto, require, or off")
 	theme := flag.String("theme", cfg.TerminalTheme, "terminal theme: auto, light, or dark")
 	showVersion := flag.Bool("version", false, "print the Cy version and exit")
+	flag.Usage = func() { writeCLIUsage(flag.CommandLine) }
+	// flag.Parse removes --, so remember whether it was a delimiter before the
+	// positional arguments. That distinction makes `cy -- resume ...` a prompt
+	// without mistaking a flag value equal to "--" for explicit prompt mode.
+	explicitPrompt := hasFlagTerminator(flag.CommandLine, os.Args[1:])
 	flag.Parse()
 	setFlags := make(map[string]bool)
 	flag.Visit(func(value *flag.Flag) { setFlags[value.Name] = true })
@@ -92,14 +97,8 @@ func runMain() (returnErr error) {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	if handled, err := handleControlInvocation(flag.Args(), cfg, store); handled {
-		return err
-	}
-
-	resumeID, args, err := parseInvocation(flag.Args())
-	if err != nil {
-		return err
-	}
+	invocation := parseInvocation(flag.Args(), explicitPrompt)
+	resumeID, args := invocation.SessionID, invocation.Args
 	pipedInput := ""
 	hasPipe := false
 	if len(args) == 0 {
@@ -109,6 +108,22 @@ func runMain() (returnErr error) {
 		}
 	}
 	cfg.PrintMode = len(args) > 0 || hasPipe
+
+	var tools []golem.Tool
+	var root string
+	if invocation.Resume && resumeID == "" {
+		// Bare resume is workspace-scoped. Build the tools now to obtain the same
+		// canonical, symlink-free root that is recorded in session journals, then
+		// reuse them after opening the selected session.
+		tools, root, err = toolruntime.NewWorkspaceTools(cfg.RootDir)
+		if err != nil {
+			return fmt.Errorf("initialize workspace tools: %w", err)
+		}
+		resumeID, err = latestSessionID(cfg.Home, root)
+		if err != nil {
+			return err
+		}
+	}
 	cfg.Ephemeral = useEphemeralSession(cfg, resumeID)
 
 	var journal *session.Session
@@ -131,9 +146,11 @@ func runMain() (returnErr error) {
 		applyResumedConfig(&cfg, resumed, setFlags)
 	}
 
-	tools, root, err := toolruntime.NewWorkspaceTools(cfg.RootDir)
-	if err != nil {
-		return fmt.Errorf("initialize workspace tools: %w", err)
+	if tools == nil {
+		tools, root, err = toolruntime.NewWorkspaceTools(cfg.RootDir)
+		if err != nil {
+			return fmt.Errorf("initialize workspace tools: %w", err)
+		}
 	}
 	cfg.Security = buildSecurityState(ctx, cfg, root, store)
 	if cfg.SandboxPolicy == sandboxRequire && cfg.Security.Sandbox != "landlock" {
@@ -247,7 +264,7 @@ func buildModel(cfg Config, store *state.Store, requireCredential bool) (llm.Mod
 			return llm.Model{}, err
 		}
 		if requireCredential && token == "" {
-			return llm.Model{}, fmt.Errorf("%s API key is empty for model %q; use /login %s", provider, cfg.ModelURI, provider)
+			return llm.Model{}, missingProviderCredentialError(provider, cfg.ModelURI)
 		}
 		if provider == "openrouter" {
 			registry.WithProvider(provider, token, llm.WithAppAttribution("Cy", "https://github.com/levmv/golems"))
@@ -360,79 +377,4 @@ func modelProvider(uri string) string {
 		return ""
 	}
 	return strings.ToLower(strings.TrimSpace(provider))
-}
-
-func parseInvocation(args []string) (resumeID string, remaining []string, err error) {
-	if len(args) == 0 || strings.ToLower(args[0]) != "resume" {
-		return "", args, nil
-	}
-	if len(args) < 2 || strings.TrimSpace(args[1]) == "" {
-		return "", nil, errors.New("resume requires a session id or unique prefix")
-	}
-	return args[1], args[2:], nil
-}
-
-func handleControlInvocation(args []string, cfg Config, store *state.Store) (bool, error) {
-	if len(args) == 0 {
-		return false, nil
-	}
-	switch strings.ToLower(args[0]) {
-	case "login":
-		if len(args) < 2 {
-			statuses, err := listProviderStatus(store)
-			if err != nil {
-				return true, err
-			}
-			for _, status := range statuses {
-				fmt.Fprintf(os.Stdout, "%s\t%s\n", status.Name, status.Source)
-			}
-			return true, nil
-		}
-		provider := strings.ToLower(strings.TrimSpace(args[1]))
-		if !isLoginProvider(provider) {
-			return true, fmt.Errorf("unsupported login provider %q", provider)
-		}
-		if providerEnvToken(provider) != "" {
-			return true, fmt.Errorf("%s is supplied by an environment override; unset it to log in", provider)
-		}
-		key, err := promptAPIKey(provider)
-		if err != nil {
-			return true, err
-		}
-		if _, err := storeProviderCredential(store, provider, key); err != nil {
-			return true, err
-		}
-		fmt.Fprintf(os.Stdout, "logged in to %s\n", provider)
-		return true, nil
-	case "logout":
-		if len(args) < 2 {
-			return true, errors.New("logout requires a provider")
-		}
-		provider := strings.ToLower(strings.TrimSpace(args[1]))
-		if err := deleteProviderCredential(store, provider); err != nil {
-			return true, err
-		}
-		fmt.Fprintf(os.Stdout, "logged out of %s\n", provider)
-		return true, nil
-	case "model":
-		if len(args) == 1 {
-			for _, model := range knownModels(store) {
-				fmt.Fprintln(os.Stdout, model)
-			}
-			return true, nil
-		}
-		cfg.ModelURI = strings.TrimSpace(args[1])
-		cfg.ReasoningEffort = defaultReasoningEffort
-		if _, err := buildModel(cfg, store, true); err != nil {
-			return true, err
-		}
-		resolveModelSpec(cfg.ModelURI, store, true)
-		if err := store.SetDefaultModel(cfg.ModelURI); err != nil {
-			return true, err
-		}
-		fmt.Fprintf(os.Stdout, "default model: %s\n", cfg.ModelURI)
-		return true, nil
-	default:
-		return false, nil
-	}
 }

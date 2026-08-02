@@ -108,10 +108,6 @@ func (s *Store) DeleteAPIKey(provider string) error {
 	})
 }
 
-func (s *Store) SetDefaultModel(model string) error {
-	return s.SetDefaultModelSelection(model, "")
-}
-
 func (s *Store) SetDefaultModelSelection(model, reasoningEffort string) error {
 	model = strings.TrimSpace(model)
 	return s.updateConfig(func(config *Config) {

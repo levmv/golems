@@ -303,7 +303,7 @@ func TestSessionAgentMissingCredentialFailsAtModelCallBoundary(t *testing.T) {
 	defer agent.Close()
 
 	_, err = agent.Stream(context.Background(), "hello", nil)
-	if err == nil || !strings.Contains(err.Error(), "use /login deepseek") {
+	if err == nil || !strings.Contains(err.Error(), "set DEEPSEEK_API_KEY") || !strings.Contains(err.Error(), "use /login deepseek") {
 		t.Fatalf("Stream() error = %v, want login guidance", err)
 	}
 	state, replayErr := journal.Replay()

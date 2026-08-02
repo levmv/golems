@@ -12,7 +12,7 @@ func TestStoreSeparatesConfigAndAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetDefaultModel("openai/test"); err != nil {
+	if err := store.SetDefaultModelSelection("openai/test", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SetDefaultModelSelection("deepseek/deepseek-v4-flash", "high"); err != nil {

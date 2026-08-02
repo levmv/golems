@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/charmbracelet/x/term"
 	"github.com/levmv/golems/cy/internal/state"
 	"github.com/levmv/golems/cy/internal/ui"
 )
@@ -49,19 +48,38 @@ func credentialForProvider(store *state.Store, provider string) (token, source s
 }
 
 func providerEnvToken(provider string) string {
-	switch provider {
-	case "deepseek":
-		return strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
-	case "openai":
-		return strings.TrimSpace(os.Getenv("OPENAI_API_KEY"))
-	case "openrouter":
-		return strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
-	}
-	service, ok := serviceForProvider(provider)
-	if !ok {
+	name := providerEnvName(provider)
+	if name == "" {
 		return ""
 	}
-	return strings.TrimSpace(os.Getenv(service.env))
+	return strings.TrimSpace(os.Getenv(name))
+}
+
+func providerEnvName(provider string) string {
+	switch provider {
+	case "deepseek":
+		return "DEEPSEEK_API_KEY"
+	case "openai":
+		return "OPENAI_API_KEY"
+	case "openrouter":
+		return "OPENROUTER_API_KEY"
+	}
+	for _, service := range serviceCatalog {
+		if service.name == provider {
+			return service.env
+		}
+	}
+	return ""
+}
+
+func missingProviderCredentialError(provider, modelURI string) error {
+	return fmt.Errorf(
+		"%s API key is empty for model %q; set %s or use /login %s in interactive Cy",
+		provider,
+		modelURI,
+		providerEnvName(provider),
+		provider,
+	)
 }
 
 func listProviderStatus(store *state.Store) ([]providerStatus, error) {
@@ -151,41 +169,4 @@ func deleteProviderCredential(store *state.Store, provider string) error {
 		return errors.New("auth store is unavailable")
 	}
 	return store.DeleteAPIKey(provider)
-}
-
-func promptAPIKey(provider string) (string, error) {
-	if !ui.IsTerminalFile(os.Stdin) {
-		return "", errors.New("API key prompt requires an interactive terminal")
-	}
-	if credentialURL := providerCredentialURL(provider); credentialURL != "" {
-		fmt.Fprintf(os.Stderr, "Create or manage keys at %s\n", credentialURL)
-	}
-	fmt.Fprintf(os.Stderr, "%s API key: ", provider)
-	raw, err := term.ReadPassword(os.Stdin.Fd())
-	fmt.Fprintln(os.Stderr)
-	if err != nil {
-		return "", fmt.Errorf("read API key: %w", err)
-	}
-	key := strings.TrimSpace(string(raw))
-	if key == "" {
-		return "", errors.New("API key is required")
-	}
-	return key, nil
-}
-
-func providerCredentialURL(provider string) string {
-	service, ok := serviceForProvider(provider)
-	if !ok {
-		return ""
-	}
-	return service.credentialURL
-}
-
-func serviceForProvider(provider string) (serviceSpec, bool) {
-	for _, service := range serviceCatalog {
-		if service.name == provider {
-			return service, true
-		}
-	}
-	return serviceSpec{}, false
 }

@@ -25,36 +25,43 @@ go install ./cy
 cy                                      # interactive session
 cy "Review the current changes"         # one-shot
 printf '%s\n' "Summarize this repo" | cy
-cy -v "Run the focused tests"           # tool activity on stderr
-cy -json "Inspect the workspace"        # structured result on stdout
+cy -v "Run the focused tests"            # tool activity on stderr
+cy --json "Inspect the workspace"        # structured result on stdout
 ```
 
-New one-shot sessions are temporary unless `-save-session` is used:
+New one-shot sessions are temporary unless `--save-session` is used:
 
 ```bash
-cy -save-session "Investigate the flaky test"
+cy --save-session "Investigate the flaky test"
+cy resume                               # latest session in this workspace
 cy resume 01234567
 cy resume 01234567 "Continue the investigation"
 ```
 
 Session IDs may be shortened to a unique prefix.
 
-### Models and credentials
-
-Use `cy login` to inspect credentials, `cy login <provider>` to add one, and
-`cy model` to list or change models:
+Use `--` when a prompt begins with `resume`:
 
 ```bash
-cy login deepseek
-cy model
+cy -- resume the previous discussion
+```
+
+### Models and credentials
+
+Use `/login` and `/logout` in the interactive UI to manage credentials. Use
+`/model` to choose and remember a model, or `--model` to select one for a single
+invocation:
+
+```bash
+cy --model openrouter/moonshotai/kimi-k3 "Review these changes"
 ```
 
 DeepSeek, OpenAI, and OpenRouter credentials may instead be supplied through
 `DEEPSEEK_API_KEY`, `OPENAI_API_KEY`, and `OPENROUTER_API_KEY`. Local
-Ollama models use `cy -model ollama/<model>`.
+Ollama models use `cy --model ollama/<model>`.
 
 Optional web integrations use `TAVILY_API_KEY`, `EXA_API_KEY`, and
-`FIRECRAWL_API_KEY`, or the corresponding `cy login` commands.
+`FIRECRAWL_API_KEY`, or the corresponding `/login` commands.
 
 ## Interactive UI
 
@@ -84,14 +91,14 @@ Flags override environment variables, which override saved defaults.
 
 | Flag | Environment | Purpose |
 | --- | --- | --- |
-| `-model` | `CY_MODEL` | Model URI in `provider/model` form |
-| `-root` | `CY_ROOT` | Workspace available to tools |
-| `-home` | `CY_HOME` | Credentials, sessions, and tool state |
-| `-profile` | `CY_PROFILE` | `full`, `edit`, or `read-only` |
-| `-sandbox` | `CY_SANDBOX` | `auto`, `require`, or `off` |
-| `-theme` | `CY_THEME` | `auto`, `light`, or `dark` |
+| `--model` | `CY_MODEL` | Model URI in `provider/model` form |
+| `--root` | `CY_ROOT` | Workspace available to tools |
+| `--home` | `CY_HOME` | Credentials, sessions, and tool state |
+| `--profile` | `CY_PROFILE` | `full`, `edit`, or `read-only` |
+| `--sandbox` | `CY_SANDBOX` | `auto`, `require`, or `off` |
+| `--theme` | `CY_THEME` | `auto`, `light`, or `dark` |
 
-Run `cy -help` for all flags. `CY_COLOR=always|never` controls ANSI styling;
+Run `cy --help` for all flags. `CY_COLOR=always|never` controls ANSI styling;
 `NO_COLOR` disables it. In `auto` theme mode, Cy queries the terminal
 background and falls back to the light palette when no answer is available.
 

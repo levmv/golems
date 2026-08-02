@@ -83,10 +83,10 @@ func TestKnownModelsIncludesRecentSelections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetDefaultModel("openrouter/moonshotai/kimi-k3"); err != nil {
+	if err := store.SetDefaultModelSelection("openrouter/moonshotai/kimi-k3", ""); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetDefaultModel("deepseek/deepseek-v4-flash"); err != nil {
+	if err := store.SetDefaultModelSelection("deepseek/deepseek-v4-flash", ""); err != nil {
 		t.Fatal(err)
 	}
 
