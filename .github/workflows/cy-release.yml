@@ -21,11 +21,6 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Install runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends ripgrep
-
       - name: Test Cy
         run: go test ./cy/...
 

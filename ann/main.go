@@ -96,6 +96,10 @@ func startBot(ctx context.Context, cfg BotConfig, r *llm.Registry, dataDir strin
 
 	if cfg.Telegram != nil {
 		webhookURL, webhookPath, err := getWebhookConfig(cfg.ID)
+		if err != nil {
+			Log.Error("Failed to configure Telegram webhook for bot %s: %v", cfg.ID, err)
+			return
+		}
 
 		tgGateway, handler, err := StartTelegramBot(ctx, cfg.Telegram, engine, webhookURL, cfg.ID, cfg.Name)
 		if err != nil {

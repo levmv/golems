@@ -15,7 +15,7 @@ func NewUsageTracker() *BasicUsageTracker {
 	}
 }
 
-// Add safely aggregates usage stats.
+// RecordUsage safely aggregates usage statistics.
 func (t *BasicUsageTracker) RecordUsage(model string, u Usage) {
 	if t == nil {
 		return

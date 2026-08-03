@@ -115,6 +115,8 @@ func parseJinaFrontmatter(raw string) (title, finalURL, text string) {
 func parseJinaPlainHeader(raw string) (title, finalURL, text string) {
 	lines := strings.Split(raw, "\n")
 	bodyStart := 0
+
+header:
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
@@ -131,7 +133,7 @@ func parseJinaPlainHeader(raw string) (title, finalURL, text string) {
 		case "url source", "url", "sourceurl":
 			finalURL = strings.TrimSpace(value)
 		default:
-			break
+			break header
 		}
 		bodyStart = i + 1
 	}

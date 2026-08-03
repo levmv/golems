@@ -84,7 +84,7 @@ func (r *SessionRegistry) GetSession(key SessionKey) (*Session, error) {
 	return actual.(*Session), nil
 }
 
-// Returns all active group sessions
+// GetGroupSessions returns all active group sessions.
 func (r *SessionRegistry) GetGroupSessions() []*Session {
 	var groups []*Session
 	r.sessions.Range(func(key, value any) bool {

@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/levmv/golems/brevity/internal/source"
 )
@@ -263,19 +262,4 @@ func (n telegraphNode) MarshalJSON() ([]byte, error) {
 	}
 	type node telegraphNode
 	return json.Marshal(node(n))
-}
-
-func telegraphVisibleLength(nodes []telegraphNode) int {
-	var n int
-	var walk func(telegraphNode)
-	walk = func(node telegraphNode) {
-		n += utf8.RuneCountInString(node.Text)
-		for _, child := range node.Children {
-			walk(child)
-		}
-	}
-	for _, node := range nodes {
-		walk(node)
-	}
-	return n
 }

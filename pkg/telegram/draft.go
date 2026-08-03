@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// TODO: maybe add callback "on first token"?
+// MessageDraft manages an incrementally updated Telegram message draft.
 type MessageDraft struct {
 	ChatID      int64
 	DraftID     int64

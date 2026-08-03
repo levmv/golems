@@ -10,13 +10,11 @@
 	},
 	"runArgs": [
 		"--network=host",
-		"--tz=local",
-		"--env-file",
-		"${localEnv:HOME}/.config/golems/.env"
+		"--tz=local"
 	],
 	"containerUser": "vscode",
 	"mounts": [
-		"source=${localEnv:HOME}/dev/murm-ui,target=/media/dev/murm-ui,type=bind,readonly"
+		// "source=${localEnv:HOME}/dev/murm-ui,target=/media/dev/murm-ui,type=bind,readonly"
 	],
 	"postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends curl gawk git openssh-client jq ripgrep fd-find less tree unzip file procps lsof && sudo ln -sf /usr/bin/fdfind /usr/local/bin/fd"
 }
