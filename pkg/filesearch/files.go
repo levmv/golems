@@ -27,7 +27,9 @@ func (s *Searcher) Files(ctx context.Context, query FilesQuery, visit func(File)
 		searcher: s,
 		query:    directory,
 		direct:   direct,
-		visit:    visit,
+		visit: func(file walkedFile) error {
+			return visit(File{Path: file.path})
+		},
 	}
 	return walker.run(ctx)
 }

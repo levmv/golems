@@ -9,7 +9,6 @@ require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/term v0.2.2
-	github.com/git-pkgs/gitignore v1.2.0
 	github.com/google/uuid v1.6.0
 	github.com/landlock-lsm/go-landlock v0.9.0
 	golang.org/x/crypto v0.54.0

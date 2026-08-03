@@ -2,39 +2,93 @@ package filesearch
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
 
+const (
+	initialIgnoreBufferBytes = 4 * 1024
+	maxIgnoreFileBytes       = 8 * 1024 * 1024
+	maxIgnorePatterns        = 64 * 1024
+)
+
+var errIgnorePatternTooLong = errors.New("ignore pattern is too long")
+
 type ignoreMatcher struct {
-	vcs *ruleMatcher
-	dot *ruleMatcher
-	rg  *ruleMatcher
+	gitRules     *ruleMatcher
+	ignoreRules  *ruleMatcher
+	ripgrepRules *ruleMatcher
+}
+
+type ignoreCheckpoint struct {
+	gitRules     int
+	ignoreRules  int
+	ripgrepRules int
 }
 
 func newIgnoreMatcher() *ignoreMatcher {
 	return &ignoreMatcher{
-		vcs: newRuleMatcher(),
-		dot: newRuleMatcher(),
-		rg:  newRuleMatcher(),
+		gitRules:     newRuleMatcher(),
+		ignoreRules:  newRuleMatcher(),
+		ripgrepRules: newRuleMatcher(),
 	}
 }
 
+func (m *ignoreMatcher) checkpoint() ignoreCheckpoint {
+	return ignoreCheckpoint{
+		gitRules:     len(m.gitRules.sets),
+		ignoreRules:  len(m.ignoreRules.sets),
+		ripgrepRules: len(m.ripgrepRules.sets),
+	}
+}
+
+func (m *ignoreMatcher) restore(checkpoint ignoreCheckpoint) {
+	m.gitRules.restore(checkpoint.gitRules)
+	m.ignoreRules.restore(checkpoint.ignoreRules)
+	m.ripgrepRules.restore(checkpoint.ripgrepRules)
+}
+
 func (m *ignoreMatcher) ignored(path string, isDir bool) bool {
-	// Source precedence is independent of directory depth. Within one source,
-	// the dependency's scoped last-match-wins behavior handles parent/child
-	// precedence. A higher-priority negation must also stop the lookup.
-	for _, matcher := range []*ruleMatcher{m.rg, m.dot, m.vcs} {
-		matched, ignored := matcher.decision(path, isDir)
+	if path == "" {
+		return false
+	}
+	parts := strings.Split(path, "/")
+	ignored := false
+	for end := 1; end <= len(parts); end++ {
+		ignored = m.childIgnoredParts(parts[:end], end < len(parts) || isDir, ignored)
+	}
+	return ignored
+}
+
+// childIgnored applies rules that directly match one path entry to the
+// effective state inherited from its parent. A negation cannot reopen an
+// entry below an ignored parent, but a caller may still traverse it because a
+// direct query explicitly selected that subtree.
+func (m *ignoreMatcher) childIgnored(path string, isDir, parentIgnored bool) bool {
+	return m.childIgnoredParts(strings.Split(path, "/"), isDir, parentIgnored)
+}
+
+func (m *ignoreMatcher) childIgnoredParts(pathParts []string, isDir, parentIgnored bool) bool {
+	matched, ignored := m.directDecisionParts(pathParts, isDir)
+	return parentIgnored || (matched && ignored)
+}
+
+func (m *ignoreMatcher) directDecisionParts(pathParts []string, isDir bool) (bool, bool) {
+	// Source precedence is evaluated for the current path level. A negation in
+	// a higher-priority source wins at that level, but does not mask lower-source
+	// rules that directly match descendants. The order matches ripgrep:
+	// .rgignore, then .ignore, then Git's ignore sources.
+	for _, matcher := range []*ruleMatcher{m.ripgrepRules, m.ignoreRules, m.gitRules} {
+		matched, ignored := matcher.directDecisionParts(pathParts, isDir)
 		if matched {
-			return ignored
+			return true, ignored
 		}
 	}
-	return false
+	return false, false
 }
 
 func (m *ignoreMatcher) addFile(matcher *ruleMatcher, abs, relDir string) error {
@@ -51,34 +105,153 @@ func (m *ignoreMatcher) addFile(matcher *ruleMatcher, abs, relDir string) error 
 	if !info.Mode().IsRegular() {
 		return nil
 	}
-	data, err := os.ReadFile(abs)
+	file, err := os.Open(abs)
 	if err != nil {
-		return fmt.Errorf("filesearch: read ignore file %s: %w", abs, err)
+		return fmt.Errorf("filesearch: open ignore file %s: %w", abs, err)
 	}
-	for lineNumber, line := range bytes.Split(data, []byte{'\n'}) {
-		if len(line) >= bufio.MaxScanTokenSize {
-			return fmt.Errorf("filesearch: ignore pattern in %s exceeds %d bytes", abs, bufio.MaxScanTokenSize-1)
-		}
-		line = bytes.TrimSuffix(line, []byte{'\r'})
-		expanded, expandErr := expandIgnoreLine(string(line))
-		if expandErr != nil {
-			return fmt.Errorf("filesearch: invalid ignore pattern in %s:%d: %w", abs, lineNumber+1, expandErr)
-		}
-		for _, pattern := range expanded {
-			if patternErrs := matcher.addPatterns([]byte(pattern), relDir); len(patternErrs) > 0 {
-				first := patternErrs[0]
-				return fmt.Errorf("filesearch: invalid ignore pattern in %s:%d: %s: %s", abs, lineNumber+1, first.Pattern, first.Message)
-			}
-		}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("filesearch: inspect opened ignore file %s: %w", abs, err)
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return fmt.Errorf("filesearch: ignore file changed while opening: %s", abs)
+	}
+	// Verify the opened handle still refers to the regular file checked by
+	// Lstat. This closes the substitution window without platform-specific
+	// O_NOFOLLOW code; a replacement symlink resolves to a different file.
+	if !os.SameFile(info, openedInfo) {
+		return fmt.Errorf("filesearch: ignore file changed while opening: %s", abs)
+	}
+	if openedInfo.Size() > maxIgnoreFileBytes {
+		return fmt.Errorf(
+			"filesearch: ignore file %s exceeds %d bytes",
+			abs, maxIgnoreFileBytes,
+		)
+	}
+	patterns, err := readIgnorePatterns(file, abs)
+	if err != nil {
+		return err
+	}
+	if patternErrs := matcher.addPatternList(patterns, relDir, abs); len(patternErrs) > 0 {
+		first := patternErrs[0]
+		return fmt.Errorf(
+			"filesearch: invalid ignore pattern in %s:%d: %s: %s",
+			abs, first.line, first.pattern, first.message,
+		)
 	}
 	return nil
 }
 
-func expandIgnoreLine(line string) ([]string, error) {
-	if line == "" || strings.HasPrefix(line, "#") {
-		return []string{line}, nil
+func readIgnorePatterns(reader io.Reader, source string) ([]matcherPattern, error) {
+	buffered := bufio.NewReaderSize(reader, initialIgnoreBufferBytes)
+	var patterns []matcherPattern
+	totalBytes := 0
+	expandedBytes := 0
+	for lineNumber := 1; ; lineNumber++ {
+		raw, readErr := readIgnoreLine(buffered)
+		if errors.Is(readErr, errIgnorePatternTooLong) {
+			return nil, fmt.Errorf(
+				"filesearch: ignore pattern in %s:%d exceeds %d bytes",
+				source, lineNumber, maxPatternBytes,
+			)
+		}
+		totalBytes += len(raw)
+		if totalBytes > maxIgnoreFileBytes {
+			return nil, fmt.Errorf(
+				"filesearch: ignore file %s exceeds %d bytes",
+				source, maxIgnoreFileBytes,
+			)
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, fmt.Errorf("filesearch: read ignore file %s: %w", source, readErr)
+		}
+		if len(raw) == 0 && errors.Is(readErr, io.EOF) {
+			break
+		}
+		line := strings.TrimSuffix(string(raw), "\n")
+		line = strings.TrimSuffix(line, "\r")
+		parsed, ok := parseMatcherPatternLine(line, lineNumber)
+		if !ok {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			continue
+		}
+		expanded, expandErr := expandBraces(parsed.text)
+		if expandErr != nil {
+			return nil, fmt.Errorf(
+				"filesearch: invalid ignore pattern in %s:%d: %w",
+				source, lineNumber, expandErr,
+			)
+		}
+		if len(patterns)+len(expanded) > maxIgnorePatterns {
+			return nil, fmt.Errorf(
+				"filesearch: ignore file %s exceeds %d expanded patterns",
+				source, maxIgnorePatterns,
+			)
+		}
+		for _, candidate := range expanded {
+			if len(candidate) > maxExpandedPatternBytes-expandedBytes {
+				return nil, fmt.Errorf(
+					"filesearch: ignore file %s exceeds %d expanded pattern bytes",
+					source, maxExpandedPatternBytes,
+				)
+			}
+			expandedBytes += len(candidate)
+			patterns = append(patterns, matcherPattern{
+				text:    candidate,
+				display: parsed.display,
+				negated: parsed.negated,
+				line:    lineNumber,
+			})
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
 	}
-	return expandBraces(line)
+	return patterns, nil
+}
+
+// readIgnoreLine uses a small buffer for ordinary files and allocates an
+// accumulator only when a physical line crosses that buffer. The limit is on
+// line contents: LF is framing and excluded, while a preceding CR is counted
+// before CRLF normalization.
+func readIgnoreLine(reader *bufio.Reader) ([]byte, error) {
+	fragment, readErr := reader.ReadSlice('\n')
+	if !errors.Is(readErr, bufio.ErrBufferFull) {
+		if ignoreLineContentLength(fragment) > maxPatternBytes {
+			return nil, errIgnorePatternTooLong
+		}
+		return fragment, readErr
+	}
+
+	line := append([]byte(nil), fragment...)
+	if len(line) > maxPatternBytes {
+		return nil, errIgnorePatternTooLong
+	}
+	for {
+		fragment, readErr = reader.ReadSlice('\n')
+		contentLength := len(line) + len(fragment)
+		if len(fragment) > 0 && fragment[len(fragment)-1] == '\n' {
+			contentLength--
+		}
+		if contentLength > maxPatternBytes {
+			return nil, errIgnorePatternTooLong
+		}
+		line = append(line, fragment...)
+		if !errors.Is(readErr, bufio.ErrBufferFull) {
+			return line, readErr
+		}
+	}
+}
+
+func ignoreLineContentLength(raw []byte) int {
+	length := len(raw)
+	if length > 0 && raw[length-1] == '\n' {
+		length--
+	}
+	return length
 }
 
 func (m *ignoreMatcher) loadRoot(root string) error {
@@ -99,7 +272,7 @@ func (m *ignoreMatcher) loadRoot(root string) error {
 		}
 	}
 	if gitInfoDirOK {
-		if addErr := m.addFile(m.vcs, filepath.Join(gitInfoDir, "exclude"), ""); addErr != nil {
+		if addErr := m.addFile(m.gitRules, filepath.Join(gitInfoDir, "exclude"), ""); addErr != nil {
 			return addErr
 		}
 	}
@@ -124,9 +297,9 @@ func (m *ignoreMatcher) loadDirectory(abs, rel string) error {
 		name    string
 		matcher *ruleMatcher
 	}{
-		{name: ".gitignore", matcher: m.vcs},
-		{name: ".ignore", matcher: m.dot},
-		{name: ".rgignore", matcher: m.rg},
+		{name: ".gitignore", matcher: m.gitRules},
+		{name: ".ignore", matcher: m.ignoreRules},
+		{name: ".rgignore", matcher: m.ripgrepRules},
 	} {
 		if err := m.addFile(source.matcher, filepath.Join(abs, source.name), rel); err != nil {
 			return err
@@ -137,17 +310,17 @@ func (m *ignoreMatcher) loadDirectory(abs, rel string) error {
 
 func (m *ignoreMatcher) loadDirectoryEntries(abs, rel string, entries []os.DirEntry) error {
 	// Reuse the listing that walkDirectory already needs. Trying all three
-	// names with os.ReadFile in every directory made missing ignore files a
-	// significant source of syscalls on deep trees.
+	// names with separate filesystem probes in every directory made missing
+	// files a significant source of syscalls on deep trees.
 	for _, entry := range entries {
 		var matcher *ruleMatcher
 		switch entry.Name() {
 		case ".gitignore":
-			matcher = m.vcs
+			matcher = m.gitRules
 		case ".ignore":
-			matcher = m.dot
+			matcher = m.ignoreRules
 		case ".rgignore":
-			matcher = m.rg
+			matcher = m.ripgrepRules
 		default:
 			continue
 		}
@@ -156,11 +329,4 @@ func (m *ignoreMatcher) loadDirectoryEntries(abs, rel string, entries []os.DirEn
 		}
 	}
 	return nil
-}
-
-func pathWithDirectorySuffix(path string, isDir bool) string {
-	if isDir {
-		return path + "/"
-	}
-	return path
 }

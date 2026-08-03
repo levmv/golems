@@ -16,7 +16,7 @@ type fileWalker struct {
 	direct   *directPattern
 	ignore   *ignoreMatcher
 	stats    Stats
-	visit    func(File) error
+	visit    func(walkedFile) error
 }
 
 type inspectedEntry struct {
@@ -24,16 +24,22 @@ type inspectedEntry struct {
 	mode  os.FileMode
 }
 
+type walkedFile struct {
+	abs  string
+	path string
+}
+
 func (w *fileWalker) run(ctx context.Context) (Stats, error) {
 	if err := ctx.Err(); err != nil {
 		return w.stats, err
 	}
-	if w.query.rel != "" && pathInsideGitMetadata(w.query.rel) {
+	if pathInsideGitMetadata(w.query.rel) || pathInsideGitMetadata(w.query.resolvedRel) {
 		return w.stats, nil
 	}
 	if w.query.rel != "" && w.directExcludes(w.query.rel, true) {
 		return w.stats, nil
 	}
+	repositoryIgnored := false
 	if w.searcher.ignoreMode == IgnoreRepository {
 		w.ignore = newIgnoreMatcher()
 		if err := w.ignore.loadRoot(w.searcher.root); err != nil {
@@ -42,12 +48,15 @@ func (w *fileWalker) run(ctx context.Context) (Stats, error) {
 		if err := w.loadAncestorIgnores(); err != nil {
 			return w.stats, err
 		}
-		if w.query.rel != "" && w.ignore.ignored(w.query.rel, true) && !w.directReopens(w.query.rel, true) {
-			return w.stats, nil
+		if w.query.rel != "" {
+			repositoryIgnored = w.ignore.ignored(w.query.rel, true)
+			if repositoryIgnored && !w.directReopens(w.query.rel, true) {
+				return w.stats, nil
+			}
 		}
 	}
 
-	err := w.walkDirectory(ctx, w.query.abs, w.query.rel, w.query.rel == "")
+	err := w.walkDirectory(ctx, w.query.abs, w.query.rel, w.query.rel == "", repositoryIgnored)
 	if errors.Is(err, ErrStop) {
 		w.stats.Stopped = true
 		return w.stats, nil
@@ -67,22 +76,49 @@ func (w *fileWalker) loadAncestorIgnores() error {
 	for _, part := range parts[:len(parts)-1] {
 		currentAbs = filepath.Join(currentAbs, filepath.FromSlash(part))
 		currentRel = joinRelative(currentRel, part)
-		if err := w.ignore.loadDirectory(currentAbs, currentRel); err != nil {
-			return err
+		// Git never reads ignore files below an excluded directory. A positive
+		// direct glob may still traverse that subtree, but repository rules
+		// discovered there could no longer affect its inherited state.
+		if w.ignore.ignored(currentRel, true) {
+			break
+		}
+		// Read through the canonical target, but scope its rules to the logical
+		// path so an explicitly selected symlink alias retains caller-visible
+		// matching semantics.
+		resolvedAbs, err := filepath.EvalSymlinks(currentAbs)
+		if err != nil {
+			return fmt.Errorf("filesearch: resolve ignore ancestor %s: %w", currentRel, err)
+		}
+		if !withinRoot(w.searcher.root, resolvedAbs) {
+			return fmt.Errorf("filesearch: symlink target escapes search root: %s", currentRel)
+		}
+		if loadErr := w.ignore.loadDirectory(resolvedAbs, currentRel); loadErr != nil {
+			return loadErr
 		}
 	}
 	return nil
 }
 
-func (w *fileWalker) walkDirectory(ctx context.Context, abs, rel string, rootAlreadyLoaded bool) error {
+func (w *fileWalker) walkDirectory(
+	ctx context.Context,
+	abs, rel string,
+	ignoreFilesLoaded, directoryIgnored bool,
+) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if w.ignore != nil {
+		// Ignore files are scoped to the active ancestor chain. Discard rules
+		// loaded in this directory when leaving it so completed sibling subtrees
+		// do not make later matching progressively more expensive.
+		checkpoint := w.ignore.checkpoint()
+		defer w.ignore.restore(checkpoint)
 	}
 	entries, readErr := os.ReadDir(abs)
 	if readErr != nil {
 		return fmt.Errorf("filesearch: read directory %s: %w", abs, readErr)
 	}
-	if w.ignore != nil && !rootAlreadyLoaded {
+	if w.ignore != nil && !ignoreFilesLoaded && !directoryIgnored {
 		if loadErr := w.ignore.loadDirectoryEntries(abs, rel, entries); loadErr != nil {
 			return loadErr
 		}
@@ -122,11 +158,15 @@ func (w *fileWalker) walkDirectory(ctx context.Context, abs, rel string, rootAlr
 		}
 		name := candidate.entry.Name()
 		entryRel := joinRelative(rel, name)
+		entryIgnored := false
+		if w.ignore != nil {
+			entryIgnored = w.ignore.childIgnored(entryRel, candidate.mode.IsDir(), directoryIgnored)
+		}
 		if candidate.mode.IsDir() {
 			if w.directExcludes(entryRel, true) {
 				continue
 			}
-			if w.ignore != nil && w.ignore.ignored(entryRel, true) && !w.directReopens(entryRel, true) {
+			if entryIgnored && !w.directReopens(entryRel, true) {
 				continue
 			}
 			childAbs := filepath.Join(abs, name)
@@ -139,7 +179,7 @@ func (w *fileWalker) walkDirectory(ctx context.Context, abs, rel string, rootAlr
 			if currentInfo.Mode()&os.ModeSymlink != 0 || !currentInfo.IsDir() {
 				continue
 			}
-			if walkErr := w.walkDirectory(ctx, childAbs, entryRel, false); walkErr != nil {
+			if walkErr := w.walkDirectory(ctx, childAbs, entryRel, false, entryIgnored); walkErr != nil {
 				return walkErr
 			}
 			continue
@@ -148,11 +188,11 @@ func (w *fileWalker) walkDirectory(ctx context.Context, abs, rel string, rootAlr
 			continue
 		}
 		w.stats.FilesVisited++
-		if !w.includeFile(entryRel) {
+		if !w.includeFile(entryRel, entryIgnored) {
 			w.stats.FilesSkipped++
 			continue
 		}
-		if visitErr := w.visit(File{Path: entryRel}); visitErr != nil {
+		if visitErr := w.visit(walkedFile{abs: filepath.Join(abs, name), path: entryRel}); visitErr != nil {
 			return visitErr
 		}
 		w.stats.Results++
@@ -161,6 +201,8 @@ func (w *fileWalker) walkDirectory(ctx context.Context, abs, rel string, rootAlr
 }
 
 func inspectedEntryLess(left, right inspectedEntry) bool {
+	// This is equivalent to comparing file names as-is and directory names with
+	// an appended '/', but avoids allocating those temporary strings.
 	leftName := left.entry.Name()
 	rightName := right.entry.Name()
 	commonLength := min(len(leftName), len(rightName))
@@ -182,9 +224,9 @@ func inspectedEntryLess(left, right inspectedEntry) bool {
 	return leftName[len(rightName)] < '/'
 }
 
-func (w *fileWalker) includeFile(path string) bool {
+func (w *fileWalker) includeFile(path string, repositoryIgnored bool) bool {
 	if w.direct == nil {
-		return w.ignore == nil || !w.ignore.ignored(path, false)
+		return !repositoryIgnored
 	}
 	directMatch := w.direct.matches(path, false)
 	if w.direct.include {
@@ -193,12 +235,12 @@ func (w *fileWalker) includeFile(path string) bool {
 	if directMatch {
 		return false
 	}
-	return w.ignore == nil || !w.ignore.ignored(path, false)
+	return !repositoryIgnored
 }
 
 func (w *fileWalker) directReopens(path string, isDir bool) bool {
 	if w.direct != nil && w.direct.include {
-		return w.direct.matches(path, isDir)
+		return w.direct.matches(path, isDir) || isDir && w.direct.mayMatchDescendant(path)
 	}
 	return false
 }

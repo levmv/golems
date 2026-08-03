@@ -6,8 +6,11 @@ import (
 	"strings"
 )
 
-const maxBraceExpansions = 128
-const directEndSegment = ".filesearch-match-end"
+const (
+	maxPatternBytes         = 64*1024 - 1
+	maxExpandedPatternBytes = 1 * 1024 * 1024
+	maxBraceExpansions      = 128
+)
 
 type directPattern struct {
 	include bool
@@ -16,6 +19,9 @@ type directPattern struct {
 }
 
 func compileDirectPattern(raw string) (*directPattern, error) {
+	if len(raw) > maxPatternBytes {
+		return nil, fmt.Errorf("filesearch: glob exceeds %d bytes", maxPatternBytes)
+	}
 	if strings.TrimSpace(raw) == "" {
 		return nil, errors.New("filesearch: glob is required")
 	}
@@ -43,33 +49,42 @@ func compileDirectPattern(raw string) (*directPattern, error) {
 	if err != nil {
 		return nil, fmt.Errorf("filesearch: compile glob %q: %w", raw, err)
 	}
-	for index := range expanded {
-		expanded[index] = anchorDirectPattern(expanded[index])
-	}
 	matcher := newRuleMatcher()
-	if patternErrs := matcher.addPatterns([]byte(strings.Join(expanded, "\n")), ""); len(patternErrs) > 0 {
-		return nil, fmt.Errorf("filesearch: compile glob %q: %s", raw, patternErrs[0].Message)
+	patterns := make([]matcherPattern, 0, len(expanded))
+	expandedBytes := 0
+	for _, candidate := range expanded {
+		if len(candidate) > maxExpandedPatternBytes-expandedBytes {
+			return nil, fmt.Errorf(
+				"filesearch: glob expansion exceeds %d bytes",
+				maxExpandedPatternBytes,
+			)
+		}
+		expandedBytes += len(candidate)
+		patterns = append(patterns, matcherPattern{text: candidate, display: candidate})
 	}
-	return &directPattern{include: include, dirOnly: dirOnly, matcher: matcher}, nil
-}
-
-// gitignore rules propagate a directory match to all descendants, while a
-// direct query glob is tested against each path independently. Matching a
-// synthetic final segment prevents that propagation. Basename globs need an
-// explicit ** prefix because adding the final segment otherwise makes them
-// root-anchored.
-func anchorDirectPattern(pattern string) string {
-	if !strings.Contains(pattern, "/") {
-		pattern = "**/" + pattern
+	if patternErrs := matcher.addPatternList(patterns, "", ""); len(patternErrs) > 0 {
+		return nil, fmt.Errorf("filesearch: compile glob %q: %s", raw, patternErrs[0].message)
 	}
-	return pattern + "/" + directEndSegment
+	return &directPattern{
+		include: include,
+		dirOnly: dirOnly,
+		matcher: matcher,
+	}, nil
 }
 
 func (p *directPattern) matches(path string, isDir bool) bool {
 	if p.dirOnly && !isDir {
 		return false
 	}
-	return p.matcher.matches(path+"/"+directEndSegment, false)
+	return p.matcher.matchesDirect(path, isDir)
+}
+
+// mayMatchDescendant reports whether a slash-bearing query explicitly names
+// a path below this directory. Basename-only globs retain the established
+// filesearch behavior: they can reopen a matching ignored file, but do not
+// force traversal through every ignored directory in the tree.
+func (p *directPattern) mayMatchDescendant(path string) bool {
+	return p.include && p.matcher.mayMatchDescendant(path)
 }
 
 func expandBraces(pattern string) ([]string, error) {
@@ -78,7 +93,7 @@ func expandBraces(pattern string) ([]string, error) {
 		expandedAny := false
 		next := make([]string, 0, len(results))
 		for _, current := range results {
-			open, close, alternatives, ok, err := firstBraceGroup(current)
+			open, closeIndex, alternatives, ok, err := firstBraceGroup(current)
 			if err != nil {
 				return nil, err
 			}
@@ -91,7 +106,7 @@ func expandBraces(pattern string) ([]string, error) {
 				if alternative == "" {
 					return nil, errors.New("empty brace alternatives are not supported")
 				}
-				next = append(next, current[:open]+alternative+current[close+1:])
+				next = append(next, current[:open]+alternative+current[closeIndex+1:])
 				if len(next) > maxBraceExpansions {
 					return nil, fmt.Errorf("brace expansion exceeds %d alternatives", maxBraceExpansions)
 				}
@@ -104,10 +119,23 @@ func expandBraces(pattern string) ([]string, error) {
 	}
 }
 
-func firstBraceGroup(pattern string) (open, close int, alternatives []string, ok bool, err error) {
-	open = -1
-	depth := 0
-	inClass := false
+// firstBraceGroup finds the first group that actually contains alternatives.
+// A comma-free outer pair is transparent, so {{a,b}} expands the nested group
+// first. The explicit stack also bounds call depth for adversarial input.
+func firstBraceGroup(pattern string) (
+	open, closeIndex int,
+	alternatives []string,
+	ok bool,
+	err error,
+) {
+	type braceFrame struct {
+		open        int
+		hasComma    bool
+		nestedOpen  int
+		nestedClose int
+		hasNested   bool
+	}
+	var stack []braceFrame
 	escaped := false
 	for index := 0; index < len(pattern); index++ {
 		char := pattern[index]
@@ -119,41 +147,48 @@ func firstBraceGroup(pattern string) (open, close int, alternatives []string, ok
 			escaped = true
 			continue
 		}
-		if char == '[' && !inClass {
-			inClass = true
-			continue
-		}
-		if char == ']' && inClass {
-			inClass = false
-			continue
-		}
-		if inClass {
+		if char == '[' {
+			classEnd := bracketExpressionEnd(pattern, index)
+			if classEnd < 0 {
+				break
+			}
+			index = classEnd
 			continue
 		}
 		switch char {
 		case '{':
-			if depth == 0 {
-				open = index
+			stack = append(stack, braceFrame{open: index})
+		case ',':
+			if len(stack) > 0 {
+				stack[len(stack)-1].hasComma = true
 			}
-			depth++
 		case '}':
-			if depth == 0 {
+			if len(stack) == 0 {
 				return 0, 0, nil, false, errors.New("unmatched closing brace")
 			}
-			depth--
-			if depth == 0 {
-				close = index
-				parts := splitBraceAlternatives(pattern[open+1 : close])
-				if len(parts) < 2 {
-					// A brace pair without a comma is a literal glob fragment.
-					open = -1
+			frame := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			candidateOpen, candidateClose, hasCandidate :=
+				frame.nestedOpen, frame.nestedClose, frame.hasNested
+			if frame.hasComma {
+				candidateOpen, candidateClose, hasCandidate = frame.open, index, true
+			}
+			if len(stack) == 0 {
+				if !hasCandidate {
 					continue
 				}
-				return open, close, parts, true, nil
+				parts := splitBraceAlternatives(pattern[candidateOpen+1 : candidateClose])
+				return candidateOpen, candidateClose, parts, true, nil
+			}
+			parent := &stack[len(stack)-1]
+			if hasCandidate && !parent.hasNested {
+				parent.nestedOpen = candidateOpen
+				parent.nestedClose = candidateClose
+				parent.hasNested = true
 			}
 		}
 	}
-	if depth != 0 {
+	if len(stack) != 0 {
 		return 0, 0, nil, false, errors.New("unmatched opening brace")
 	}
 	return 0, 0, nil, false, nil
@@ -163,7 +198,6 @@ func splitBraceAlternatives(body string) []string {
 	var parts []string
 	start := 0
 	depth := 0
-	inClass := false
 	escaped := false
 	for index := 0; index < len(body); index++ {
 		char := body[index]
@@ -175,15 +209,12 @@ func splitBraceAlternatives(body string) []string {
 			escaped = true
 			continue
 		}
-		if char == '[' && !inClass {
-			inClass = true
-			continue
-		}
-		if char == ']' && inClass {
-			inClass = false
-			continue
-		}
-		if inClass {
+		if char == '[' {
+			classEnd := bracketExpressionEnd(body, index)
+			if classEnd < 0 {
+				break
+			}
+			index = classEnd
 			continue
 		}
 		switch char {
@@ -200,4 +231,49 @@ func splitBraceAlternatives(body string) []string {
 	}
 	parts = append(parts, body[start:])
 	return parts
+}
+
+// bracketExpressionEnd skips bracket contents while looking for brace syntax.
+// It mirrors the bracket boundaries recognized by the matcher, including a
+// literal leading ']' and nested POSIX classes such as [[:digit:]].
+func bracketExpressionEnd(pattern string, start int) int {
+	index := start + 1
+	if index >= len(pattern) {
+		return -1
+	}
+	if pattern[index] == '!' || pattern[index] == '^' {
+		index++
+	}
+	// A closing bracket in the first content position is a literal member.
+	if index < len(pattern) && pattern[index] == ']' {
+		index++
+	}
+	for index < len(pattern) {
+		switch pattern[index] {
+		case '\\':
+			index += 2
+		case '[':
+			if index+1 < len(pattern) && pattern[index+1] == ':' {
+				if next := posixBracketClassEnd(pattern, index); next >= 0 {
+					index = next
+					continue
+				}
+			}
+			index++
+		case ']':
+			return index
+		default:
+			index++
+		}
+	}
+	return -1
+}
+
+func posixBracketClassEnd(pattern string, start int) int {
+	for index := start + 2; index+1 < len(pattern); index++ {
+		if pattern[index] == ':' && pattern[index+1] == ']' {
+			return index + 2
+		}
+	}
+	return -1
 }

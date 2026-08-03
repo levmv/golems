@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sync"
 	"unicode/utf8"
@@ -64,6 +63,9 @@ func (s *Searcher) Search(ctx context.Context, query SearchQuery, visit func(Mat
 	if query.Pattern == "" {
 		return Stats{}, errors.New("filesearch: search pattern is required")
 	}
+	if len(query.Pattern) > maxPatternBytes {
+		return Stats{}, fmt.Errorf("filesearch: search pattern exceeds %d bytes", maxPatternBytes)
+	}
 	if query.PreviewBytes < 0 {
 		return Stats{}, errors.New("filesearch: preview byte limit must not be negative")
 	}
@@ -110,13 +112,10 @@ func (s *Searcher) Search(ctx context.Context, query SearchQuery, visit func(Mat
 
 	walker := fileWalker{
 		searcher: s,
-		query: resolvedDirectory{
-			abs: resolved.abs,
-			rel: resolved.rel,
-		},
-		direct: direct,
-		visit: func(file File) error {
-			skipped, scanErr := operation.scanFile(ctx, filepath.Join(s.root, filepath.FromSlash(file.Path)), file.Path)
+		query:    resolved.directory(),
+		direct:   direct,
+		visit: func(file walkedFile) error {
+			skipped, scanErr := operation.scanFile(ctx, file.abs, file.path)
 			if skipped {
 				operation.stats.FilesSkipped++
 			}
@@ -130,8 +129,12 @@ func (s *Searcher) Search(ctx context.Context, query SearchQuery, visit func(Mat
 	return operation.stats, walkErr
 }
 
-func (o *searchOperation) searchExplicitFile(ctx context.Context, path resolvedPath, direct *directPattern) (Stats, error) {
-	if pathInsideGitMetadata(path.rel) {
+func (o *searchOperation) searchExplicitFile(
+	ctx context.Context,
+	path resolvedPath,
+	direct *directPattern,
+) (Stats, error) {
+	if pathInsideGitMetadata(path.rel) || pathInsideGitMetadata(path.resolvedRel) {
 		return o.stats, nil
 	}
 	o.stats.FilesVisited = 1

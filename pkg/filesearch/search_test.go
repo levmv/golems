@@ -210,7 +210,6 @@ func TestSearchExplicitIgnoredFileAndInclude(t *testing.T) {
 	if len(matches) != 0 {
 		t.Fatalf("non-matching include returned %#v", matches)
 	}
-
 }
 
 func TestSearchStopCallbackErrorAndCancellation(t *testing.T) {
@@ -233,7 +232,10 @@ func TestSearchStopCallbackErrorAndCancellation(t *testing.T) {
 	}
 
 	wantErr := errors.New("sink failed")
-	stats, err = searcher.Search(context.Background(), SearchQuery{Pattern: "needle"}, func(Match) error { return wantErr })
+	stats, err = searcher.Search(
+		context.Background(), SearchQuery{Pattern: "needle"},
+		func(Match) error { return wantErr },
+	)
 	if !errors.Is(err, wantErr) || stats.Results != 0 || stats.Stopped {
 		t.Fatalf("error=%v stats=%+v", err, stats)
 	}
@@ -255,11 +257,15 @@ func TestSearchExplicitFileSymlinkPolicy(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
 	writeTestFile(t, root, "real.txt", "needle real\n")
+	writeTestFile(t, root, "real-dir/inside.txt", "needle inside\n")
 	writeTestFile(t, outside, "outside.txt", "needle outside\n")
 	if err := os.Symlink(filepath.Join(root, "real.txt"), filepath.Join(root, "alias.txt")); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join(outside, "outside.txt"), filepath.Join(root, "outside.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "real-dir"), filepath.Join(root, "dir-alias")); err != nil {
 		t.Fatal(err)
 	}
 	searcher, err := New(root, Options{})
@@ -271,13 +277,51 @@ func TestSearchExplicitFileSymlinkPolicy(t *testing.T) {
 	if !reflect.DeepEqual(matches, want) {
 		t.Fatalf("matches = %#v, want %#v", matches, want)
 	}
+	matches = collectMatches(t, searcher, SearchQuery{Path: "dir-alias", Pattern: "needle"})
+	want = []Match{{Path: "dir-alias/inside.txt", Line: 1, Text: "needle inside"}}
+	if !reflect.DeepEqual(matches, want) {
+		t.Fatalf("directory symlink matches = %#v, want %#v", matches, want)
+	}
 	matches = collectMatches(t, searcher, SearchQuery{Pattern: "needle"})
-	want = []Match{{Path: "real.txt", Line: 1, Text: "needle real"}}
+	want = []Match{
+		{Path: "real-dir/inside.txt", Line: 1, Text: "needle inside"},
+		{Path: "real.txt", Line: 1, Text: "needle real"},
+	}
 	if !reflect.DeepEqual(matches, want) {
 		t.Fatalf("recursive matches = %#v, want %#v", matches, want)
 	}
-	if _, err := searcher.Search(context.Background(), SearchQuery{Path: "outside.txt", Pattern: "needle"}, func(Match) error { return nil }); err == nil {
+	if _, err := searcher.Search(
+		context.Background(),
+		SearchQuery{Path: "outside.txt", Pattern: "needle"},
+		func(Match) error { return nil },
+	); err == nil {
 		t.Fatal("outside-root explicit symlink unexpectedly succeeded")
+	}
+}
+
+func TestSearchExplicitSymlinkCannotAliasGitMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is not generally available on Windows")
+	}
+	root := t.TempDir()
+	writeTestFile(t, root, ".git/secret.txt", "needle secret\n")
+	if err := os.Symlink(filepath.Join(root, ".git"), filepath.Join(root, "metadata")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(
+		filepath.Join(root, ".git", "secret.txt"),
+		filepath.Join(root, "metadata.txt"),
+	); err != nil {
+		t.Fatal(err)
+	}
+	searcher, err := New(root, Options{Ignore: IgnoreNone})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"metadata", "metadata.txt"} {
+		if got := collectMatches(t, searcher, SearchQuery{Path: path, Pattern: "needle"}); len(got) != 0 {
+			t.Errorf("metadata alias %q returned %#v", path, got)
+		}
 	}
 }
 
@@ -291,6 +335,7 @@ func TestSearchValidatesQuery(t *testing.T) {
 	tests := []SearchQuery{
 		{},
 		{Pattern: "("},
+		{Pattern: strings.Repeat("x", maxPatternBytes+1)},
 		{Pattern: "content", PreviewBytes: -1},
 		{Pattern: "content", Path: "missing"},
 		{Pattern: "content", Include: "{,txt}"},
@@ -319,7 +364,8 @@ func TestReadBoundedLine(t *testing.T) {
 		t.Fatalf("line after oversized line=%q error=%v", line, err)
 	}
 	reader = bufio.NewReaderSize(strings.NewReader("five5"), 2)
-	if _, err := readBoundedLine(context.Background(), reader, 4); !errors.Is(err, errLineTooLong) || !errors.Is(err, io.EOF) {
+	if _, err := readBoundedLine(context.Background(), reader, 4); !errors.Is(err, errLineTooLong) ||
+		!errors.Is(err, io.EOF) {
 		t.Fatalf("oversized final line error=%v", err)
 	}
 }

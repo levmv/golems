@@ -12,7 +12,9 @@ type IgnoreMode uint8
 
 const (
 	// IgnoreRepository applies .git/info/exclude, .gitignore, .ignore, and
-	// .rgignore files found at or below the search root.
+	// .rgignore files found at or below the search root. For a path matched by
+	// several source types, .rgignore takes precedence over .ignore, which takes
+	// precedence over Git ignore sources.
 	IgnoreRepository IgnoreMode = iota
 	// IgnoreNone disables ignore-file processing. Git metadata directories are
 	// still excluded.
@@ -52,6 +54,9 @@ func New(root string, options Options) (*Searcher, error) {
 	if err != nil {
 		return nil, fmt.Errorf("filesearch: resolve root: %w", err)
 	}
+	if pathInsideGitMetadata(filepath.ToSlash(abs)) {
+		return nil, fmt.Errorf("filesearch: root is inside Git metadata: %s", abs)
+	}
 	info, err := os.Stat(abs)
 	if err != nil {
 		return nil, fmt.Errorf("filesearch: stat root: %w", err)
@@ -73,7 +78,8 @@ func (s *Searcher) Root() string {
 // FilesQuery selects regular files below Path using Glob. Path defaults to the
 // search root and must name a directory within it. Glob is required. A
 // positive glob may select repository-ignored paths; a leading ! excludes its
-// matches while repository ignores remain in force.
+// matches while repository ignores remain in force. A basename-only positive
+// glob reopens an ignored directory only when it matches that directory name.
 type FilesQuery struct {
 	Path string
 	Glob string
@@ -81,9 +87,11 @@ type FilesQuery struct {
 
 // SearchQuery selects UTF-8 text lines matching Pattern. Path may name a file
 // or directory and defaults to the search root. Include is an optional direct
-// glob and, when positive, may select repository-ignored paths. PreviewBytes
-// truncates returned Text to a valid UTF-8 prefix; zero returns the complete
-// line.
+// glob and, when positive, may select repository-ignored paths. A basename-only
+// positive Include reopens an ignored directory only when it matches that
+// directory name. An explicitly named regular file bypasses repository ignore
+// rules but still obeys Include. PreviewBytes truncates returned Text to a valid
+// UTF-8 prefix; zero returns the complete line.
 type SearchQuery struct {
 	Path         string
 	Pattern      string

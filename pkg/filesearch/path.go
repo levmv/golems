@@ -9,15 +9,24 @@ import (
 )
 
 type resolvedDirectory struct {
-	abs string
-	rel string
+	abs         string // Canonical path used for filesystem access.
+	rel         string // Logical, root-relative path exposed to callers.
+	resolvedRel string // Canonical root-relative path used for metadata checks.
 }
 
 type resolvedPath struct {
-	abs      string
-	resolved string
-	rel      string
-	info     os.FileInfo
+	resolved    string // Canonical path used for filesystem access.
+	rel         string // Logical, root-relative path exposed to callers.
+	resolvedRel string // Canonical root-relative path used for metadata checks.
+	info        os.FileInfo
+}
+
+func (p resolvedPath) directory() resolvedDirectory {
+	return resolvedDirectory{
+		abs:         p.resolved,
+		rel:         p.rel,
+		resolvedRel: p.resolvedRel,
+	}
 }
 
 func (s *Searcher) resolveDirectory(path string) (resolvedDirectory, error) {
@@ -28,7 +37,7 @@ func (s *Searcher) resolveDirectory(path string) (resolvedDirectory, error) {
 	if !resolved.info.IsDir() {
 		return resolvedDirectory{}, fmt.Errorf("filesearch: path is not a directory: %s", path)
 	}
-	return resolvedDirectory{abs: resolved.abs, rel: resolved.rel}, nil
+	return resolved.directory(), nil
 }
 
 func (s *Searcher) resolveExistingPath(path string) (resolvedPath, error) {
@@ -52,8 +61,8 @@ func (s *Searcher) resolveExistingPath(path string) (resolvedPath, error) {
 	}
 
 	// Explicit query paths may contain symlinks, matching ordinary command-line
-	// behavior. Resolve them once to enforce the root boundary; traversal below
-	// the explicit path still does not follow discovered symlink entries.
+	// behavior. Validate their target against the root and use that canonical
+	// target for I/O; traversal below it still skips discovered symlink entries.
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
 		return resolvedPath{}, fmt.Errorf("filesearch: resolve path %q: %w", path, err)
@@ -72,11 +81,15 @@ func (s *Searcher) resolveExistingPath(path string) (resolvedPath, error) {
 	if err != nil {
 		return resolvedPath{}, fmt.Errorf("filesearch: make path relative: %w", err)
 	}
+	resolvedRel, err := filepath.Rel(s.root, resolved)
+	if err != nil {
+		return resolvedPath{}, fmt.Errorf("filesearch: make resolved path relative: %w", err)
+	}
 	return resolvedPath{
-		abs:      abs,
-		resolved: resolved,
-		rel:      cleanRelativePath(rel),
-		info:     info,
+		resolved:    resolved,
+		rel:         cleanRelativePath(rel),
+		resolvedRel: cleanRelativePath(resolvedRel),
+		info:        info,
 	}, nil
 }
 
