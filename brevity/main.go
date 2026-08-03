@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	defaultModelURI       = "deepseek/deepseek-chat"
+	defaultModelURI       = "deepseek/deepseek-v4-flash"
 	modelTemperature      = 0.2
 	modelMaxTokens        = 6500
 	telegraphHTTPTimeout  = 25 * time.Second

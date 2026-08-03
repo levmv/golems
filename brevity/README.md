@@ -15,7 +15,7 @@ Runtime environment is kept to things that are actually secrets or deployment-sp
 export TELEGRAM_BOT_TOKEN="123:abc"
 export TELEGRAM_WHITELIST="123456789,-1001234567890"
 
-export BREVITY_MODEL="deepseek/deepseek-chat"
+export BREVITY_MODEL="deepseek/deepseek-v4-flash"
 export DEEPSEEK_API_KEY="..."
 
 export TELEGRAPH_ACCESS_TOKEN="..."

@@ -42,12 +42,11 @@ type ChatMessage struct {
 }
 
 type ChatSession struct {
-	mu           sync.Mutex
-	Messages     []ChatMessage
-	Stats        UsageStats
-	LastActive   time.Time
-	useReasoning bool
-	cancelLLM    context.CancelFunc
+	mu         sync.Mutex
+	Messages   []ChatMessage
+	Stats      UsageStats
+	LastActive time.Time
+	cancelLLM  context.CancelFunc
 }
 
 var (
@@ -82,7 +81,6 @@ func main() {
 	}
 
 	bot.OnCommand("start", func(c *telegram.Context) error { return nil })
-	bot.OnCommand("think", handleThink)
 	bot.OnCommand("reset", handleReset)
 	bot.OnCommand("stats", handleStats)
 
@@ -90,7 +88,6 @@ func main() {
 
 	bot.SetMyCommands(ctx, telegram.SetMyCommandsRequest{
 		Commands: []telegram.BotCommand{
-			{Command: "think", Description: "Think mode till reset"},
 			{Command: "reset", Description: "Finish conversation"},
 			{Command: "stats", Description: "View token usage stats"},
 		},
@@ -186,7 +183,6 @@ func handleUpdate(ctx *telegram.Context) error {
 	if time.Since(sess.LastActive) > 6*time.Hour {
 		log.Info("Auto-resetting session for %d due to inactivity", ctx.ChatID)
 		sess.Messages = []ChatMessage{{OpenAI: systemPrompt(), TelegramIDs: nil}}
-		sess.useReasoning = false
 	}
 
 	if sess.cancelLLM != nil {
@@ -217,7 +213,6 @@ func handleUpdate(ctx *telegram.Context) error {
 	for _, m := range sess.Messages {
 		reqMessages = append(reqMessages, m.OpenAI)
 	}
-	useReasoning := sess.useReasoning
 
 	sess.mu.Unlock()
 
@@ -228,11 +223,8 @@ func handleUpdate(ctx *telegram.Context) error {
 		defer typing.Stop()
 
 		req := openai.ChatCompletionRequest{
-			Model:    openai.DeepSeekChat,
+			Model:    openai.DeepSeekV4Flash,
 			Messages: reqMessages,
-		}
-		if useReasoning {
-			req.Model = openai.DeepSeekReasoner
 		}
 
 		resp, err := oai.CreateChatCompletion(llmCtx, req)
@@ -286,17 +278,6 @@ func handleUpdate(ctx *telegram.Context) error {
 	return nil
 }
 
-func handleThink(ctx *telegram.Context) error {
-	sess := getSession(ctx.ChatID)
-
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-
-	sess.useReasoning = true
-
-	return ctx.Reply("🧠 Deep thinking mode enabled. I will reason through your next prompts.")
-}
-
 func handleReset(ctx *telegram.Context) error {
 	sess := getSession(ctx.ChatID)
 
@@ -310,7 +291,6 @@ func handleReset(ctx *telegram.Context) error {
 	}
 
 	sess.Messages = []ChatMessage{{OpenAI: systemPrompt(), TelegramIDs: nil}}
-	sess.useReasoning = false
 
 	return ctx.Reply("Conversation reset.")
 }
