@@ -134,6 +134,18 @@ func (m *processManager) Status(jobID string) (ProcessResultMeta, bool) {
 	return m.processMeta(job, true), true
 }
 
+// SetSandbox changes the policy used for future agent-originated Bash
+// processes. Existing jobs keep the isolation with which they were started.
+func (m *processManager) SetSandbox(policy string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return errors.New("process manager is closed")
+	}
+	m.sandbox = policy
+	return nil
+}
+
 func (m *processManager) Tools() []golem.Tool {
 	bashProperties := []jsonschema.Property{
 		jsonschema.Required("command", jsonschema.Str{Description: "Bash command to run."}),
@@ -147,7 +159,7 @@ func (m *processManager) Tools() []golem.Tool {
 		golem.FunctionToolWithEffect(
 			golem.ToolEffectProcess,
 			"bash",
-			"Run Bash in the workspace with a scrubbed environment, process-group cancellation, bounded output, and a hard timeout. Ordinary commands run in the foreground and become a managed job only when explicitly backgrounded or still running after about 10 seconds. Non-zero exits are results, not tool errors.",
+			"Run Bash in the workspace with environment and filesystem access determined by the current sandbox policy, plus process-group cancellation, bounded output, and a hard timeout. Ordinary commands run in the foreground and become a managed job only when explicitly backgrounded or still running after about 10 seconds. Non-zero exits are results, not tool errors.",
 			jsonschema.Obj(bashProperties...).NoAdditionalProperties(),
 			m.bash,
 		),
@@ -283,6 +295,7 @@ func (m *processManager) start(command, workdir string, timeout time.Duration, o
 		m.mu.Unlock()
 		return nil, errors.New("process manager is closed")
 	}
+	sandbox := m.sandbox
 	m.mu.Unlock()
 
 	id, err := newJobID()
@@ -296,7 +309,7 @@ func (m *processManager) start(command, workdir string, timeout time.Duration, o
 		commandProcess.Dir = workdir
 		commandProcess.Env = os.Environ()
 	case processOriginAgent:
-		commandProcess, err = sandboxedBashCommand(command, m.workspace.root, workdir, m.toolHome, m.sandbox)
+		commandProcess, err = sandboxedBashCommand(command, m.workspace.root, workdir, m.toolHome, sandbox)
 		if err != nil {
 			return nil, fmt.Errorf("prepare bash: %w", err)
 		}

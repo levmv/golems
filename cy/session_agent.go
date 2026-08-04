@@ -195,6 +195,18 @@ func (a *sessionAgent) CurrentProfile() string {
 	return a.cfg.CapabilityProfile
 }
 
+func (a *sessionAgent) CurrentSandbox() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.SandboxPolicy
+}
+
+func (a *sessionAgent) SecuritySummary() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg.Security.Compact()
+}
+
 func (a *sessionAgent) ProcessStatus(jobID string) (toolruntime.ProcessResultMeta, bool) {
 	a.mu.RLock()
 	processes := a.processes
@@ -350,6 +362,46 @@ func (a *sessionAgent) SwitchProfile(value string) error {
 	return nil
 }
 
+func (a *sessionAgent) SwitchSandbox(value string) error {
+	policy, err := normalizeSandboxPolicy(value)
+	if err != nil {
+		return err
+	}
+	a.mu.RLock()
+	if a.closed || a.processes == nil {
+		a.mu.RUnlock()
+		return errors.New("cy session runtime is closed")
+	}
+	cfg := a.cfg
+	processes := a.processes
+	a.mu.RUnlock()
+	if policy == cfg.SandboxPolicy {
+		return nil
+	}
+	cfg.SandboxPolicy = policy
+	security := buildSecurityState(context.Background(), cfg, a.root, a.state)
+	if security.EffectivePolicy == sandboxOn && !security.Active() {
+		return fmt.Errorf("required sandbox probe failed: %s", security.Probe)
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || a.processes != processes {
+		return errors.New("cy session runtime changed while switching sandbox")
+	}
+	if a.state != nil {
+		if err := a.state.SetDefaultSandbox(policy); err != nil {
+			return fmt.Errorf("remember selected sandbox: %w", err)
+		}
+	}
+	if err := processes.SetSandbox(security.EffectivePolicy); err != nil {
+		return err
+	}
+	a.cfg.SandboxPolicy = policy
+	a.cfg.Security = security
+	return nil
+}
+
 func (a *sessionAgent) reloadTools() error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -434,7 +486,7 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 	if err != nil {
 		return nil, nil, fmt.Errorf("load project instructions: %w", err)
 	}
-	processes, err := toolruntime.NewProcessManager(a.root, resolveStateHome(cfg.Home), cfg.SandboxPolicy, !cfg.PrintMode)
+	processes, err := toolruntime.NewProcessManager(a.root, resolveStateHome(cfg.Home), runtimeSandboxPolicy(cfg), !cfg.PrintMode)
 	if err != nil {
 		return nil, nil, fmt.Errorf("initialize process runtime: %w", err)
 	}
@@ -473,6 +525,13 @@ func (a *sessionAgent) build(journal *session.Session, cfg Config, model golem.M
 		return nil, nil, fmt.Errorf("initialize engine: %w", err)
 	}
 	return eng, processes, nil
+}
+
+func runtimeSandboxPolicy(cfg Config) string {
+	if cfg.Security.EffectivePolicy != "" {
+		return cfg.Security.EffectivePolicy
+	}
+	return cfg.SandboxPolicy
 }
 
 func (a *sessionAgent) SessionID() string {

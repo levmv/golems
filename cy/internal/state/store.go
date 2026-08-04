@@ -17,6 +17,7 @@ type Config struct {
 	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
 	RecentModels    []string       `json:"recent_models,omitempty"`
 	Profile         string         `json:"profile,omitempty"`
+	Sandbox         string         `json:"sandbox,omitempty"`
 	ModelContexts   map[string]int `json:"model_contexts,omitempty"`
 }
 
@@ -120,6 +121,10 @@ func (s *Store) SetDefaultModelSelection(model, reasoningEffort string) error {
 
 func (s *Store) SetDefaultProfile(profile string) error {
 	return s.updateConfig(func(config *Config) { config.Profile = strings.TrimSpace(profile) })
+}
+
+func (s *Store) SetDefaultSandbox(policy string) error {
+	return s.updateConfig(func(config *Config) { config.Sandbox = strings.TrimSpace(policy) })
 }
 
 func (s *Store) ModelContext(uri string) (int, bool, error) {

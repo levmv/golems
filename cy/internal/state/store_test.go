@@ -21,6 +21,9 @@ func TestStoreSeparatesConfigAndAuth(t *testing.T) {
 	if err := store.SetDefaultProfile("edit"); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.SetDefaultSandbox("off"); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.SetAPIKey("exa", "secret"); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +32,7 @@ func TestStoreSeparatesConfigAndAuth(t *testing.T) {
 	}
 
 	config, err := store.Config()
-	if err != nil || config.Model != "deepseek/deepseek-v4-flash" || config.ReasoningEffort != "high" || config.Profile != "edit" || len(config.RecentModels) != 1 || config.RecentModels[0] != "openai/test" {
+	if err != nil || config.Model != "deepseek/deepseek-v4-flash" || config.ReasoningEffort != "high" || config.Profile != "edit" || config.Sandbox != "off" || len(config.RecentModels) != 1 || config.RecentModels[0] != "openai/test" {
 		t.Fatalf("config = %#v, %v", config, err)
 	}
 	key, ok, err := store.APIKey("exa")

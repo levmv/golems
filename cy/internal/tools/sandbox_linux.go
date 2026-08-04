@@ -30,12 +30,11 @@ func runSandboxChildIfRequested() bool {
 	return true
 }
 
+func sandboxBackend() string { return "landlock" }
+
 func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*exec.Cmd, error) {
 	if policy == sandboxOff {
-		cmd := exec.Command("bash", "-lc", command)
-		cmd.Dir = workdir
-		cmd.Env = minimalToolEnv(home)
-		return cmd, nil
+		return ambientBashCommand(command, workdir), nil
 	}
 	cmd := exec.Command("/proc/self/exe", sandboxChildArg)
 	cmd.Dir = workdir
@@ -44,6 +43,9 @@ func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*ex
 }
 
 func sandboxControlEnv(command, workspace, home, policy string) []string {
+	if policy == sandboxOff {
+		return nil
+	}
 	return append(minimalToolEnv(home),
 		envSandboxCommand+"="+command,
 		envSandboxRoot+"="+workspace,
@@ -57,9 +59,10 @@ func runSandboxedBash() {
 	workspace := os.Getenv(envSandboxRoot)
 	home := os.Getenv(envSandboxHome)
 	policy := os.Getenv(envSandboxPolicy)
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		bash = "/bin/bash"
+	bash := systemBashPath()
+	if bash == "" {
+		fmt.Fprintln(os.Stderr, "sandbox: system Bash is unavailable")
+		os.Exit(126)
 	}
 	runtime.LockOSThread()
 	if err := applyToolLandlock(workspace, home, policy); err != nil {
@@ -72,13 +75,22 @@ func runSandboxedBash() {
 	}
 }
 
+func systemBashPath() string {
+	for _, path := range []string{"/bin/bash", "/usr/bin/bash", "/run/current-system/sw/bin/bash"} {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return path
+		}
+	}
+	return ""
+}
+
 func applyToolLandlock(workspace, home, policy string) error {
 	rules := []landlock.Rule{
-		landlock.RODirs("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/opt", "/run/systemd/resolve").IgnoreIfMissing(),
+		landlock.RODirs("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/nix", "/opt", "/snap", "/run/systemd/resolve").IgnoreIfMissing(),
 		landlock.RWDirs("/tmp", "/var/tmp", workspace, home).IgnoreIfMissing(),
 		landlock.RWFiles("/dev/null", "/dev/zero", "/dev/full", "/dev/random", "/dev/urandom", "/dev/tty").IgnoreIfMissing(),
 	}
-	if policy == sandboxRequire {
+	if policy == sandboxOn {
 		return landlock.V1.RestrictPaths(rules...)
 	}
 	return landlock.V9.BestEffort().RestrictPaths(rules...)

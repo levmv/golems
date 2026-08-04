@@ -118,6 +118,12 @@ func (m *cyTUIModel) handleCommand(input string) (handled bool, done bool, cmd t
 			m.cfg.CapabilityProfile = m.agent.CurrentProfile()
 			m.addBlock(screenBlockSystem, "profile: "+m.agent.CurrentProfile())
 		}
+	case "/sandbox":
+		if len(fields) == 1 {
+			m.openSandboxPicker()
+			break
+		}
+		cmd = m.startSandboxSwitch(fields[1])
 	default:
 		m.addBlock(screenBlockError, "unknown command: "+fields[0])
 	}
@@ -227,6 +233,20 @@ func (m *cyTUIModel) openProfilePicker() {
 		}
 	}
 	m.openPicker(pickerProfile, items, selected)
+}
+
+func (m *cyTUIModel) openSandboxPicker() {
+	items := make([]pickerItem, 0, len(sandboxPolicyCatalog))
+	current := m.agent.CurrentSandbox()
+	selected := 0
+	for _, policy := range sandboxPolicyCatalog {
+		isCurrent := policy.Name == current
+		items = append(items, pickerItem{value: policy.Name, label: policy.Name, description: policy.Description, current: isCurrent})
+		if isCurrent {
+			selected = len(items) - 1
+		}
+	}
+	m.openPicker(pickerSandbox, items, selected)
 }
 
 func (m *cyTUIModel) openLoginPicker(startup bool) {
@@ -374,6 +394,11 @@ func (m *cyTUIModel) selectPickerItem() tea.Cmd {
 			m.cfg.CapabilityProfile = m.agent.CurrentProfile()
 			m.addBlock(screenBlockSystem, "profile: "+m.cfg.CapabilityProfile)
 		}
+	case pickerSandbox:
+		if item.current {
+			return nil
+		}
+		return m.startSandboxSwitch(item.value)
 	case pickerLogin:
 		return m.startProviderLogin(item.value, item.credentialSource, item.credentialURL, picker.startupLogin)
 	case pickerLogout:
@@ -474,6 +499,13 @@ func (m *cyTUIModel) startModelSwitch(uri, effort string) tea.Cmd {
 	return switchModelCmd(m.agent, uri, effort)
 }
 
+func (m *cyTUIModel) startSandboxSwitch(policy string) tea.Cmd {
+	policy = strings.ToLower(strings.TrimSpace(policy))
+	m.maintenance = "switching sandbox"
+	m.maintenanceCancel = nil
+	return switchSandboxCmd(m.agent, policy)
+}
+
 func (m *cyTUIModel) startProviderModelSwitch(provider string) tea.Cmd {
 	modelURI := firstProviderModel(m.agent.KnownModels(), provider)
 	if modelURI == "" {
@@ -495,6 +527,16 @@ func (m *cyTUIModel) logoutProvider(provider string) {
 func switchModelCmd(agent screenAgent, uri, effort string) tea.Cmd {
 	return func() tea.Msg {
 		return modelSwitchDoneMsg{uri: uri, effort: effort, err: agent.SwitchModelWithEffort(uri, effort)}
+	}
+}
+
+func switchSandboxCmd(agent screenAgent, policy string) tea.Cmd {
+	return func() tea.Msg {
+		err := agent.SwitchSandbox(policy)
+		if err != nil {
+			return sandboxSwitchDoneMsg{err: err}
+		}
+		return sandboxSwitchDoneMsg{summary: agent.SecuritySummary()}
 	}
 }
 

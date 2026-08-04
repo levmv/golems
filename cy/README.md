@@ -79,6 +79,7 @@ Type `/` for command completion or `/help` for the full command list.
 | --- | --- |
 | `/model` | List or switch models |
 | `/profile` | Switch the tool capability profile |
+| `/sandbox` | Switch model command isolation |
 | `/login`, `/logout` | Manage credentials |
 | `/resume` | Resume another session |
 | `/clear` | Start a new session |
@@ -104,7 +105,7 @@ Flags override environment variables, which override saved defaults.
 | `--root` | `CY_ROOT` | Workspace available to tools |
 | `--home` | `CY_HOME` | Credentials, sessions, and tool state |
 | `--profile` | `CY_PROFILE` | `full`, `edit`, or `read-only` |
-| `--sandbox` | `CY_SANDBOX` | `auto`, `require`, or `off` |
+| `--sandbox` | `CY_SANDBOX` | `auto`, `off`, or `on` |
 | `--theme` | `CY_THEME` | `auto`, `light`, or `dark` |
 
 Run `cy --help` for all flags. `CY_COLOR=always|never` controls ANSI styling;
@@ -145,16 +146,22 @@ compacted automatically when needed; `/context` shows the current budget and
 
 ## Security
 
-On Linux, `CY_SANDBOX=auto` attempts to run model-requested Bash under Landlock.
-`require` fails startup when Landlock is unavailable; `off` uses the ambient
-user permissions. Model tool processes receive a scrubbed environment and do
-not inherit provider credentials. Explicit `!` commands are user-authorized,
-run outside that sandbox with the ambient environment, and may expose their
-output to the model through the saved session context.
+`CY_SANDBOX=auto` selects the available platform filesystem sandbox: Landlock
+on Linux and Seatbelt on macOS. On Linux it disables the inner sandbox when Cy
+confidently detects a known OS container (Docker, Podman, LXC/Incus, OpenVZ, or
+systemd-nspawn). `on` requires a working platform sandbox; `off` disables it.
+Use `/sandbox` to change and remember the policy during an interactive session.
 
-Landlock restricts filesystem access, not network access or the semantic
-effects of commands. The interactive startup line reports the effective
-sandbox and network state.
+When the effective policy is `off`, model-requested Bash inherits the ambient
+environment, real `HOME`, and user permissions. Sandboxed processes instead
+receive a separate tool home and a minimal environment without provider
+credentials. Explicit `!` commands always run outside the model sandbox with
+the ambient environment and may expose their output to the model through the
+saved session context.
+
+The intended boundary is filesystem access. Network remains open, and Cy does
+not parse commands or mediate their semantic effects. The interactive startup
+line reports the effective backend and network state.
 
 ## Development
 

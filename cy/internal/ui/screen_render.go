@@ -154,6 +154,8 @@ func commandDescription(name string) string {
 	switch {
 	case strings.HasPrefix(name, "/profile "):
 		return "switch capability profile"
+	case strings.HasPrefix(name, "/sandbox "):
+		return "switch model command isolation"
 	case strings.HasPrefix(name, "/login "):
 		return "manage this provider credential"
 	case strings.HasPrefix(name, "/logout "):

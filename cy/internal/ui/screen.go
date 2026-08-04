@@ -84,6 +84,11 @@ type modelSwitchDoneMsg struct {
 	err    error
 }
 
+type sandboxSwitchDoneMsg struct {
+	summary string
+	err     error
+}
+
 type shellDoneMsg struct {
 	content string
 	result  processResultMeta
@@ -114,6 +119,7 @@ var tuiCommands = []tuiCommand{
 	{usage: "/logout [provider]", description: "remove a stored provider credential"},
 	{usage: "/model [provider/model]", description: "list or switch models"},
 	{usage: "/profile [profile]", description: "show or switch the capability profile"},
+	{usage: "/sandbox [policy]", description: "show or switch model command isolation"},
 	{usage: "/exit", description: "exit Cy"},
 }
 
@@ -129,6 +135,7 @@ const (
 	pickerSession
 	pickerModel
 	pickerProfile
+	pickerSandbox
 	pickerLogin
 	pickerLogout
 )
@@ -364,8 +371,8 @@ func newCyTUIModel(ctx context.Context, agent screenAgent, cfg Config, root stri
 	m.applyTerminalTheme(darkTheme)
 	m.configureCommandSuggestions()
 	m.appendBlock(screenBlock{kind: screenBlockBanner})
-	if cfg.SecuritySummary != "" {
-		m.addBlock(screenBlockSystem, cfg.SecuritySummary)
+	if summary := agent.SecuritySummary(); summary != "" {
+		m.addBlock(screenBlockSystem, summary)
 	}
 	m.loadSessionHistory()
 	if m.agent.SessionRepaired() {
@@ -516,6 +523,15 @@ func (m cyTUIModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				label += " · effort: " + msg.effort
 			}
 			m.addBlock(screenBlockSystem, label)
+		}
+		m.refreshScreen()
+		return m, nil
+	case sandboxSwitchDoneMsg:
+		m.finishMaintenance()
+		if msg.err != nil {
+			m.addBlock(screenBlockError, "sandbox: "+msg.err.Error())
+		} else {
+			m.addBlock(screenBlockSystem, msg.summary)
 		}
 		m.refreshScreen()
 		return m, nil

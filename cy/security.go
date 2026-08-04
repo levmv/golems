@@ -15,14 +15,22 @@ import (
 )
 
 const (
-	sandboxAuto    = "auto"
-	sandboxRequire = "require"
-	sandboxOff     = "off"
+	sandboxAuto = "auto"
+	sandboxOn   = "on"
+	sandboxOff  = "off"
 )
 
 type SecurityState struct {
-	Sandbox string
-	Probe   string
+	Backend         string
+	Probe           string
+	EffectivePolicy string
+	Container       string
+}
+
+type containerProbe struct {
+	exists     func(string) bool
+	readFile   func(string) ([]byte, error)
+	detectVirt func() (string, error)
 }
 
 func normalizeSandboxPolicy(policy string) (string, error) {
@@ -31,57 +39,150 @@ func normalizeSandboxPolicy(policy string) (string, error) {
 		policy = defaultSandboxPolicy
 	}
 	switch policy {
-	case sandboxAuto, sandboxRequire, sandboxOff:
+	case sandboxAuto, sandboxOn, sandboxOff:
 		return policy, nil
+	case "require":
+		return sandboxOn, nil
 	default:
-		return "", fmt.Errorf("unknown sandbox policy %q (want auto, require, or off)", policy)
+		return "", fmt.Errorf("unknown sandbox policy %q (want auto, off, or on)", policy)
 	}
 }
 
 func buildSecurityState(ctx context.Context, cfg Config, root string, store *state.Store) SecurityState {
-	toolHome := toolruntime.WorkspaceToolHome(resolveStateHome(cfg.Home), root)
-	state := SecurityState{Sandbox: "off"}
-	if cfg.SandboxPolicy == sandboxOff {
-		state.Probe = "disabled by configuration"
+	container := ""
+	if cfg.SandboxPolicy == sandboxAuto {
+		container = detectContainer(ctx)
+	}
+	effectivePolicy := effectiveSandboxPolicy(cfg.SandboxPolicy, container)
+	state := SecurityState{EffectivePolicy: effectivePolicy}
+	if effectivePolicy == sandboxOff {
+		state.Container = container
 		return state
 	}
-	probeDir := store.Dir()
-	probe, err := os.CreateTemp(probeDir, ".landlock-probe-")
+	backend := toolruntime.SandboxBackend()
+	if backend == "" {
+		return unavailableSandbox(state, "no platform sandbox is available")
+	}
+	toolHome := toolruntime.WorkspaceToolHome(resolveStateHome(cfg.Home), root)
+	probeDir := resolveStateHome(cfg.Home)
+	if store != nil {
+		probeDir = store.Dir()
+	}
+	probe, err := os.CreateTemp(probeDir, ".sandbox-probe-")
 	if err != nil {
-		state.Probe = "probe setup failed: " + err.Error()
-		return state
+		return unavailableSandbox(state, "probe setup failed: "+err.Error())
 	}
 	probePath := probe.Name()
-	_, _ = probe.WriteString("supervisor-only")
-	_ = probe.Close()
 	defer os.Remove(probePath)
-	command := "if cat " + bashQuote(probePath) + " >/dev/null 2>&1; then exit 42; else exit 0; fi"
-	cmd, err := toolruntime.SandboxedBashCommand(command, root, root, toolHome, cfg.SandboxPolicy)
-	if err != nil {
-		state.Probe = "sandbox command failed: " + err.Error()
-		return state
+	if _, err := probe.WriteString("supervisor-only\n"); err != nil {
+		_ = probe.Close()
+		return unavailableSandbox(state, "probe setup failed: "+err.Error())
 	}
+	if err := probe.Close(); err != nil {
+		return unavailableSandbox(state, "probe setup failed: "+err.Error())
+	}
+	command := "if IFS= read -r _ < " + bashQuote(probePath) + " 2>/dev/null; then exit 42; else exit 0; fi"
+	cmd, err := toolruntime.SandboxedBashCommand(command, root, root, toolHome, effectivePolicy)
+	if err != nil {
+		return unavailableSandbox(state, "sandbox command failed: "+err.Error())
+	}
+	commandEnv := cmd.Env
 	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cmd = exec.CommandContext(probeCtx, cmd.Path, cmd.Args[1:]...)
 	cmd.Dir = root
-	cmd.Env = toolruntime.SandboxControlEnv(command, root, toolHome, cfg.SandboxPolicy)
+	cmd.Env = commandEnv
 	err = cmd.Run()
 	if err == nil {
-		state.Sandbox = "landlock"
-		state.Probe = "sandbox child could not read supervisor auth path"
+		state.Backend = backend
 		return state
 	}
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 42 {
-		state.Probe = "sandbox child could read supervisor auth path"
-	} else {
-		state.Probe = "sandbox probe failed: " + err.Error()
+		return unavailableSandbox(state, "sandbox probe path remained readable")
 	}
-	if cfg.SandboxPolicy == sandboxRequire {
-		state.Sandbox = "unavailable (required)"
+	return unavailableSandbox(state, "sandbox probe failed: "+err.Error())
+}
+
+func unavailableSandbox(state SecurityState, probe string) SecurityState {
+	state.Probe = probe
+	if state.EffectivePolicy == sandboxAuto {
+		state.EffectivePolicy = sandboxOff
 	}
 	return state
+}
+
+func (s SecurityState) Active() bool { return s.Backend != "" }
+
+func effectiveSandboxPolicy(requested, container string) string {
+	if requested == sandboxAuto && container != "" {
+		return sandboxOff
+	}
+	return requested
+}
+
+func detectContainer(ctx context.Context) string {
+	return detectContainerWith(containerProbe{
+		exists: func(path string) bool {
+			_, err := os.Stat(path)
+			return err == nil
+		},
+		readFile: os.ReadFile,
+		detectVirt: func() (string, error) {
+			detectCtx, cancel := context.WithTimeout(ctx, time.Second)
+			defer cancel()
+			output, err := exec.CommandContext(detectCtx, "/usr/bin/systemd-detect-virt", "--container").Output()
+			return string(output), err
+		},
+	})
+}
+
+func detectContainerWith(probe containerProbe) string {
+	for _, marker := range []struct {
+		path string
+		id   string
+	}{
+		{path: "/run/.containerenv", id: "podman"},
+		{path: "/.dockerenv", id: "docker"},
+	} {
+		if probe.exists != nil && probe.exists(marker.path) {
+			return marker.id
+		}
+	}
+	for _, source := range []string{"/run/systemd/container", "/proc/1/environ"} {
+		if probe.readFile == nil {
+			break
+		}
+		raw, err := probe.readFile(source)
+		if err != nil {
+			continue
+		}
+		if id := trustedContainerID(raw); id != "" {
+			return id
+		}
+	}
+	if probe.detectVirt != nil {
+		if output, err := probe.detectVirt(); err == nil {
+			if id := trustedContainerID([]byte(output)); id != "" {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+func trustedContainerID(raw []byte) string {
+	for _, field := range strings.FieldsFunc(string(raw), func(r rune) bool {
+		return r == 0 || r == '\n' || r == '\r'
+	}) {
+		field = strings.ToLower(strings.TrimSpace(field))
+		field = strings.TrimPrefix(field, "container=")
+		switch field {
+		case "docker", "lxc", "lxc-libvirt", "openvz", "podman", "systemd-nspawn":
+			return field
+		}
+	}
+	return ""
 }
 
 func resolveStateHome(home string) string {
@@ -97,5 +198,12 @@ func bashQuote(value string) string {
 }
 
 func (s SecurityState) Compact() string {
-	return fmt.Sprintf("agent sandbox: %s · network: open", s.Sandbox)
+	backend := s.Backend
+	if backend == "" {
+		backend = "off"
+	}
+	if s.Container != "" {
+		backend += fmt.Sprintf(" (%s)", s.Container)
+	}
+	return fmt.Sprintf("sandbox: %s · network: open", backend)
 }

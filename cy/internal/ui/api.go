@@ -15,11 +15,19 @@ var defaultProviders = []string{"deepseek", "openai", "openrouter"}
 
 var capabilityProfileCatalog = toolruntime.CapabilityProfiles()
 
+var sandboxPolicyCatalog = []struct {
+	Name        string
+	Description string
+}{
+	{Name: "auto", Description: "adapt to the current environment"},
+	{Name: "off", Description: "ambient environment and user permissions"},
+	{Name: "on", Description: "require a working platform sandbox"},
+}
+
 type Config struct {
 	ModelURI          string
 	ReasoningEffort   string
 	CapabilityProfile string
-	SecuritySummary   string
 	Providers         []string
 	TerminalTheme     string
 }
@@ -71,6 +79,9 @@ type Agent interface {
 	ReasoningEfforts(string) []string
 	CurrentProfile() string
 	SwitchProfile(string) error
+	CurrentSandbox() string
+	SecuritySummary() string
+	SwitchSandbox(string) error
 	RunShell(context.Context, string) (string, toolruntime.ProcessResultMeta, error)
 	RunPrivateShell(context.Context, string) (string, toolruntime.ProcessResultMeta, error)
 	ProcessStatus(string) (toolruntime.ProcessResultMeta, bool)

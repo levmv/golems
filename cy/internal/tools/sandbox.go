@@ -8,21 +8,25 @@ import (
 )
 
 const (
-	sandboxAuto    = "auto"
-	sandboxRequire = "require"
-	sandboxOff     = "off"
+	sandboxAuto = "auto"
+	sandboxOn   = "on"
+	sandboxOff  = "off"
 )
 
 func RunSandboxChildIfRequested() bool { return runSandboxChildIfRequested() }
 
 func HardenSupervisor() { hardenSupervisor() }
 
+func SandboxBackend() string { return sandboxBackend() }
+
 func SandboxedBashCommand(command, workspace, workdir, home, policy string) (*exec.Cmd, error) {
 	return sandboxedBashCommand(command, workspace, workdir, home, policy)
 }
 
-func SandboxControlEnv(command, workspace, home, policy string) []string {
-	return sandboxControlEnv(command, workspace, home, policy)
+func ambientBashCommand(command, workdir string) *exec.Cmd {
+	cmd := exec.Command("bash", "-lc", command)
+	cmd.Dir = workdir
+	return cmd
 }
 
 func WorkspaceToolHome(home, root string) string {

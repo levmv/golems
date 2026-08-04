@@ -39,6 +39,10 @@ func (m *cyTUIModel) syncCommandSuggestions() {
 		for _, profile := range capabilityProfileCatalog {
 			candidates = append(candidates, "/profile "+profile.Name)
 		}
+	case strings.HasPrefix(value, "/sandbox "):
+		for _, policy := range sandboxPolicyCatalog {
+			candidates = append(candidates, "/sandbox "+policy.Name)
+		}
 	case strings.HasPrefix(value, "/login "):
 		for _, provider := range m.cfg.providers() {
 			candidates = append(candidates, "/login "+provider)

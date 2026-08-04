@@ -18,6 +18,9 @@ import (
 
 func TestBashReportsExitAndUsesIsolatedEnvironment(t *testing.T) {
 	manager := processManagerForTest(t)
+	if err := manager.SetSandbox(sandboxAuto); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CY_TEST_SECRET", "must-not-leak")
 	result := runProcessTool(t, manager.bash, bashArgs{Command: "printf 'hello\\n'; printf 'stderr\\n' >&2; env; exit 3"})
 	if !strings.Contains(result, "status: failed") || !strings.Contains(result, "exit_code: 3") || !strings.Contains(result, "hello") || !strings.Contains(result, "stderr") {
@@ -31,9 +34,22 @@ func TestBashReportsExitAndUsesIsolatedEnvironment(t *testing.T) {
 	}
 }
 
+func TestBashSandboxOffInheritsAmbientEnvironment(t *testing.T) {
+	manager := processManagerForTest(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CY_TEST_AMBIENT", "visible-to-agent")
+	result := runProcessTool(t, manager.bash, bashArgs{Command: `printf 'HOME=%s\nCY_TEST_AMBIENT=%s\n' "$HOME" "$CY_TEST_AMBIENT"`})
+	if !strings.Contains(result, "HOME="+home) || !strings.Contains(result, "CY_TEST_AMBIENT=visible-to-agent") {
+		t.Fatalf("bash did not inherit ambient environment: %q", result)
+	}
+}
+
 func TestProcessManagerRunShellInheritsAmbientEnvironment(t *testing.T) {
 	manager := processManagerForTest(t)
-	manager.sandbox = sandboxRequire
+	if err := manager.SetSandbox(sandboxOn); err != nil {
+		t.Fatal(err)
+	}
 	outside := filepath.Join(t.TempDir(), "outside.txt")
 	if err := os.WriteFile(outside, []byte("ambient-shell"), 0o600); err != nil {
 		t.Fatal(err)

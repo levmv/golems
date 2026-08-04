@@ -388,6 +388,46 @@ func TestSessionAgentSwitchProfilePersistsDefault(t *testing.T) {
 	}
 }
 
+func TestSessionAgentSwitchSandboxPersistsRequestedPolicy(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	journal, err := session.Create(session.CreateOptions{Home: home, Workspace: root, Model: "fake/model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := state.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := newSessionAgent(Config{Home: home, ModelURI: "fake/model", CapabilityProfile: "full", SandboxPolicy: sandboxOff}, &runTurnFakeModel{}, root, nil, journal, store)
+	if err != nil {
+		_ = journal.Close()
+		t.Fatal(err)
+	}
+	defer agent.Close()
+
+	if err := agent.SwitchSandbox(sandboxAuto); err != nil {
+		t.Fatal(err)
+	}
+	if got := agent.CurrentSandbox(); got != sandboxAuto {
+		t.Fatalf("sandbox policy = %q", got)
+	}
+	if summary := agent.SecuritySummary(); !strings.HasPrefix(summary, "sandbox: ") {
+		t.Fatalf("security summary = %q", summary)
+	}
+	stored, err := store.Config()
+	if err != nil || stored.Sandbox != sandboxAuto {
+		t.Fatalf("stored settings = %#v, %v", stored, err)
+	}
+}
+
+func TestRuntimeSandboxPolicyUsesEffectivePolicy(t *testing.T) {
+	cfg := Config{SandboxPolicy: sandboxAuto, Security: SecurityState{EffectivePolicy: sandboxOff}}
+	if got := runtimeSandboxPolicy(cfg); got != sandboxOff {
+		t.Fatalf("runtimeSandboxPolicy() = %q, want %q", got, sandboxOff)
+	}
+}
+
 func TestSessionAgentSwitchDoesNotMutateRuntimeWhenDefaultCannotBeSaved(t *testing.T) {
 	stateHome := t.TempDir()
 	store, err := state.Open(stateHome)
@@ -431,6 +471,13 @@ func TestSessionAgentSwitchDoesNotMutateRuntimeWhenDefaultCannotBeSaved(t *testi
 	}
 	if got := agent.CurrentProfile(); got != "full" {
 		t.Fatalf("profile changed after persistence failure: %q", got)
+	}
+
+	if err := agent.SwitchSandbox(sandboxAuto); err == nil {
+		t.Fatal("SwitchSandbox() succeeded with an unwritable state store")
+	}
+	if got := agent.CurrentSandbox(); got != sandboxOff {
+		t.Fatalf("sandbox changed after persistence failure: %q", got)
 	}
 }
 

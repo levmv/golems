@@ -1,26 +1,22 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package tools
 
 import (
 	"errors"
 	"os/exec"
+	"runtime"
 )
 
 func runSandboxChildIfRequested() bool { return false }
 
-func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*exec.Cmd, error) {
-	if policy == sandboxRequire {
-		return nil, errors.New("Landlock is only available on Linux")
-	}
-	cmd := exec.Command("bash", "-lc", command)
-	cmd.Dir = workdir
-	cmd.Env = minimalToolEnv(home)
-	return cmd, nil
-}
+func sandboxBackend() string { return "" }
 
-func sandboxControlEnv(command, workspace, home, policy string) []string {
-	return minimalToolEnv(home)
+func sandboxedBashCommand(command, workspace, workdir, home, policy string) (*exec.Cmd, error) {
+	if policy == sandboxOn {
+		return nil, errors.New("sandbox is unavailable on " + runtime.GOOS)
+	}
+	return ambientBashCommand(command, workdir), nil
 }
 
 func hardenSupervisor() {}

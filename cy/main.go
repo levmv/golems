@@ -43,7 +43,7 @@ func runMain() (returnErr error) {
 	saveSession := flag.Bool("save-session", cfg.SaveSession, "keep a resumable session for a one-shot invocation")
 	jsonOutput := flag.Bool("json", cfg.JSON, "emit one versioned JSON result on stdout")
 	profile := flag.String("profile", cfg.CapabilityProfile, "capability profile: full, edit, or read-only")
-	sandbox := flag.String("sandbox", cfg.SandboxPolicy, "Bash sandbox policy: auto, require, or off")
+	sandbox := flag.String("sandbox", cfg.SandboxPolicy, "model command isolation: auto, off, or on")
 	theme := flag.String("theme", cfg.TerminalTheme, "terminal theme: auto, light, or dark")
 	showVersion := flag.Bool("version", false, "print the Cy version and exit")
 	flag.Usage = func() { writeCLIUsage(flag.CommandLine) }
@@ -94,6 +94,12 @@ func runMain() (returnErr error) {
 		cfg.CapabilityProfile, err = toolruntime.NormalizeCapabilityProfile(storedSettings.Profile)
 		if err != nil {
 			return fmt.Errorf("load saved profile: %w", err)
+		}
+	}
+	if !setFlags["sandbox"] && strings.TrimSpace(os.Getenv("CY_SANDBOX")) == "" && storedSettings.Sandbox != "" {
+		cfg.SandboxPolicy, err = normalizeSandboxPolicy(storedSettings.Sandbox)
+		if err != nil {
+			return fmt.Errorf("load saved sandbox policy: %w", err)
 		}
 	}
 
@@ -155,7 +161,7 @@ func runMain() (returnErr error) {
 		}
 	}
 	cfg.Security = buildSecurityState(ctx, cfg, root, store)
-	if cfg.SandboxPolicy == sandboxRequire && cfg.Security.Sandbox != "landlock" {
+	if cfg.Security.EffectivePolicy == sandboxOn && !cfg.Security.Active() {
 		return fmt.Errorf("required sandbox probe failed: %s", cfg.Security.Probe)
 	}
 	// The interactive UI must be able to start without a credential so the
@@ -234,7 +240,6 @@ func runMain() (returnErr error) {
 		ModelURI:          cfg.ModelURI,
 		ReasoningEffort:   cfg.ReasoningEffort,
 		CapabilityProfile: cfg.CapabilityProfile,
-		SecuritySummary:   cfg.Security.Compact(),
 		Providers:         loginProviderCatalog(),
 		TerminalTheme:     cfg.TerminalTheme,
 	}, root, inFile, outFile)

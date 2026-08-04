@@ -458,6 +458,16 @@ func TestTUICompletesProfileArgument(t *testing.T) {
 	}
 }
 
+func TestTUICompletesSandboxArgument(t *testing.T) {
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.input.SetValue("/sandbox on")
+	model.input.CursorEnd()
+	model.syncCommandSuggestions()
+	if !model.commandSuggestionsVisible() || model.currentCommandSuggestion() != "/sandbox on" {
+		t.Fatalf("sandbox suggestion = %q, matches=%#v", model.currentCommandSuggestion(), model.commandSuggestions)
+	}
+}
+
 func TestTUIMissingCredentialOpensProviderPicker(t *testing.T) {
 	control := &authPickerAgent{
 		statuses: []providerStatus{
@@ -828,6 +838,36 @@ func TestTUIProfileCommandOpensPickerAndSwitchesSelection(t *testing.T) {
 	}
 	if got.picker.active() {
 		t.Fatalf("profile picker remained open: %#v", got.picker)
+	}
+}
+
+func TestTUISandboxCommandOpensPickerAndSwitchesSelection(t *testing.T) {
+	control := &sandboxPickerAgent{policy: "auto", summary: "sandbox: landlock · network: open"}
+	model := newCyTUIModel(context.Background(), control, Config{}, ".", nil)
+	model.resize(100, 24)
+	model.input.SetValue("/sandbox")
+	model.input.MoveToEnd()
+
+	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(cyTUIModel)
+	if got.picker.kind != pickerSandbox || len(got.picker.items) != len(sandboxPolicyCatalog) || got.picker.index != 0 {
+		t.Fatalf("sandbox picker = %#v", got.picker)
+	}
+	got.console.useStyle = false
+	if view := got.frameView(); !strings.Contains(view.Content, "auto  current  adapt to the current environment") || strings.Count(view.Content, control.summary) != 1 {
+		t.Fatalf("sandbox picker repeated runtime status: %q", got.frameView().Content)
+	}
+
+	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	updated, cmd := updated.(cyTUIModel).Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got = updated.(cyTUIModel)
+	if cmd == nil || got.maintenance != "switching sandbox" {
+		t.Fatalf("sandbox switch did not start: cmd=%v maintenance=%q", cmd, got.maintenance)
+	}
+	updated, _ = got.Update(cmd())
+	got = updated.(cyTUIModel)
+	if control.switched != "off" || control.policy != "off" || got.maintenance != "" {
+		t.Fatalf("sandbox switch = %q current=%q maintenance=%q", control.switched, control.policy, got.maintenance)
 	}
 }
 
@@ -1383,6 +1423,9 @@ func (screenAgentStub) CurrentReasoningEffort() string              { return "" 
 func (screenAgentStub) ReasoningEfforts(string) []string            { return []string{""} }
 func (screenAgentStub) CurrentProfile() string                      { return "" }
 func (screenAgentStub) SwitchProfile(string) error                  { return nil }
+func (screenAgentStub) CurrentSandbox() string                      { return "auto" }
+func (screenAgentStub) SecuritySummary() string                     { return "" }
+func (screenAgentStub) SwitchSandbox(string) error                  { return nil }
 func (screenAgentStub) RunShell(context.Context, string) (string, processResultMeta, error) {
 	return "", processResultMeta{}, nil
 }
@@ -1535,6 +1578,22 @@ type profilePickerAgent struct {
 	screenAgentStub
 	profile  string
 	switched string
+}
+
+type sandboxPickerAgent struct {
+	screenAgentStub
+	policy   string
+	summary  string
+	switched string
+}
+
+func (a *sandboxPickerAgent) CurrentSandbox() string  { return a.policy }
+func (a *sandboxPickerAgent) SecuritySummary() string { return a.summary }
+func (a *sandboxPickerAgent) SwitchSandbox(policy string) error {
+	a.switched = policy
+	a.policy = policy
+	a.summary = "sandbox: off · network: open"
+	return nil
 }
 
 func (a *profilePickerAgent) CurrentProfile() string { return a.profile }
