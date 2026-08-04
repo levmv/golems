@@ -70,6 +70,33 @@ func TestEngineDeliversSteeringAtNextModelBoundary(t *testing.T) {
 	}
 }
 
+func TestEnginePopQueuedReturnsNewestAndPreservesFIFOOrder(t *testing.T) {
+	s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	eng, err := New(Config{Model: &scriptedModel{}, Session: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{"first", "second", "third"} {
+		if err := eng.QueueInput(input); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got, ok, err := eng.PopQueued(); err != nil || !ok || got != "third" {
+		t.Fatalf("PopQueued() = %q, %v, %v", got, ok, err)
+	}
+	if got, ok, err := eng.ClaimQueued(); err != nil || !ok || got != "first" {
+		t.Fatalf("ClaimQueued() = %q, %v, %v", got, ok, err)
+	}
+	if restored, err := eng.RestoreQueued(); err != nil || len(restored) != 1 || restored[0] != "second" {
+		t.Fatalf("RestoreQueued() = %#v, %v", restored, err)
+	}
+}
+
 func TestEngineAddsCurrentInstructionPrompts(t *testing.T) {
 	s, err := session.Create(session.CreateOptions{Home: t.TempDir(), Workspace: "/workspace"})
 	if err != nil {

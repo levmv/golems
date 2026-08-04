@@ -114,6 +114,56 @@ func TestSessionAgentRunShellIsAvailableOutsideFullProfile(t *testing.T) {
 	}
 }
 
+func TestSessionAgentRunPrivateShellDoesNotEnterSession(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
+	}
+	home := t.TempDir()
+	root := t.TempDir()
+	journal, err := session.Create(session.CreateOptions{Home: home, Workspace: root, Model: "fake/model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &runTurnFakeModel{streams: [][]llm.StreamChunk{{{
+		Text: "ack", FinishReason: llm.FinishReasonStop,
+	}}}}
+	agent, err := newSessionAgent(
+		Config{Home: home, ModelURI: "fake/model", CapabilityProfile: "full", SandboxPolicy: sandboxOff},
+		model, root, nil, journal, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+
+	content, meta, err := agent.RunPrivateShell(context.Background(), "printf 'private-shell-output'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.UserInitiated || meta.Status != toolruntime.JobCompleted || !strings.Contains(content, "private-shell-output") {
+		t.Fatalf("private shell result content=%q meta=%#v", content, meta)
+	}
+	history, err := agent.SessionHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 0 {
+		t.Fatalf("private shell entered session history: %#v", history)
+	}
+
+	if _, err := agent.Stream(context.Background(), "continue", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) != 1 {
+		t.Fatalf("model requests = %d, want 1", len(model.requests))
+	}
+	for _, message := range model.requests[0].Messages {
+		if strings.Contains(message.Content, "private-shell-output") {
+			t.Fatalf("private shell entered model context: %#v", model.requests[0].Messages)
+		}
+	}
+}
+
 func TestSessionAgentLoginAddsAndRemovesWebSearch(t *testing.T) {
 	t.Setenv("TAVILY_API_KEY", "")
 	t.Setenv("EXA_API_KEY", "")

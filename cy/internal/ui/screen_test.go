@@ -332,6 +332,9 @@ func TestTUIEnterRunsSelectedCommandSuggestion(t *testing.T) {
 	if !strings.Contains(help, "Ctrl+J") {
 		t.Fatalf("/help missed newline fallback: %q", help)
 	}
+	if !strings.Contains(help, "Alt+Up") || !strings.Contains(help, "!!<command>") {
+		t.Fatalf("/help missed queued editing or private shell: %q", help)
+	}
 }
 
 func TestTUIResumePickerReplacesComposerWithoutHeader(t *testing.T) {
@@ -1005,6 +1008,39 @@ func TestTUIEnterWhileWorkingQueuesInput(t *testing.T) {
 	}
 }
 
+func TestTUIAltUpEditsMostRecentQueuedInputWithoutCancelling(t *testing.T) {
+	agent := &queueScreenAgent{queued: []string{"first queued", "second queued"}}
+	model := newCyTUIModel(context.Background(), agent, Config{}, ".", nil)
+	model.working = true
+	cancelled := false
+	model.turnCancel = func() { cancelled = true }
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Mod: tea.ModAlt, Code: tea.KeyUp})
+	got := updated.(cyTUIModel)
+	if cmd != nil || cancelled || !got.working {
+		t.Fatalf("Alt+Up changed active turn: cmd=%v cancelled=%v working=%v", cmd, cancelled, got.working)
+	}
+	if got.input.Value() != "second queued" {
+		t.Fatalf("restored input = %q, want most recent queued input", got.input.Value())
+	}
+	if len(agent.queued) != 1 || agent.queued[0] != "first queued" {
+		t.Fatalf("remaining queue = %#v", agent.queued)
+	}
+}
+
+func TestTUIAltUpDoesNotOverwriteDraft(t *testing.T) {
+	agent := &queueScreenAgent{queued: []string{"queued"}}
+	model := newCyTUIModel(context.Background(), agent, Config{}, ".", nil)
+	model.working = true
+	model.input.SetValue("draft")
+
+	updated, _ := model.Update(tea.KeyPressMsg{Mod: tea.ModAlt, Code: tea.KeyUp})
+	got := updated.(cyTUIModel)
+	if got.input.Value() != "draft" || len(agent.queued) != 1 {
+		t.Fatalf("Alt+Up overwrote draft: input=%q queue=%#v", got.input.Value(), agent.queued)
+	}
+}
+
 func TestTUISlashCommandWhileWorkingIsNotQueued(t *testing.T) {
 	agent := &queueScreenAgent{}
 	model := newCyTUIModel(context.Background(), agent, Config{}, ".", nil)
@@ -1046,7 +1082,7 @@ func TestTUIShellEscapeRunsWithoutModelTurnAndRendersOutput(t *testing.T) {
 		}
 	}
 
-	message := runShellCmd(context.Background(), agent, "printf 'hello'")()
+	message := runShellCmd(context.Background(), agent, "printf 'hello'", false)()
 	updated, _ = got.Update(message)
 	got = updated.(cyTUIModel)
 	if agent.command != "printf 'hello'" || got.maintenance != "" {
@@ -1058,6 +1094,28 @@ func TestTUIShellEscapeRunsWithoutModelTurnAndRendersOutput(t *testing.T) {
 	}
 	if rendered := strings.Join(got.renderTranscriptLines(), "\n"); !strings.Contains(rendered, "hello") || strings.Contains(rendered, "› !printf") {
 		t.Fatalf("shell transcript = %q", rendered)
+	}
+}
+
+func TestTUIPrivateShellEscapeUsesPrivateRunner(t *testing.T) {
+	agent := &shellScreenAgent{}
+	model := newCyTUIModel(context.Background(), agent, Config{}, ".", nil)
+	model.input.SetValue("!!printf 'private'")
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(cyTUIModel)
+	if cmd == nil || got.maintenance != "running shell command" {
+		t.Fatalf("private shell did not start: cmd=%v maintenance=%q", cmd, got.maintenance)
+	}
+	if block := got.blocks[len(got.blocks)-1]; block.text != "!! printf 'private'" {
+		t.Fatalf("private shell block = %#v", block)
+	}
+
+	message := runShellCmd(context.Background(), agent, "printf 'private'", true)()
+	updated, _ = got.Update(message)
+	got = updated.(cyTUIModel)
+	if agent.command != "printf 'private'" || !agent.private {
+		t.Fatalf("private shell runner state: command=%q private=%v", agent.command, agent.private)
 	}
 }
 
@@ -1303,6 +1361,7 @@ func (screenAgentStub) SessionID() string                        { return "" }
 func (screenAgentStub) SessionRepaired() bool                    { return false }
 func (screenAgentStub) QueueInput(string) error                  { return nil }
 func (screenAgentStub) ClaimQueued() (string, bool, error)       { return "", false, nil }
+func (screenAgentStub) PopQueued() (string, bool, error)         { return "", false, nil }
 func (screenAgentStub) RestoreQueued() ([]string, error)         { return nil, nil }
 func (screenAgentStub) ClearSession() (string, error)            { return "", nil }
 func (screenAgentStub) ResumeSession(string) (string, error)     { return "", nil }
@@ -1327,6 +1386,9 @@ func (screenAgentStub) SwitchProfile(string) error                  { return nil
 func (screenAgentStub) RunShell(context.Context, string) (string, processResultMeta, error) {
 	return "", processResultMeta{}, nil
 }
+func (screenAgentStub) RunPrivateShell(context.Context, string) (string, processResultMeta, error) {
+	return "", processResultMeta{}, nil
+}
 func (screenAgentStub) ProcessStatus(string) (processResultMeta, bool) {
 	return processResultMeta{}, false
 }
@@ -1334,6 +1396,7 @@ func (screenAgentStub) ProcessStatus(string) (processResultMeta, bool) {
 type shellScreenAgent struct {
 	screenAgentStub
 	command string
+	private bool
 }
 
 func (a *shellScreenAgent) RunShell(_ context.Context, command string) (string, processResultMeta, error) {
@@ -1342,6 +1405,11 @@ func (a *shellScreenAgent) RunShell(_ context.Context, command string) (string, 
 	return "status: completed\nexit_code: 0\n\nhello\n", processResultMeta{
 		Type: processResultMetaType, Status: jobCompleted, ExitCode: &zero, OutputBytes: 5, UserInitiated: true,
 	}, nil
+}
+
+func (a *shellScreenAgent) RunPrivateShell(ctx context.Context, command string) (string, processResultMeta, error) {
+	a.private = true
+	return a.RunShell(ctx, command)
 }
 
 type repairedScreenAgent struct{ screenAgentStub }
@@ -1390,6 +1458,16 @@ func (a *queueScreenAgent) ClaimQueued() (string, bool, error) {
 	}
 	input := a.queued[0]
 	a.queued = a.queued[1:]
+	return input, true, nil
+}
+
+func (a *queueScreenAgent) PopQueued() (string, bool, error) {
+	if len(a.queued) == 0 {
+		return "", false, nil
+	}
+	last := len(a.queued) - 1
+	input := a.queued[last]
+	a.queued = a.queued[:last]
 	return input, true, nil
 }
 

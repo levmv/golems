@@ -166,6 +166,12 @@ func isNewlineShortcut(msg tea.KeyPressMsg) bool {
 	return modifiedEnter || keyString == "ctrl+j" || keyIsCtrl(msg, 'j')
 }
 
+func isAltUp(msg tea.KeyPressMsg) bool {
+	key := msg.Key()
+	isUp := key.Code == tea.KeyUp || key.Code == tea.KeyKpUp
+	return isUp && (key.Mod&tea.ModAlt != 0 || msg.String() == "alt+up")
+}
+
 func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.picker.active() {
 		return m.handlePickerKey(msg)
@@ -205,6 +211,14 @@ func (m cyTUIModel) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case isEnterKey(msg):
 		return m.submitInput()
+	case isAltUp(msg) && m.loginProvider == "":
+		// Never overwrite a draft. The shortcut is intended for the empty
+		// composer immediately after submitting a follow-up.
+		if m.working && m.input.Value() == "" {
+			m.restoreLatestQueuedInput()
+			m.refreshScreen()
+		}
+		return m, nil
 	case m.historyIndex >= len(m.history) && m.commandSuggestionsVisible() && ((!hasCtrl && (key.Code == tea.KeyUp || key.Code == tea.KeyKpUp || keyString == "up")) || keyIsCtrl(msg, 'p')):
 		m.moveCommandSuggestion(-1)
 		return m, nil
@@ -358,13 +372,17 @@ func (m cyTUIModel) submitInput() (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
-	if command, shell := shellEscapeCommand(input); shell {
+	if command, private, shell := shellEscapeCommand(input); shell {
 		if command == "" {
-			m.addBlock(screenBlockError, "shell command is required after !")
+			prefix := "!"
+			if private {
+				prefix = "!!"
+			}
+			m.addBlock(screenBlockError, "shell command is required after "+prefix)
 			m.refreshScreen()
 			return m, nil
 		}
-		cmd := m.startLocalShell(command)
+		cmd := m.startLocalShell(command, private)
 		m.refreshScreen()
 		return m, cmd
 	}
@@ -375,35 +393,50 @@ func (m cyTUIModel) submitInput() (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func shellEscapeCommand(input string) (string, bool) {
+func shellEscapeCommand(input string) (command string, private bool, shell bool) {
 	input = strings.TrimSpace(input)
 	if !strings.HasPrefix(input, "!") {
-		return "", false
+		return "", false, false
 	}
-	return strings.TrimSpace(strings.TrimPrefix(input, "!")), true
+	private = strings.HasPrefix(input, "!!")
+	prefix := "!"
+	if private {
+		prefix = "!!"
+	}
+	return strings.TrimSpace(strings.TrimPrefix(input, prefix)), private, true
 }
 
-func shellCommandDisplay(command string) string {
+func shellCommandDisplay(command string, private bool) string {
+	if private {
+		return "!! " + compactCommand(command, 180)
+	}
 	return "$ " + compactCommand(command, 180)
 }
 
-func (m *cyTUIModel) startLocalShell(command string) tea.Cmd {
+func (m *cyTUIModel) startLocalShell(command string, private bool) tea.Cmd {
 	opCtx, cancel := context.WithCancel(m.ctx)
 	m.maintenance = "running shell command"
 	m.maintenanceCancel = cancel
 	m.appendBlock(screenBlock{
 		kind:          screenBlockTool,
-		text:          sanitizeTerminalText(shellCommandDisplay(command)),
+		text:          sanitizeTerminalText(shellCommandDisplay(command, private)),
 		toolName:      "bash",
 		toolStartedAt: time.Now(),
 		userInitiated: true,
 	})
-	return tea.Batch(m.spinner.Tick, runShellCmd(opCtx, m.agent, command))
+	return tea.Batch(m.spinner.Tick, runShellCmd(opCtx, m.agent, command, private))
 }
 
-func runShellCmd(ctx context.Context, agent screenAgent, command string) tea.Cmd {
+func runShellCmd(ctx context.Context, agent screenAgent, command string, private bool) tea.Cmd {
 	return func() tea.Msg {
-		content, result, err := agent.RunShell(ctx, command)
+		var content string
+		var result processResultMeta
+		var err error
+		if private {
+			content, result, err = agent.RunPrivateShell(ctx, command)
+		} else {
+			content, result, err = agent.RunShell(ctx, command)
+		}
 		return shellDoneMsg{content: content, result: result, err: err}
 	}
 }
@@ -425,6 +458,20 @@ func (m *cyTUIModel) claimQueuedInput() (string, bool) {
 		return "", false
 	}
 	return input, found
+}
+
+func (m *cyTUIModel) restoreLatestQueuedInput() {
+	input, found, err := m.agent.PopQueued()
+	if err != nil {
+		m.addBlock(screenBlockError, "restore queued input: "+err.Error())
+		return
+	}
+	if !found {
+		return
+	}
+	m.input.SetValue(input)
+	m.input.CursorEnd()
+	m.addBlock(screenBlockSystem, "queued input returned to editor")
 }
 
 func (m *cyTUIModel) restoreQueuedInput() {

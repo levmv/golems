@@ -50,10 +50,10 @@ func recordedShellTurn(history []llm.Message, index int) bool {
 	if index < 0 || index+2 >= len(history) {
 		return false
 	}
-	command, shell := shellEscapeCommand(history[index].Content)
+	command, private, shell := shellEscapeCommand(history[index].Content)
 	assistant := history[index+1]
 	result := history[index+2]
-	if !shell || command == "" || assistant.Role != llm.RoleAI || len(assistant.ToolCalls) != 1 || result.Role != llm.RoleTool {
+	if !shell || private || command == "" || assistant.Role != llm.RoleAI || len(assistant.ToolCalls) != 1 || result.Role != llm.RoleTool {
 		return false
 	}
 	call := assistant.ToolCalls[0]

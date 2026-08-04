@@ -163,6 +163,20 @@ func (e *Engine) ClaimQueued() (string, bool, error) {
 	return content, true, nil
 }
 
+// PopQueued removes the newest input that has not yet been delivered at a
+// model boundary, allowing the UI to return it to the editor.
+func (e *Engine) PopQueued() (string, bool, error) {
+	e.queueMu.Lock()
+	defer e.queueMu.Unlock()
+	if len(e.pendingInputs) == 0 {
+		return "", false, nil
+	}
+	last := len(e.pendingInputs) - 1
+	content := e.pendingInputs[last]
+	e.pendingInputs = e.pendingInputs[:last]
+	return content, true, nil
+}
+
 // RestoreQueued returns transient queued input to the editor.
 func (e *Engine) RestoreQueued() ([]string, error) {
 	e.queueMu.Lock()

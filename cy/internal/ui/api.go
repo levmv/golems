@@ -53,6 +53,7 @@ type Agent interface {
 	SessionRepaired() bool
 	QueueInput(string) error
 	ClaimQueued() (string, bool, error)
+	PopQueued() (string, bool, error)
 	RestoreQueued() ([]string, error)
 	ClearSession() (string, error)
 	ResumeSession(string) (string, error)
@@ -71,6 +72,7 @@ type Agent interface {
 	CurrentProfile() string
 	SwitchProfile(string) error
 	RunShell(context.Context, string) (string, toolruntime.ProcessResultMeta, error)
+	RunPrivateShell(context.Context, string) (string, toolruntime.ProcessResultMeta, error)
 	ProcessStatus(string) (toolruntime.ProcessResultMeta, bool)
 }
 

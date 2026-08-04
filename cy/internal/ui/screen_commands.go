@@ -134,7 +134,7 @@ func tuiHelpText() string {
 	for _, command := range tuiCommands {
 		fmt.Fprintf(&help, "  %-*s  %s\n", commandWidth, command.usage, command.description)
 	}
-	help.WriteString("\nShell\n  !<command>  run Bash with your permissions and add its output to the session\n              each command starts in the workspace root\n")
+	help.WriteString("\nShell\n  !<command>   run Bash and add its output to the session\n  !!<command>  run Bash without adding it or its output to the session\n               commands use your permissions and start in the workspace root\n")
 
 	shortcuts := []struct {
 		keys        string
@@ -142,6 +142,7 @@ func tuiHelpText() string {
 	}{
 		{keys: "Enter", description: "send input; queue it while Cy is working"},
 		{keys: "Shift+Enter / Alt+Enter / Ctrl+J", description: "insert a newline"},
+		{keys: "Alt+Up", description: "edit the most recent queued input"},
 		{keys: "Up/Down", description: "navigate commands or input history"},
 		{keys: "Tab", description: "complete the selected command"},
 		{keys: "Esc", description: "cancel active work and restore queued input"},
