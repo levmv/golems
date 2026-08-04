@@ -92,6 +92,31 @@ func (m *cyTUIModel) applyProcessResult(toolCallID string, result processResultM
 	})
 }
 
+func (m *cyTUIModel) applyLocalShellResult(toolCallID, content string, result processResultMeta) {
+	for index := len(m.blocks) - 1; index >= 0; index-- {
+		block := &m.blocks[index]
+		if block.kind != screenBlockTool || toolCallID != "" && block.toolCallID != toolCallID {
+			continue
+		}
+		if toolCallID == "" && !block.userInitiated {
+			continue
+		}
+		m.markBlockDirty(index)
+		block.processResult = &result
+		block.processOutput = processCommandOutput(content)
+		block.userInitiated = true
+		return
+	}
+	m.appendBlock(screenBlock{
+		kind:          screenBlockTool,
+		text:          "process",
+		toolCallID:    toolCallID,
+		processResult: &result,
+		processOutput: processCommandOutput(content),
+		userInitiated: true,
+	})
+}
+
 func (m *cyTUIModel) updatePendingToolDurations(now time.Time) bool {
 	changed := false
 	for index := range m.blocks {

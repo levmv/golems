@@ -171,7 +171,7 @@ func (m cyTUIModel) renderBlockLines(block screenBlock, previous screenBlockKind
 	}
 	switch block.kind {
 	case screenBlockBanner:
-		lines = append(lines, m.renderMarkedLine(" ", m.accent("Cy")+"  "+m.muted("Type / for commands."), m.mutedStyle))
+		lines = append(lines, m.renderMarkedLine(" ", m.accent("Cy")+"  "+m.muted("Type / for commands, ! for shell."), m.mutedStyle))
 	case screenBlockSystem:
 		for _, line := range strings.Split(block.text, "\n") {
 			lines = append(lines, m.renderWrappedMarkedLine(" ", m.muted(line), m.mutedStyle)...)
@@ -189,7 +189,10 @@ func (m cyTUIModel) renderBlockLines(block screenBlock, previous screenBlockKind
 		if block.fileChange != nil {
 			lines = append(lines, m.renderFileChangeLines(block.text, *block.fileChange)...)
 		} else if block.processResult != nil {
-			lines = append(lines, m.renderProcessResultLines(block.text, *block.processResult)...)
+			lines = append(lines, m.renderProcessResultLines(block.text, *block.processResult, !block.userInitiated)...)
+			if block.userInitiated {
+				lines = append(lines, m.renderShellOutputLines(block.processOutput)...)
+			}
 		} else if block.toolName == "bash" && !block.toolStartedAt.IsZero() {
 			lines = append(lines, m.renderPendingProcessLines(block.text, block.toolElapsedMillis)...)
 		} else {
@@ -299,7 +302,7 @@ func (m cyTUIModel) renderToolDisplay(text string) string {
 	return m.accent(name) + arguments
 }
 
-func (m cyTUIModel) renderProcessResultLines(command string, result processResultMeta) []string {
+func (m cyTUIModel) renderProcessResultLines(command string, result processResultMeta, showFailureTail bool) []string {
 	marker := "×"
 	style := m.errorStyle
 	if processRunning(result.Status) {
@@ -314,10 +317,21 @@ func (m cyTUIModel) renderProcessResultLines(command string, result processResul
 		line += "  " + m.muted(detail)
 	}
 	lines := m.renderWrappedMarkedLine(marker, line, style)
-	if !processSucceeded(result.Status) && !processRunning(result.Status) {
+	if showFailureTail && !processSucceeded(result.Status) && !processRunning(result.Status) {
 		for _, tail := range processFailureTailLines(result.FailureTail, 6) {
 			lines = append(lines, m.renderWrappedMarkedLine(" ", m.error(tail), m.mutedStyle)...)
 		}
+	}
+	return lines
+}
+
+func (m cyTUIModel) renderShellOutputLines(output string) []string {
+	if output = sanitizeTerminalText(output); output == "" {
+		return nil
+	}
+	var lines []string
+	for _, line := range strings.Split(output, "\n") {
+		lines = append(lines, m.renderWrappedMarkedLine(" ", line, m.mutedStyle)...)
 	}
 	return lines
 }

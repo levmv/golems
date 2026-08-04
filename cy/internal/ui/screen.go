@@ -61,6 +61,8 @@ type screenBlock struct {
 	fileChange        *fileChangeMeta
 	processResult     *processResultMeta
 	processSuperseded bool
+	processOutput     string
+	userInitiated     bool
 }
 
 type agentStreamMsg struct {
@@ -80,6 +82,12 @@ type modelSwitchDoneMsg struct {
 	uri    string
 	effort string
 	err    error
+}
+
+type shellDoneMsg struct {
+	content string
+	result  processResultMeta
+	err     error
 }
 
 type resumeSessionMsg struct {
@@ -465,6 +473,14 @@ func (m cyTUIModel) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmd := m.startTurn(input)
 			m.refreshScreen()
 			return m, cmd
+		}
+		m.refreshScreen()
+		return m, m.scheduleProcessPoll()
+	case shellDoneMsg:
+		m.finishMaintenance()
+		m.applyLocalShellResult("", msg.content, msg.result)
+		if msg.err != nil && !errors.Is(msg.err, context.Canceled) {
+			m.addBlock(screenBlockError, "shell: "+msg.err.Error())
 		}
 		m.refreshScreen()
 		return m, m.scheduleProcessPoll()

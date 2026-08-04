@@ -85,6 +85,14 @@ func processSucceeded(status string) bool {
 	return status == jobCompleted
 }
 
+func processCommandOutput(content string) string {
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	if _, output, ok := strings.Cut(content, "\n\n"); ok {
+		return strings.TrimSuffix(output, "\n")
+	}
+	return strings.TrimSuffix(content, "\n")
+}
+
 func processRunning(status string) bool {
 	return status == jobRunning
 }

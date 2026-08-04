@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/levmv/golems/cy/internal/engine"
 	"github.com/levmv/golems/cy/internal/session"
 	"github.com/levmv/golems/cy/internal/state"
@@ -203,6 +205,103 @@ func (a *sessionAgent) ProcessStatus(jobID string) (toolruntime.ProcessResultMet
 	meta, ok := processes.Status(jobID)
 	a.mu.RUnlock()
 	return meta, ok
+}
+
+func (a *sessionAgent) RunShell(ctx context.Context, command string) (string, toolruntime.ProcessResultMeta, error) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "", toolruntime.ProcessResultMeta{}, errors.New("shell command is required")
+	}
+
+	a.mu.RLock()
+	if a.closed || a.engine == nil || a.journal == nil || a.processes == nil {
+		a.mu.RUnlock()
+		return "", toolruntime.ProcessResultMeta{}, errors.New("cy session runtime is closed")
+	}
+	eng := a.engine
+	journal := a.journal
+	processes := a.processes
+
+	runID, err := newSessionRunID()
+	if err != nil {
+		a.mu.RUnlock()
+		return "", toolruntime.ProcessResultMeta{}, err
+	}
+	callID, err := newSessionRunID()
+	if err != nil {
+		a.mu.RUnlock()
+		return "", toolruntime.ProcessResultMeta{}, err
+	}
+	arguments, err := json.Marshal(struct {
+		Command string `json:"command"`
+	}{Command: command})
+	if err != nil {
+		a.mu.RUnlock()
+		return "", toolruntime.ProcessResultMeta{}, fmt.Errorf("encode shell command: %w", err)
+	}
+	call := llm.ToolCall{
+		ID:   callID,
+		Type: string(llm.ToolTypeFunction),
+		Function: llm.ToolFunction{
+			Name:      "bash",
+			Arguments: string(arguments),
+		},
+	}
+	if _, err := journal.Append(session.RecordUserMessage, session.UserMessage{RunID: runID, Content: "!" + command}); err != nil {
+		a.mu.RUnlock()
+		return "", toolruntime.ProcessResultMeta{}, err
+	}
+	if _, err := journal.Append(session.RecordAssistantMessage, session.AssistantMessage{RunID: runID, ToolCalls: []llm.ToolCall{call}}); err != nil {
+		_, finishErr := journal.Append(session.RecordRunFinished, session.RunFinished{RunID: runID})
+		a.mu.RUnlock()
+		return "", toolruntime.ProcessResultMeta{}, errors.Join(err, finishErr)
+	}
+
+	startedAt := time.Now()
+	result, runErr := processes.RunShell(ctx, command)
+	meta, ok := toolruntime.ProcessResultMetaFrom(result.Meta)
+	if !ok {
+		meta = toolruntime.ProcessResultMeta{
+			Type:           toolruntime.ProcessResultMetaType,
+			Status:         toolruntime.JobFailed,
+			DurationMillis: time.Since(startedAt).Milliseconds(),
+		}
+	}
+	meta.UserInitiated = true
+	content := result.Content
+	if runErr != nil {
+		meta.Status = toolruntime.JobFailed
+		if errors.Is(runErr, context.Canceled) {
+			meta.Status = toolruntime.JobKilled
+		}
+		meta.FailureTail = runErr.Error()
+		if strings.TrimSpace(content) == "" {
+			content = fmt.Sprintf("status: %s\n\n%s\n", meta.Status, runErr)
+		}
+	}
+	_, resultErr := journal.Append(session.RecordToolResult, session.ToolResult{
+		RunID:      runID,
+		ToolCallID: callID,
+		Content:    content,
+		Meta:       meta,
+	})
+	_, finishErr := journal.Append(session.RecordRunFinished, session.RunFinished{RunID: runID})
+	a.mu.RUnlock()
+
+	a.mu.Lock()
+	if a.engine == eng && a.journal == journal {
+		a.refreshStatusLocked()
+	}
+	a.mu.Unlock()
+	return content, meta, errors.Join(runErr, resultErr, finishErr)
+}
+
+func newSessionRunID() (string, error) {
+	id, err := uuid.NewRandom()
+	if err != nil {
+		return "", err
+	}
+	return id.String(), nil
 }
 
 func (a *sessionAgent) SwitchProfile(value string) error {

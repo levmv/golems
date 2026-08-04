@@ -70,6 +70,7 @@ type Agent interface {
 	ReasoningEfforts(string) []string
 	CurrentProfile() string
 	SwitchProfile(string) error
+	RunShell(context.Context, string) (string, toolruntime.ProcessResultMeta, error)
 	ProcessStatus(string) (toolruntime.ProcessResultMeta, bool)
 }
 

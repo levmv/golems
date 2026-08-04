@@ -44,6 +44,13 @@ const (
 	JobTimedOut  = jobTimedOut
 )
 
+type processOrigin uint8
+
+const (
+	processOriginAgent processOrigin = iota
+	processOriginUser
+)
+
 type processManager struct {
 	workspace       *workspaceTools
 	toolHome        string
@@ -72,6 +79,7 @@ type processJob struct {
 	startedAt      time.Time
 	finishedAt     time.Time
 	completionSeen bool
+	userInitiated  bool
 }
 
 // jobBuffer continuously drains process output while retaining only a bounded
@@ -161,9 +169,23 @@ func (m *processManager) bash(ctx context.Context, call llm.ToolCall) (golem.Too
 	if err := decodeToolArgs(call, &args); err != nil {
 		return golem.ToolResult{}, err
 	}
+	return m.runBash(ctx, args, processOriginAgent)
+}
+
+// RunShell executes an explicit user command in the foreground with the ambient
+// environment and permissions. It deliberately bypasses model sandboxing while
+// retaining the process manager's cancellation, timeout, and output bounds.
+func (m *processManager) RunShell(ctx context.Context, command string) (golem.ToolResult, error) {
+	return m.runBash(ctx, bashArgs{Command: command}, processOriginUser)
+}
+
+func (m *processManager) runBash(ctx context.Context, args bashArgs, origin processOrigin) (golem.ToolResult, error) {
 	args.Command = strings.TrimSpace(args.Command)
 	if args.Command == "" {
 		return golem.ToolResult{}, errors.New("command is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return golem.ToolResult{}, err
 	}
 	if args.Background && !m.allowBackground {
 		return golem.ToolResult{}, errors.New("background Bash is unavailable in one-shot mode; run the command in the foreground")
@@ -179,30 +201,35 @@ func (m *processManager) bash(ctx context.Context, call llm.ToolCall) (golem.Too
 	if args.TimeoutSeconds > 0 {
 		timeout = min(time.Duration(args.TimeoutSeconds)*time.Second, maxBashTimeout)
 	}
-	job, err := m.start(args.Command, workdir, timeout)
+	job, err := m.start(args.Command, workdir, timeout, origin)
 	if err != nil {
 		return golem.ToolResult{}, err
 	}
 	if args.Background {
 		return golem.ToolResult{Content: m.formatJob(job, nil, false, true, false), Meta: m.processMeta(job, true)}, nil
 	}
+	if origin == processOriginUser {
+		select {
+		case <-job.done:
+			return m.completedForegroundResult(job), nil
+		case <-ctx.Done():
+			_, _ = m.stop(context.Background(), job.id, "user shell cancelled")
+			m.forget(job)
+			return golem.ToolResult{}, ctx.Err()
+		}
+	}
 
 	timer := time.NewTimer(defaultBashYield)
 	defer timer.Stop()
 	select {
 	case <-job.done:
-		output, truncated := job.log.snapshot(defaultCommandPreview)
-		m.markCompletionSeen(job)
-		m.forget(job)
-		return golem.ToolResult{Content: m.formatJob(job, output, true, false, truncated), Meta: m.processMeta(job, false)}, nil
+		return m.completedForegroundResult(job), nil
 	case <-timer.C:
 		output, truncated := job.log.snapshot(defaultCommandPreview)
 		managed := true
 		select {
 		case <-job.done:
-			m.markCompletionSeen(job)
-			m.forget(job)
-			managed = false
+			return m.completedForegroundResult(job), nil
 		default:
 		}
 		return golem.ToolResult{Content: m.formatJob(job, output, true, managed, truncated), Meta: m.processMeta(job, managed)}, nil
@@ -210,6 +237,16 @@ func (m *processManager) bash(ctx context.Context, call llm.ToolCall) (golem.Too
 		_, _ = m.stop(context.Background(), job.id, "tool call cancelled")
 		m.forget(job)
 		return golem.ToolResult{}, ctx.Err()
+	}
+}
+
+func (m *processManager) completedForegroundResult(job *processJob) golem.ToolResult {
+	output, truncated := job.log.snapshot(defaultCommandPreview)
+	m.markCompletionSeen(job)
+	m.forget(job)
+	return golem.ToolResult{
+		Content: m.formatJob(job, output, true, false, truncated),
+		Meta:    m.processMeta(job, false),
 	}
 }
 
@@ -240,7 +277,7 @@ func (m *processManager) job(ctx context.Context, call llm.ToolCall) (golem.Tool
 	}
 }
 
-func (m *processManager) start(command, workdir string, timeout time.Duration) (*processJob, error) {
+func (m *processManager) start(command, workdir string, timeout time.Duration, origin processOrigin) (*processJob, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -252,9 +289,19 @@ func (m *processManager) start(command, workdir string, timeout time.Duration) (
 	if err != nil {
 		return nil, err
 	}
-	commandProcess, err := sandboxedBashCommand(command, m.workspace.root, workdir, m.toolHome, m.sandbox)
-	if err != nil {
-		return nil, fmt.Errorf("prepare bash: %w", err)
+	var commandProcess *exec.Cmd
+	switch origin {
+	case processOriginUser:
+		commandProcess = exec.Command("bash", "-lc", command)
+		commandProcess.Dir = workdir
+		commandProcess.Env = os.Environ()
+	case processOriginAgent:
+		commandProcess, err = sandboxedBashCommand(command, m.workspace.root, workdir, m.toolHome, m.sandbox)
+		if err != nil {
+			return nil, fmt.Errorf("prepare bash: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("unknown process origin %d", origin)
 	}
 	configureProcessGroup(commandProcess)
 	log := &jobBuffer{limit: m.logLimit}
@@ -264,12 +311,13 @@ func (m *processManager) start(command, workdir string, timeout time.Duration) (
 		return nil, fmt.Errorf("start bash: %w", err)
 	}
 	job := &processJob{
-		id:        id,
-		cmd:       commandProcess,
-		log:       log,
-		done:      make(chan struct{}),
-		status:    jobRunning,
-		startedAt: time.Now().UTC(),
+		id:            id,
+		cmd:           commandProcess,
+		log:           log,
+		done:          make(chan struct{}),
+		status:        jobRunning,
+		startedAt:     time.Now().UTC(),
+		userInitiated: origin == processOriginUser,
 	}
 	m.mu.Lock()
 	if m.closed {
@@ -474,6 +522,7 @@ func (m *processManager) processMeta(job *processJob, managed bool) processResul
 		Status:         job.status,
 		ExitCode:       job.exitCode,
 		DurationMillis: jobDuration(job.startedAt, job.finishedAt).Milliseconds(),
+		UserInitiated:  job.userInitiated,
 	}
 	if managed {
 		meta.JobID = job.id

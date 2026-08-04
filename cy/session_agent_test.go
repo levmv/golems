@@ -4,15 +4,115 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/levmv/golems/cy/internal/session"
 	"github.com/levmv/golems/cy/internal/state"
+	toolruntime "github.com/levmv/golems/cy/internal/tools"
 	"github.com/levmv/golems/pkg/golem"
 	"github.com/levmv/golems/pkg/hackernews"
+	"github.com/levmv/golems/pkg/llm"
 	"github.com/levmv/golems/pkg/webfetch"
 )
+
+func TestSessionAgentRunShellRecordsModelVisibleTurn(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is unavailable")
+	}
+	home := t.TempDir()
+	root := t.TempDir()
+	journal, err := session.Create(session.CreateOptions{Home: home, Workspace: root, Model: "fake/model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &runTurnFakeModel{streams: [][]llm.StreamChunk{{{
+		Text: "ack", FinishReason: llm.FinishReasonStop,
+	}}}}
+	agent, err := newSessionAgent(
+		Config{Home: home, ModelURI: "fake/model", CapabilityProfile: "full", SandboxPolicy: sandboxOff},
+		model, root, nil, journal, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+
+	content, meta, err := agent.RunShell(context.Background(), "printf 'shell-context'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.UserInitiated || meta.Status != toolruntime.JobCompleted || !strings.Contains(content, "shell-context") {
+		t.Fatalf("shell result content=%q meta=%#v", content, meta)
+	}
+	history, err := agent.SessionHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("history = %#v", history)
+	}
+	if history[0].Role != llm.RoleUser || history[0].Content != "!printf 'shell-context'" {
+		t.Fatalf("shell user message = %#v", history[0])
+	}
+	if history[1].Role != llm.RoleAI || len(history[1].ToolCalls) != 1 || history[1].ToolCalls[0].Function.Name != "bash" {
+		t.Fatalf("shell tool call = %#v", history[1])
+	}
+	replayedMeta, ok := toolruntime.ProcessResultMetaFrom(history[2].Meta)
+	if history[2].Role != llm.RoleTool || !ok || !replayedMeta.UserInitiated || !strings.Contains(history[2].Content, "shell-context") {
+		t.Fatalf("shell tool result = %#v", history[2])
+	}
+	if _, err := agent.Stream(context.Background(), "use that output", nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) != 1 {
+		t.Fatalf("model requests = %d, want 1", len(model.requests))
+	}
+	request := model.requests[0]
+	if len(request.Messages) < 4 {
+		t.Fatalf("model context = %#v", request.Messages)
+	}
+	contextTail := request.Messages[len(request.Messages)-4:]
+	if contextTail[0].Role != llm.RoleUser || contextTail[0].Content != "!printf 'shell-context'" ||
+		contextTail[1].Role != llm.RoleAI || len(contextTail[1].ToolCalls) != 1 ||
+		contextTail[2].Role != llm.RoleTool || !strings.Contains(contextTail[2].Content, "shell-context") ||
+		contextTail[3].Role != llm.RoleUser || contextTail[3].Content != "use that output" {
+		t.Fatalf("model context tail = %#v", contextTail)
+	}
+}
+
+func TestSessionAgentRunShellIsAvailableOutsideFullProfile(t *testing.T) {
+	home := t.TempDir()
+	root := t.TempDir()
+	journal, err := session.Create(session.CreateOptions{Home: home, Workspace: root, Model: "fake/model"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := newSessionAgent(
+		Config{Home: home, ModelURI: "fake/model", CapabilityProfile: "edit", SandboxPolicy: sandboxOff},
+		&runTurnFakeModel{}, root, nil, journal, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer agent.Close()
+
+	content, meta, err := agent.RunShell(context.Background(), "printf user-shell")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !meta.UserInitiated || meta.Status != toolruntime.JobCompleted || !strings.Contains(content, "user-shell") {
+		t.Fatalf("shell result content=%q meta=%#v", content, meta)
+	}
+	history, err := agent.SessionHistory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history) != 3 || history[0].Content != "!printf user-shell" {
+		t.Fatalf("shell history = %#v", history)
+	}
+}
 
 func TestSessionAgentLoginAddsAndRemovesWebSearch(t *testing.T) {
 	t.Setenv("TAVILY_API_KEY", "")

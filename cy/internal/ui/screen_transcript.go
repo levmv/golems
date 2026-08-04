@@ -17,10 +17,13 @@ func (m *cyTUIModel) loadSessionHistory() {
 		m.addBlock(screenBlockError, "history: "+err.Error())
 		return
 	}
-	for _, message := range history {
+	for index, message := range history {
 		switch message.Role {
 		case llm.RoleUser:
 			m.rememberInput(message.Content)
+			if recordedShellTurn(history, index) {
+				continue
+			}
 			m.addBlock(screenBlockUser, message.Content)
 		case llm.RoleAI:
 			if strings.TrimSpace(message.Content) != "" {
@@ -33,10 +36,38 @@ func (m *cyTUIModel) loadSessionHistory() {
 			if change, ok := fileChangeMetaFrom(message.Meta); ok {
 				m.applyFileChangeResult(message.ToolCallID, change)
 			} else if result, ok := processResultMetaFrom(message.Meta); ok {
-				m.applyProcessResult(message.ToolCallID, result)
+				if result.UserInitiated {
+					m.applyLocalShellResult(message.ToolCallID, message.Content, result)
+				} else {
+					m.applyProcessResult(message.ToolCallID, result)
+				}
 			}
 		}
 	}
+}
+
+func recordedShellTurn(history []llm.Message, index int) bool {
+	if index < 0 || index+2 >= len(history) {
+		return false
+	}
+	command, shell := shellEscapeCommand(history[index].Content)
+	assistant := history[index+1]
+	result := history[index+2]
+	if !shell || command == "" || assistant.Role != llm.RoleAI || len(assistant.ToolCalls) != 1 || result.Role != llm.RoleTool {
+		return false
+	}
+	call := assistant.ToolCalls[0]
+	if call.Function.Name != "bash" || result.ToolCallID != call.ID {
+		return false
+	}
+	meta, ok := processResultMetaFrom(result.Meta)
+	if !ok || !meta.UserInitiated {
+		return false
+	}
+	var args struct {
+		Command string `json:"command"`
+	}
+	return decodeToolDisplayArgs(call.Function.Arguments, &args) && strings.TrimSpace(args.Command) == command
 }
 
 func (m *cyTUIModel) rememberInput(input string) {

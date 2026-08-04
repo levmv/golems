@@ -3,7 +3,10 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -25,6 +28,68 @@ func TestBashReportsExitAndUsesIsolatedEnvironment(t *testing.T) {
 	}
 	if !strings.Contains(result, "HOME="+manager.toolHome) {
 		t.Fatalf("bash HOME is not isolated: %q", result)
+	}
+}
+
+func TestProcessManagerRunShellInheritsAmbientEnvironment(t *testing.T) {
+	manager := processManagerForTest(t)
+	manager.sandbox = sandboxRequire
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(outside, []byte("ambient-shell"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CY_USER_SHELL_OUTSIDE", outside)
+	result, err := manager.RunShell(context.Background(), `cat "$CY_USER_SHELL_OUTSIDE"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := ProcessResultMetaFrom(result.Meta)
+	if !ok || meta.Status != jobCompleted || meta.ExitCode == nil || *meta.ExitCode != 0 || meta.JobID != "" || !meta.UserInitiated {
+		t.Fatalf("process meta = %#v", result.Meta)
+	}
+	if !strings.Contains(result.Content, "ambient-shell") {
+		t.Fatalf("shell result = %q", result.Content)
+	}
+}
+
+func TestProcessManagerRunShellCancellationCleansUpProcess(t *testing.T) {
+	manager := processManagerForTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.RunShell(ctx, "sleep 30")
+		done <- err
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		manager.mu.Lock()
+		jobCount := len(manager.jobs)
+		manager.mu.Unlock()
+		if jobCount == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("user shell did not start")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("RunShell error = %v, want context cancellation", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled user shell did not stop")
+	}
+	manager.mu.Lock()
+	remaining := len(manager.jobs)
+	manager.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("cancelled user shell left %d managed jobs", remaining)
 	}
 }
 

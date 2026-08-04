@@ -17,6 +17,7 @@ type ProcessResultMeta struct {
 	OutputBytes    int64  `json:"output_bytes"`
 	DiscardedBytes int64  `json:"discarded_bytes,omitempty"`
 	FailureTail    string `json:"failure_tail,omitempty"`
+	UserInitiated  bool   `json:"user_initiated,omitempty"`
 }
 
 type processResultMeta = ProcessResultMeta

@@ -46,6 +46,14 @@ Use `--` when a prompt begins with `resume`:
 cy -- resume the previous discussion
 ```
 
+In the interactive UI, `!<command>` runs Bash directly and adds its output to
+the session context:
+
+```text
+!git status --short
+!go test ./cy/...
+```
+
 ### Models and credentials
 
 Use `/login` and `/logout` in the interactive UI to manage credentials. Use
@@ -117,6 +125,9 @@ page fetching, and optional web search.
 | `edit` | Read/list/write files and available web tools; no Bash |
 | `read-only` | Read/search/list files and available web tools; no writes or Bash |
 
+Profiles govern model capabilities; explicit `!` commands remain available to
+the user.
+
 File tools stay beneath the workspace root and reject escapes through absolute
 paths, `..`, or symlinks. Web fetching rejects credentials in URLs and
 loopback, private, and link-local destinations. Fetched content is bounded and
@@ -134,10 +145,12 @@ compacted automatically when needed; `/context` shows the current budget and
 
 ## Security
 
-On Linux, `CY_SANDBOX=auto` attempts to run Bash under Landlock. `require`
-fails startup when Landlock is unavailable; `off` uses the ambient user
-permissions. Tool processes receive a scrubbed environment and do not inherit
-provider credentials.
+On Linux, `CY_SANDBOX=auto` attempts to run model-requested Bash under Landlock.
+`require` fails startup when Landlock is unavailable; `off` uses the ambient
+user permissions. Model tool processes receive a scrubbed environment and do
+not inherit provider credentials. Explicit `!` commands are user-authorized,
+run outside that sandbox with the ambient environment, and may expose their
+output to the model through the saved session context.
 
 Landlock restricts filesystem access, not network access or the semantic
 effects of commands. The interactive startup line reports the effective

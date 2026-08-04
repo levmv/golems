@@ -134,6 +134,7 @@ func tuiHelpText() string {
 	for _, command := range tuiCommands {
 		fmt.Fprintf(&help, "  %-*s  %s\n", commandWidth, command.usage, command.description)
 	}
+	help.WriteString("\nShell\n  !<command>  run Bash with your permissions and add its output to the session\n              each command starts in the workspace root\n")
 
 	shortcuts := []struct {
 		keys        string

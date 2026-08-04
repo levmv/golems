@@ -313,14 +313,17 @@ func TestConsolePrintsStructuredFileDiff(t *testing.T) {
 }
 
 type runTurnFakeModel struct {
-	streams [][]llm.StreamChunk
+	streams  [][]llm.StreamChunk
+	requests []llm.Request
 }
 
 func (m *runTurnFakeModel) Chat(context.Context, llm.Request) (*llm.Response, error) {
 	return nil, nil
 }
 
-func (m *runTurnFakeModel) Stream(context.Context, llm.Request) (llm.Stream, error) {
+func (m *runTurnFakeModel) Stream(_ context.Context, request llm.Request) (llm.Stream, error) {
+	request.Messages = llm.CloneMessages(request.Messages)
+	m.requests = append(m.requests, request)
 	if len(m.streams) == 0 {
 		return &runTurnFakeStream{}, nil
 	}

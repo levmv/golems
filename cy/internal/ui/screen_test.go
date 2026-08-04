@@ -1027,6 +1027,136 @@ func TestTUISlashCommandWhileWorkingIsNotQueued(t *testing.T) {
 	}
 }
 
+func TestTUIShellEscapeRunsWithoutModelTurnAndRendersOutput(t *testing.T) {
+	agent := &shellScreenAgent{}
+	model := newCyTUIModel(context.Background(), agent, Config{CapabilityProfile: "full"}, ".", nil)
+	model.input.SetValue("!printf 'hello'")
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(cyTUIModel)
+	if cmd == nil || got.maintenance != "running shell command" {
+		t.Fatalf("shell did not start: cmd=%v maintenance=%q", cmd, got.maintenance)
+	}
+	if len(got.blocks) == 0 || got.blocks[len(got.blocks)-1].kind != screenBlockTool || got.blocks[len(got.blocks)-1].text != "$ printf 'hello'" {
+		t.Fatalf("pending shell block = %#v", got.blocks)
+	}
+	for _, block := range got.blocks {
+		if block.kind == screenBlockUser {
+			t.Fatalf("shell escape rendered as a model prompt: %#v", block)
+		}
+	}
+
+	message := runShellCmd(context.Background(), agent, "printf 'hello'")()
+	updated, _ = got.Update(message)
+	got = updated.(cyTUIModel)
+	if agent.command != "printf 'hello'" || got.maintenance != "" {
+		t.Fatalf("shell completion state: command=%q maintenance=%q", agent.command, got.maintenance)
+	}
+	block := got.blocks[len(got.blocks)-1]
+	if block.processResult == nil || !block.userInitiated || block.processOutput != "hello" {
+		t.Fatalf("completed shell block = %#v", block)
+	}
+	if rendered := strings.Join(got.renderTranscriptLines(), "\n"); !strings.Contains(rendered, "hello") || strings.Contains(rendered, "› !printf") {
+		t.Fatalf("shell transcript = %q", rendered)
+	}
+}
+
+func TestTUIFailedShellOutputIsRenderedOnce(t *testing.T) {
+	exitCode := 1
+	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
+	model.resize(120, 30)
+	block := screenBlock{
+		kind:          screenBlockTool,
+		text:          "$ failing-command",
+		processOutput: "unique shell failure",
+		userInitiated: true,
+		processResult: &processResultMeta{
+			Type:        processResultMetaType,
+			Status:      jobFailed,
+			ExitCode:    &exitCode,
+			FailureTail: "unique shell failure",
+		},
+	}
+
+	rendered := strings.Join(model.renderBlockLines(block, 0, false), "\n")
+	if count := strings.Count(rendered, "unique shell failure"); count != 1 {
+		t.Fatalf("failure output appeared %d times: %q", count, rendered)
+	}
+}
+
+func TestTUIShellEscapeIsAvailableOutsideFullProfile(t *testing.T) {
+	agent := &shellScreenAgent{}
+	model := newCyTUIModel(context.Background(), agent, Config{CapabilityProfile: "edit"}, ".", nil)
+	model.input.SetValue("!git status")
+
+	updated, cmd := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(cyTUIModel)
+	if cmd == nil || got.maintenance != "running shell command" {
+		t.Fatalf("user shell did not start in edit profile: cmd=%v maintenance=%q", cmd, got.maintenance)
+	}
+}
+
+func TestTUIRestoresShellEscapeAsOneToolBlock(t *testing.T) {
+	zero := 0
+	call := llm.ToolCall{
+		ID:   "shell-call",
+		Type: string(llm.ToolTypeFunction),
+		Function: llm.ToolFunction{
+			Name:      "bash",
+			Arguments: `{"command":"printf hello"}`,
+		},
+	}
+	agent := historyTestAgent{history: []llm.Message{
+		{Role: llm.RoleUser, Content: "!printf hello"},
+		{Role: llm.RoleAI, ToolCalls: []llm.ToolCall{call}},
+		{Role: llm.RoleTool, ToolCallID: call.ID, Content: "status: completed\nexit_code: 0\n\nhello\n", Meta: processResultMeta{
+			Type: processResultMetaType, Status: jobCompleted, ExitCode: &zero, UserInitiated: true,
+		}},
+	}}
+	model := newCyTUIModel(context.Background(), agent, Config{}, ".", nil)
+
+	userBlocks := 0
+	var shell *screenBlock
+	for index := range model.blocks {
+		block := &model.blocks[index]
+		if block.kind == screenBlockUser {
+			userBlocks++
+		}
+		if block.kind == screenBlockTool && block.userInitiated {
+			shell = block
+		}
+	}
+	if userBlocks != 0 || shell == nil || shell.text != "$ printf hello" || shell.processOutput != "hello" {
+		t.Fatalf("restored blocks = %#v", model.blocks)
+	}
+	if len(model.history) != 1 || model.history[0] != "!printf hello" {
+		t.Fatalf("restored input history = %#v", model.history)
+	}
+}
+
+func TestRecordedShellTurnRequiresUserInitiatedMetadata(t *testing.T) {
+	zero := 0
+	call := llm.ToolCall{
+		ID:   "model-call",
+		Type: string(llm.ToolTypeFunction),
+		Function: llm.ToolFunction{
+			Name:      "bash",
+			Arguments: `{"command":"printf hello"}`,
+		},
+	}
+	history := []llm.Message{
+		{Role: llm.RoleUser, Content: "!printf hello"},
+		{Role: llm.RoleAI, ToolCalls: []llm.ToolCall{call}},
+		{Role: llm.RoleTool, ToolCallID: call.ID, Meta: processResultMeta{
+			Type: processResultMetaType, Status: jobCompleted, ExitCode: &zero,
+		}},
+	}
+
+	if recordedShellTurn(history, 0) {
+		t.Fatal("ordinary model tool turn was mistaken for a user shell command")
+	}
+}
+
 func TestTUICtrlCCancelsWorkingTurnWithoutExiting(t *testing.T) {
 	model := newCyTUIModel(context.Background(), screenAgentStub{}, Config{}, ".", nil)
 	model.working = true
@@ -1194,8 +1324,24 @@ func (screenAgentStub) CurrentReasoningEffort() string              { return "" 
 func (screenAgentStub) ReasoningEfforts(string) []string            { return []string{""} }
 func (screenAgentStub) CurrentProfile() string                      { return "" }
 func (screenAgentStub) SwitchProfile(string) error                  { return nil }
+func (screenAgentStub) RunShell(context.Context, string) (string, processResultMeta, error) {
+	return "", processResultMeta{}, nil
+}
 func (screenAgentStub) ProcessStatus(string) (processResultMeta, bool) {
 	return processResultMeta{}, false
+}
+
+type shellScreenAgent struct {
+	screenAgentStub
+	command string
+}
+
+func (a *shellScreenAgent) RunShell(_ context.Context, command string) (string, processResultMeta, error) {
+	a.command = command
+	zero := 0
+	return "status: completed\nexit_code: 0\n\nhello\n", processResultMeta{
+		Type: processResultMetaType, Status: jobCompleted, ExitCode: &zero, OutputBytes: 5, UserInitiated: true,
+	}, nil
 }
 
 type repairedScreenAgent struct{ screenAgentStub }
@@ -1334,7 +1480,7 @@ func TestTUITranscriptSnapshot(t *testing.T) {
 		},
 	}
 	want := strings.Join([]string{
-		"  Cy  Type / for commands.",
+		"  Cy  Type / for commands, ! for shell.",
 		"  ",
 		"  model: openrouter/moonshotai/kimi-k3",
 		"  ",

@@ -322,6 +322,13 @@ func (m cyTUIModel) submitInput() (tea.Model, tea.Cmd) {
 		m.refreshScreen()
 		return m, nil
 	}
+	if m.working && strings.HasPrefix(strings.TrimSpace(input), "!") {
+		m.addBlock(screenBlockError, "shell escapes are unavailable while Cy is working; wait for the turn to finish or cancel it")
+		m.input.SetValue(input)
+		m.input.CursorEnd()
+		m.refreshScreen()
+		return m, nil
+	}
 	m.input.Reset()
 	m.configureCommandSuggestions()
 	if input == "" {
@@ -351,11 +358,54 @@ func (m cyTUIModel) submitInput() (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	}
+	if command, shell := shellEscapeCommand(input); shell {
+		if command == "" {
+			m.addBlock(screenBlockError, "shell command is required after !")
+			m.refreshScreen()
+			return m, nil
+		}
+		cmd := m.startLocalShell(command)
+		m.refreshScreen()
+		return m, cmd
+	}
 
 	m.addBlock(screenBlockUser, input)
 	cmd := m.startTurn(input)
 	m.refreshScreen()
 	return m, cmd
+}
+
+func shellEscapeCommand(input string) (string, bool) {
+	input = strings.TrimSpace(input)
+	if !strings.HasPrefix(input, "!") {
+		return "", false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(input, "!")), true
+}
+
+func shellCommandDisplay(command string) string {
+	return "$ " + compactCommand(command, 180)
+}
+
+func (m *cyTUIModel) startLocalShell(command string) tea.Cmd {
+	opCtx, cancel := context.WithCancel(m.ctx)
+	m.maintenance = "running shell command"
+	m.maintenanceCancel = cancel
+	m.appendBlock(screenBlock{
+		kind:          screenBlockTool,
+		text:          sanitizeTerminalText(shellCommandDisplay(command)),
+		toolName:      "bash",
+		toolStartedAt: time.Now(),
+		userInitiated: true,
+	})
+	return tea.Batch(m.spinner.Tick, runShellCmd(opCtx, m.agent, command))
+}
+
+func runShellCmd(ctx context.Context, agent screenAgent, command string) tea.Cmd {
+	return func() tea.Msg {
+		content, result, err := agent.RunShell(ctx, command)
+		return shellDoneMsg{content: content, result: result, err: err}
+	}
 }
 
 func (m *cyTUIModel) startTurn(input string) tea.Cmd {

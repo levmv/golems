@@ -97,5 +97,5 @@ func bashQuote(value string) string {
 }
 
 func (s SecurityState) Compact() string {
-	return fmt.Sprintf("sandbox: %s · network: open", s.Sandbox)
+	return fmt.Sprintf("agent sandbox: %s · network: open", s.Sandbox)
 }
